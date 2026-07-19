@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Terminal, 
   Layers, 
@@ -13,6 +13,7 @@ import {
   AlertCircle, 
   FileText, 
   ChevronRight, 
+  ChevronLeft,
   ChevronDown, 
   Sliders, 
   MessageSquare,
@@ -21,7 +22,12 @@ import {
   SlidersHorizontal,
   Info,
   ShieldAlert,
-  Cpu
+  Cpu,
+  Search,
+  X,
+  Activity,
+  Sparkles,
+  HardDrive
 } from 'lucide-react';
 import TopologyGraph from './components/TopologyGraph';
 import MermaidChart from './components/MermaidChart';
@@ -116,6 +122,11 @@ export function App() {
   const [localUrl, setLocalUrl] = useState<string>(() => localStorage.getItem('kalam_local_url') || 'http://localhost:11434/v1');
   const [localModel, setLocalModel] = useState<string>(() => localStorage.getItem('kalam_local_model') || 'qwen2.5-coder:7b');
   const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  const [globalSearch, setGlobalSearch] = useState<string>('');
+  const [dockerFilter, setDockerFilter] = useState<'all' | 'running' | 'stopped'>('all');
+  const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services'>('all');
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
   const [status, setStatus] = useState<SystemStatus>({
     docker: { installed: false, version: '', running: false },
     kubernetes: { installed: false, version: '', running: false, context: '' }
@@ -510,10 +521,10 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
   useEffect(() => {
     fetchClusterState();
-    // Poll every 10 seconds for live updates
+    if (!autoRefresh) return;
     const interval = setInterval(fetchClusterState, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [autoRefresh]);
 
   // Save API Key
   const handleSaveApiKey = (key: string) => {
@@ -768,562 +779,819 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
 
 
+  // Memoized Search & Filter Functions
+  const filteredDockerContainers = useMemo(() => {
+    return dockerContainers.filter(c => {
+      const matchesSearch = !globalSearch || 
+        c.name.toLowerCase().includes(globalSearch.toLowerCase()) || 
+        c.image.toLowerCase().includes(globalSearch.toLowerCase()) ||
+        c.id.toLowerCase().includes(globalSearch.toLowerCase());
+      
+      const matchesFilter = dockerFilter === 'all' || 
+        (dockerFilter === 'running' && c.state === 'running') ||
+        (dockerFilter === 'stopped' && c.state !== 'running');
+
+      return matchesSearch && matchesFilter;
+    });
+  }, [dockerContainers, globalSearch, dockerFilter]);
+
+  const filteredK8sPods = useMemo(() => {
+    return k8sResources.pods.filter(p => {
+      return !globalSearch || 
+        p.name.toLowerCase().includes(globalSearch.toLowerCase()) ||
+        p.namespace.toLowerCase().includes(globalSearch.toLowerCase()) ||
+        (p.node && p.node.toLowerCase().includes(globalSearch.toLowerCase()));
+    });
+  }, [k8sResources.pods, globalSearch]);
+
+  const filteredK8sNodes = useMemo(() => {
+    return k8sResources.nodes.filter(n => {
+      return !globalSearch || 
+        n.name.toLowerCase().includes(globalSearch.toLowerCase()) ||
+        (n.role && n.role.toLowerCase().includes(globalSearch.toLowerCase()));
+    });
+  }, [k8sResources.nodes, globalSearch]);
+
+  const filteredK8sDeployments = useMemo(() => {
+    return k8sResources.deployments.filter(d => {
+      return !globalSearch || 
+        d.name.toLowerCase().includes(globalSearch.toLowerCase()) ||
+        d.namespace.toLowerCase().includes(globalSearch.toLowerCase());
+    });
+  }, [k8sResources.deployments, globalSearch]);
+
+  const filteredK8sServices = useMemo(() => {
+    return k8sResources.services.filter(s => {
+      return !globalSearch || 
+        s.name.toLowerCase().includes(globalSearch.toLowerCase()) ||
+        s.namespace.toLowerCase().includes(globalSearch.toLowerCase()) ||
+        (s.type && s.type.toLowerCase().includes(globalSearch.toLowerCase()));
+    });
+  }, [k8sResources.services, globalSearch]);
+
   return (
-    <div className="app-container">
-      {/* Header */}
-      <header className="app-header">
-        <div className="brand-section">
-          <div className="brand-logo">K</div>
-          <div className="brand-title">
-            <h1>Kalam</h1>
-            <span>Agentic cluster viewer</span>
-          </div>
-        </div>
-
-        {/* Global Resource Status Badges */}
-        <div className="status-badges">
-          <div className={`status-badge ${status.docker.running ? 'active' : 'inactive'}`}>
-            <span className="status-dot"></span>
-            <span>Docker</span>
-          </div>
-          <div className={`status-badge ${status.kubernetes.running ? 'active' : 'inactive'}`}>
-            <span className="status-dot"></span>
-            <span>Kubernetes</span>
-          </div>
-        </div>
-
-        {/* API Key */}
-        <div className="header-actions">
-          <span className="badge neutral" style={{ fontSize: '12px' }}>
-            Agent: {provider === 'gemini' ? 'Gemini 3.5' : localModel}
-          </span>
+    <div className="app-shell">
+      {/* Enterprise Left Sidebar */}
+      <aside className={`app-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+        <div className="sidebar-header">
+          <a href="#" className="sidebar-brand" onClick={(e) => { e.preventDefault(); setActiveTab('dashboard'); }}>
+            <div className="brand-logo-icon">K</div>
+            <div className="brand-info">
+              <h1>Kalam</h1>
+              <span>Cluster Console</span>
+            </div>
+          </a>
           <button 
-            type="button"
-            className="icon-btn primary"
-            onClick={() => setSettingsModalOpen(true)}
-            title="Configure Agent Settings"
-            style={{ padding: '8px' }}
+            className="sidebar-toggle-btn"
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            title={sidebarCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
           >
-            <Sliders size={16} />
-          </button>
-
-          <button 
-            className="icon-btn success"
-            onClick={fetchClusterState} 
-            title="Refresh State"
-            disabled={loading}
-          >
-            <RefreshCw size={16} className={loading ? 'loader' : ''} />
+            {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           </button>
         </div>
-      </header>
 
-      {/* Tabs */}
-      <nav className="tabs-container">
-        <button 
-          className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
-          onClick={() => setActiveTab('dashboard')}
-        >
-          <Layers size={18} />
-          Dashboard
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'docker' ? 'active' : ''}`}
-          onClick={() => setActiveTab('docker')}
-          disabled={!status.docker.installed}
-        >
-          <Database size={18} />
-          Docker ({dockerContainers.length})
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'k8s' ? 'active' : ''}`}
-          onClick={() => setActiveTab('k8s')}
-          disabled={!status.kubernetes.installed}
-        >
-          <Server size={18} />
-          Kubernetes
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'chat' ? 'active' : ''}`}
-          onClick={() => setActiveTab('chat')}
-        >
-          <MessageSquare size={18} />
-          Agent Chat
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'security' ? 'active' : ''}`}
-          onClick={() => setActiveTab('security')}
-        >
-          <ShieldAlert size={18} />
-          Image Hardener
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'agents' ? 'active' : ''}`}
-          onClick={() => setActiveTab('agents')}
-        >
-          <Cpu size={18} />
-          Agent Teamwork
-        </button>
-      </nav>
-
-      {/* Tab Contents */}
-      <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-        {errorMsg && (
-          <div className="panel-card" style={{ borderLeft: '4px solid var(--status-error)' }}>
-            <div style={{ display: 'flex', gap: 12, alignItems: 'center', color: 'var(--status-error)' }}>
-              <AlertCircle size={20} />
-              <strong style={{ fontSize: '15px' }}>Cluster Detection Alert:</strong>
-            </div>
-            <p style={{ marginTop: '8px', color: 'var(--text-secondary)', fontSize: '14px' }}>{errorMsg}</p>
+        <nav className="sidebar-nav">
+          <div className="nav-group">
+            <span className="nav-group-label">Core Workspace</span>
+            <button 
+              className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
+              onClick={() => setActiveTab('dashboard')}
+            >
+              <span className="nav-item-icon"><Layers size={18} /></span>
+              <span className="nav-item-text">Dashboard</span>
+              <span className="nav-item-badge">Overview</span>
+            </button>
           </div>
-        )}
 
-        {/* DASHBOARD TAB */}
-        {activeTab === 'dashboard' && (
-          <div className="tab-panel">
-            {/* Stats Overview */}
-            <div className="stats-container">
-              <div className="stat-item">
-                <span className="stat-label">Docker Containers</span>
-                <span className={`stat-value ${status.docker.running ? 'ok' : 'err'}`}>
-                  {status.docker.running ? dockerContainers.length : 'Offline'}
-                </span>
+          <div className="nav-group">
+            <span className="nav-group-label">Infrastructure</span>
+            <button 
+              className={`nav-item ${activeTab === 'docker' ? 'active' : ''}`}
+              onClick={() => setActiveTab('docker')}
+              disabled={!status.docker.installed}
+            >
+              <span className="nav-item-icon"><Database size={18} /></span>
+              <span className="nav-item-text">Docker Engine</span>
+              <span className="nav-item-badge">{dockerContainers.length}</span>
+            </button>
+            <button 
+              className={`nav-item ${activeTab === 'k8s' ? 'active' : ''}`}
+              onClick={() => setActiveTab('k8s')}
+              disabled={!status.kubernetes.installed}
+            >
+              <span className="nav-item-icon"><Server size={18} /></span>
+              <span className="nav-item-text">Kubernetes</span>
+              <span className="nav-item-badge">{k8sResources.pods.length}</span>
+            </button>
+          </div>
+
+          <div className="nav-group">
+            <span className="nav-group-label">AI Intelligence</span>
+            <button 
+              className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`}
+              onClick={() => setActiveTab('chat')}
+            >
+              <span className="nav-item-icon"><MessageSquare size={18} /></span>
+              <span className="nav-item-text">Agent Chat</span>
+              <span className="nav-item-badge">{provider === 'gemini' ? 'Gemini' : 'Local'}</span>
+            </button>
+            <button 
+              className={`nav-item ${activeTab === 'agents' ? 'active' : ''}`}
+              onClick={() => setActiveTab('agents')}
+            >
+              <span className="nav-item-icon"><Cpu size={18} /></span>
+              <span className="nav-item-text">Agent Teamwork</span>
+              <span className="nav-item-badge">Swarm</span>
+            </button>
+          </div>
+
+          <div className="nav-group">
+            <span className="nav-group-label">Security & Audit</span>
+            <button 
+              className={`nav-item ${activeTab === 'security' ? 'active' : ''}`}
+              onClick={() => setActiveTab('security')}
+            >
+              <span className="nav-item-icon"><ShieldAlert size={18} /></span>
+              <span className="nav-item-text">Image Hardener</span>
+              <span className="nav-item-badge">CVE</span>
+            </button>
+          </div>
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="status-summary-box">
+            <div className="status-indicator-row">
+              <div className={`status-dot-pill ${status.docker.running ? 'online' : 'offline'}`}>
+                <span className="dot"></span>
+                <span>Docker</span>
               </div>
-              <div className="stat-item">
-                <span className="stat-label">K8s Cluster Nodes</span>
-                <span className={`stat-value ${status.kubernetes.running ? 'ok' : 'err'}`}>
-                  {status.kubernetes.running ? k8sResources.nodes.length : 'Offline'}
-                </span>
+              <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                {status.docker.running ? 'Active' : 'Down'}
+              </span>
+            </div>
+            <div className="status-indicator-row">
+              <div className={`status-dot-pill ${status.kubernetes.running ? 'online' : 'offline'}`}>
+                <span className="dot"></span>
+                <span>Kubernetes</span>
               </div>
-              <div className="stat-item">
-                <span className="stat-label">Kubernetes Pods</span>
-                <span className={`stat-value ${status.kubernetes.running ? 'ok' : 'err'}`}>
-                  {status.kubernetes.running ? k8sResources.pods.length : 'Offline'}
-                </span>
-              </div>
-              <div className="stat-item">
-                <span className="stat-label">Active Context</span>
-                <span className="stat-value" style={{ fontSize: '16px', color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {status.kubernetes.running ? status.kubernetes.context : 'None'}
-                </span>
-              </div>
+              <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                {status.kubernetes.running ? 'Active' : 'Down'}
+              </span>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Area */}
+      <div className="app-main">
+        {/* Top Command Bar */}
+        <header className="app-topbar">
+          <div className="topbar-left">
+            <div className="page-title-badge">
+              <h2>
+                {activeTab === 'dashboard' && '📌 Dashboard & Topology Overview'}
+                {activeTab === 'docker' && '🐳 Docker Container Operations'}
+                {activeTab === 'k8s' && '☸️ Kubernetes Cluster Management'}
+                {activeTab === 'chat' && '🤖 Kalam Agentic DevOps Assistant'}
+                {activeTab === 'security' && '🛡️ Container Security & CVE Patching'}
+                {activeTab === 'agents' && '🐝 Multi-Agent Swarm Visualizer'}
+              </h2>
             </div>
 
-            {/* Main Diagram Panel */}
-            <div className="dashboard-grid">
-              <div className="panel-card" style={{ height: 'fit-content' }}>
-                <div className="panel-card-title">
-                  <h2>💻 Cluster Topology Map</h2>
-                  <span className="badge neutral">Auto Generated</span>
+            {/* Global Search Bar */}
+            <div className="global-search-container">
+              <Search size={15} style={{ color: 'var(--text-muted)' }} />
+              <input 
+                type="text"
+                className="global-search-input"
+                placeholder="Search containers, pods, nodes..."
+                value={globalSearch}
+                onChange={(e) => setGlobalSearch(e.target.value)}
+              />
+              {globalSearch ? (
+                <X size={14} style={{ cursor: 'pointer', color: 'var(--text-muted)' }} onClick={() => setGlobalSearch('')} />
+              ) : (
+                <span className="search-shortcut-pill">Ctrl K</span>
+              )}
+            </div>
+          </div>
+
+          <div className="topbar-right">
+            {/* Live KPI Pills */}
+            <div className="cluster-kpi-pill" title="Containers">
+              <Database size={13} style={{ color: 'var(--accent-cyan)' }} />
+              <span>Containers: <strong>{dockerContainers.length}</strong></span>
+            </div>
+            <div className="cluster-kpi-pill" title="Pods">
+              <Server size={13} style={{ color: 'var(--accent-purple)' }} />
+              <span>Pods: <strong>{k8sResources.pods.length}</strong></span>
+            </div>
+
+            {/* Auto Refresh Toggle */}
+            <button 
+              className={`icon-btn ${autoRefresh ? 'success' : ''}`}
+              onClick={() => setAutoRefresh(!autoRefresh)}
+              title={autoRefresh ? "Auto-Refresh Enabled (Every 10s)" : "Auto-Refresh Paused"}
+              style={{ padding: '6px 10px', gap: '6px', fontSize: '12px' }}
+            >
+              <Activity size={13} className={autoRefresh ? 'loader' : ''} />
+              <span style={{ fontSize: '12px' }}>{autoRefresh ? 'Live Sync' : 'Paused'}</span>
+            </button>
+
+            {/* Manual Refresh */}
+            <button 
+              className="icon-btn success"
+              onClick={fetchClusterState} 
+              title="Refresh State"
+              disabled={loading}
+            >
+              <RefreshCw size={15} className={loading ? 'loader' : ''} />
+            </button>
+
+            {/* Provider Pill */}
+            <span className="badge neutral" style={{ fontSize: '12px', padding: '6px 10px' }}>
+              Agent: {provider === 'gemini' ? 'Gemini 3.5' : localModel}
+            </span>
+
+            {/* Settings Trigger */}
+            <button 
+              type="button"
+              className="icon-btn primary"
+              onClick={() => setSettingsModalOpen(true)}
+              title="Configure Agent Settings"
+              style={{ padding: '8px' }}
+            >
+              <Sliders size={16} />
+            </button>
+          </div>
+        </header>
+
+        {/* Viewport Content */}
+        <div className={`app-viewport ${activeTab === 'chat' ? 'full-bleed' : ''}`}>
+          {errorMsg && (
+            <div className="panel-card" style={{ borderLeft: '4px solid var(--status-error)' }}>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', color: 'var(--status-error)' }}>
+                <AlertCircle size={20} />
+                <strong style={{ fontSize: '15px' }}>Cluster Detection Alert:</strong>
+              </div>
+              <p style={{ marginTop: '8px', color: 'var(--text-secondary)', fontSize: '14px' }}>{errorMsg}</p>
+            </div>
+          )}
+
+          {/* DASHBOARD TAB */}
+          {activeTab === 'dashboard' && (
+            <div className="tab-panel" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              {/* 4 Sleek Production KPI Cards */}
+              <div className="stats-grid-row">
+                <div className="kpi-card purple">
+                  <div className="kpi-content">
+                    <span className="kpi-label">Docker Containers</span>
+                    <div className="kpi-value-row">
+                      <span className="kpi-number">{status.docker.running ? dockerContainers.length : 0}</span>
+                      <span className="kpi-subtext">Total active</span>
+                    </div>
+                  </div>
+                  <div className="kpi-icon-box">
+                    <Database size={22} />
+                  </div>
                 </div>
-                <div style={{ padding: '8px' }}>
-                  {loading ? (
-                    <div className="loader"></div>
-                  ) : dockerContainers.length > 0 || k8sResources.pods.length > 0 ? (
-                    <TopologyGraph containers={dockerContainers} k8sResources={k8sResources} />
-                  ) : (
-                    <div className="text-secondary" style={{ fontStyle: 'italic', padding: '16px' }}>
-                      No active containers or nodes detected to generate visual map.
+
+                <div className="kpi-card cyan">
+                  <div className="kpi-content">
+                    <span className="kpi-label">K8s Cluster Nodes</span>
+                    <div className="kpi-value-row">
+                      <span className="kpi-number">{status.kubernetes.running ? k8sResources.nodes.length : 0}</span>
+                      <span className="kpi-subtext">Nodes detected</span>
+                    </div>
+                  </div>
+                  <div className="kpi-icon-box">
+                    <Server size={22} />
+                  </div>
+                </div>
+
+                <div className="kpi-card emerald">
+                  <div className="kpi-content">
+                    <span className="kpi-label">Kubernetes Pods</span>
+                    <div className="kpi-value-row">
+                      <span className="kpi-number">{status.kubernetes.running ? k8sResources.pods.length : 0}</span>
+                      <span className="kpi-subtext">Active workloads</span>
+                    </div>
+                  </div>
+                  <div className="kpi-icon-box">
+                    <Layers size={22} />
+                  </div>
+                </div>
+
+                <div className="kpi-card blue">
+                  <div className="kpi-content">
+                    <span className="kpi-label">Active Kube Context</span>
+                    <div className="kpi-value-row">
+                      <span className="kpi-number" style={{ fontSize: '16px', fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                        {status.kubernetes.running ? status.kubernetes.context : 'None'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="kpi-icon-box">
+                    <HardDrive size={22} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Main Dashboard Grid */}
+              <div className="dashboard-main-grid">
+                <div className="panel-card" style={{ height: 'fit-content' }}>
+                  <div className="panel-card-title">
+                    <h2>💻 Cluster Topology Map</h2>
+                    <span className="badge neutral">Interactive Visualizer</span>
+                  </div>
+                  <div className="topology-visualizer-container">
+                    {loading ? (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '400px', gap: '12px', color: 'var(--text-secondary)' }}>
+                        <div className="loader"></div>
+                        <span>Scanning cluster topology graph...</span>
+                      </div>
+                    ) : dockerContainers.length > 0 || k8sResources.pods.length > 0 ? (
+                      <TopologyGraph containers={dockerContainers} k8sResources={k8sResources} />
+                    ) : (
+                      <div className="text-secondary" style={{ fontStyle: 'italic', padding: '32px', textAlign: 'center' }}>
+                        No active containers or nodes detected to generate visual map.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="context-panel" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  <div className="panel-card">
+                    <div className="panel-card-title">
+                      <h2>🔍 Host & Daemon Health</h2>
+                    </div>
+                    <div className="context-card">
+                      <div className="context-row">
+                        <span className="context-key">Docker Daemon:</span>
+                        <span className="context-val">{status.docker.running ? '🟢 Active' : '🔴 Down'}</span>
+                      </div>
+                      <div className="context-row">
+                        <span className="context-key">Docker Version:</span>
+                        <span className="context-val" style={{ fontSize: '11px' }}>{status.docker.version || 'N/A'}</span>
+                      </div>
+                      <div className="context-row" style={{ marginTop: '8px', borderTop: '1px solid var(--border-color)', paddingTop: '8px' }}>
+                        <span className="context-key">Kubernetes:</span>
+                        <span className="context-val">{status.kubernetes.running ? '🟢 Active' : '🔴 Down'}</span>
+                      </div>
+                      <div className="context-row">
+                        <span className="context-key">Kube Client:</span>
+                        <span className="context-val" style={{ fontSize: '11px' }}>{status.kubernetes.version.split(' ')[0] || 'N/A'}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="panel-card">
+                    <div className="panel-card-title">
+                      <h2>🤖 Kalam AI Assistant</h2>
+                    </div>
+                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.4' }}>
+                      Ask Kalam to inspect logs, troubleshoot CrashLoopBackOff pods, scale deployments, or harden Docker images.
+                    </p>
+                    <button 
+                      className="btn primary" 
+                      onClick={() => setActiveTab('chat')}
+                      style={{ width: '100%', marginTop: '6px' }}
+                    >
+                      <Sparkles size={16} />
+                      <span>Launch AI Console</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* AGENTS TEAMWORK TAB */}
+          {activeTab === 'agents' && (
+            <div className="tab-panel">
+              <AgentTeamwork
+                containers={dockerContainers}
+                k8sResources={k8sResources}
+                localUrl={localUrl}
+                localModel={localModel}
+                apiKey={apiKey}
+                provider={provider}
+              />
+            </div>
+          )}
+
+          {/* DOCKER TAB */}
+          {activeTab === 'docker' && (
+            <div className="tab-panel">
+              <div className="panel-card">
+                <div className="panel-card-title">
+                  <h2>🐳 Docker Container Operations</h2>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div className="subnav-pills">
+                      <button 
+                        className={`subnav-pill-btn ${dockerFilter === 'all' ? 'active' : ''}`}
+                        onClick={() => setDockerFilter('all')}
+                      >
+                        All ({dockerContainers.length})
+                      </button>
+                      <button 
+                        className={`subnav-pill-btn ${dockerFilter === 'running' ? 'active' : ''}`}
+                        onClick={() => setDockerFilter('running')}
+                      >
+                        Running ({dockerContainers.filter(c => c.state === 'running').length})
+                      </button>
+                      <button 
+                        className={`subnav-pill-btn ${dockerFilter === 'stopped' ? 'active' : ''}`}
+                        onClick={() => setDockerFilter('stopped')}
+                      >
+                        Stopped ({dockerContainers.filter(c => c.state !== 'running').length})
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="table-wrapper">
+                  <table className="resource-table">
+                    <thead>
+                      <tr>
+                        <th>Container Name</th>
+                        <th>Container ID</th>
+                        <th>Image</th>
+                        <th>Status</th>
+                        <th>State</th>
+                        <th>Port Mappings</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredDockerContainers.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '32px' }}>
+                            {globalSearch ? `No containers matching "${globalSearch}"` : 'No Docker containers found on local daemon.'}
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredDockerContainers.map((c) => (
+                          <tr key={c.id}>
+                            <td><strong>{c.name}</strong></td>
+                            <td><span className="code-id">{c.id.slice(0, 12)}</span></td>
+                            <td><span className="code-tag">{c.image}</span></td>
+                            <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{c.status}</td>
+                            <td>
+                              <span className={`badge ${c.state}`}>
+                                {c.state}
+                              </span>
+                            </td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{c.ports || 'None'}</td>
+                            <td>
+                              <div className="action-btns">
+                                {c.state !== 'running' ? (
+                                  <button 
+                                    className="icon-btn success" 
+                                    title="Start Container"
+                                    onClick={() => triggerDockerAction('start', c.id)}
+                                  >
+                                    <Play size={14} />
+                                  </button>
+                                ) : (
+                                  <button 
+                                    className="icon-btn danger" 
+                                    title="Stop Container"
+                                    onClick={() => triggerDockerAction('stop', c.id)}
+                                  >
+                                    <Square size={14} />
+                                  </button>
+                                )}
+                                <button 
+                                  className="icon-btn primary" 
+                                  title="Restart Container"
+                                  onClick={() => triggerDockerAction('restart', c.id)}
+                                >
+                                  <RefreshCw size={14} />
+                                </button>
+                                <button 
+                                  className="icon-btn secondary" 
+                                  title="View Container Logs"
+                                  onClick={() => openLogsModal('docker', c.id, c.name)}
+                                >
+                                  <FileText size={14} />
+                                </button>
+                                <button 
+                                  className="icon-btn danger" 
+                                  title="Force Remove"
+                                  onClick={() => triggerDockerAction('remove', c.id)}
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* KUBERNETES TAB */}
+          {activeTab === 'k8s' && (
+            <div className="tab-panel" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              <div className="panel-card" style={{ paddingBottom: '12px' }}>
+                <div className="panel-card-title" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: 0 }}>
+                  <h2>☸️ Kubernetes Resource Manager</h2>
+                  <div className="subnav-pills">
+                    <button 
+                      className={`subnav-pill-btn ${k8sSubTab === 'all' ? 'active' : ''}`}
+                      onClick={() => setK8sSubTab('all')}
+                    >
+                      All Resources
+                    </button>
+                    <button 
+                      className={`subnav-pill-btn ${k8sSubTab === 'nodes' ? 'active' : ''}`}
+                      onClick={() => setK8sSubTab('nodes')}
+                    >
+                      Nodes ({k8sResources.nodes.length})
+                    </button>
+                    <button 
+                      className={`subnav-pill-btn ${k8sSubTab === 'pods' ? 'active' : ''}`}
+                      onClick={() => setK8sSubTab('pods')}
+                    >
+                      Pods ({k8sResources.pods.length})
+                    </button>
+                    <button 
+                      className={`subnav-pill-btn ${k8sSubTab === 'deployments' ? 'active' : ''}`}
+                      onClick={() => setK8sSubTab('deployments')}
+                    >
+                      Deployments ({k8sResources.deployments.length})
+                    </button>
+                    <button 
+                      className={`subnav-pill-btn ${k8sSubTab === 'services' ? 'active' : ''}`}
+                      onClick={() => setK8sSubTab('services')}
+                    >
+                      Services ({k8sResources.services.length})
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* NODES SECTION */}
+              {(k8sSubTab === 'all' || k8sSubTab === 'nodes') && (
+                <div className="k8s-section">
+                  <div 
+                    className="k8s-section-header"
+                    onClick={() => setExpandedK8s(prev => ({ ...prev, nodes: !prev.nodes }))}
+                  >
+                    <div className="k8s-section-title">
+                      {expandedK8s.nodes ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                      <span>💻 Nodes</span>
+                      <span className="k8s-section-count">{filteredK8sNodes.length}</span>
+                    </div>
+                  </div>
+                  {expandedK8s.nodes && (
+                    <div className="k8s-section-content">
+                      <div className="table-wrapper">
+                        <table className="resource-table">
+                          <thead>
+                            <tr>
+                              <th>Node Name</th>
+                              <th>Status</th>
+                              <th>Roles</th>
+                              <th>Kubelet Version</th>
+                              <th>OS Image</th>
+                              <th>Internal IP</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredK8sNodes.length === 0 ? (
+                              <tr>
+                                <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '24px' }}>
+                                  No nodes detected or matching search.
+                                </td>
+                              </tr>
+                            ) : (
+                              filteredK8sNodes.map((n, idx) => (
+                                <tr key={idx}>
+                                  <td><strong>{n.name}</strong></td>
+                                  <td><span className={`badge ${n.status.toLowerCase()}`}>{n.status}</span></td>
+                                  <td><span className="code-tag">{n.role || 'worker'}</span></td>
+                                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{n.version}</td>
+                                  <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{n.os}</td>
+                                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{n.ip}</td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   )}
                 </div>
-              </div>
-
-              <div className="context-panel">
-                <div className="panel-card">
-                  <div className="panel-card-title">
-                    <h2>🔍 Host Context</h2>
-                  </div>
-                  <div className="context-card">
-                    <div className="context-row">
-                      <span className="context-key">Docker Daemon:</span>
-                      <span className="context-val">{status.docker.running ? '🟢 Active' : '🔴 Down'}</span>
-                    </div>
-                    <div className="context-row">
-                      <span className="context-key">Docker Version:</span>
-                      <span className="context-val" style={{ fontSize: '11px' }}>{status.docker.version || 'N/A'}</span>
-                    </div>
-                    <div className="context-row" style={{ marginTop: '8px', borderTop: '1px solid var(--border-color)', paddingTop: '8px' }}>
-                      <span className="context-key">Kubernetes:</span>
-                      <span className="context-val">{status.kubernetes.running ? '🟢 Active' : '🔴 Down'}</span>
-                    </div>
-                    <div className="context-row">
-                      <span className="context-key">Kube Client:</span>
-                      <span className="context-val" style={{ fontSize: '11px' }}>{status.kubernetes.version.split(' ')[0] || 'N/A'}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="panel-card">
-                  <div className="panel-card-title">
-                    <h2>🤖 Kalam Chatbot</h2>
-                  </div>
-                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                    Need to modify resources, scale up pods, or see customized graphs? Talk to the agent!
-                  </p>
-                  <button 
-                    className="btn primary" 
-                    onClick={() => setActiveTab('chat')}
-                    style={{ width: '100%' }}
-                  >
-                    Open Chat Console
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* AGENTS TEAMWORK TAB */}
-        {activeTab === 'agents' && (
-          <div className="tab-panel">
-            <AgentTeamwork
-              containers={dockerContainers}
-              k8sResources={k8sResources}
-              localUrl={localUrl}
-              localModel={localModel}
-              apiKey={apiKey}
-              provider={provider}
-            />
-          </div>
-        )}
-
-        {/* DOCKER TAB */}
-        {activeTab === 'docker' && (
-          <div className="tab-panel">
-            <div className="panel-card">
-              <div className="panel-card-title">
-                <h2>🐳 Docker Containers ({dockerContainers.length})</h2>
-              </div>
-              <div className="table-wrapper">
-                <table className="resource-table">
-                  <thead>
-                    <tr>
-                      <th>Name</th>
-                      <th>Container ID</th>
-                      <th>Image</th>
-                      <th>Status</th>
-                      <th>State</th>
-                      <th>Ports</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dockerContainers.length === 0 ? (
-                      <tr>
-                        <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '24px' }}>
-                          No Docker containers found.
-                        </td>
-                      </tr>
-                    ) : (
-                      dockerContainers.map((c) => (
-                        <tr key={c.id}>
-                          <td><strong>{c.name}</strong></td>
-                          <td><span className="code-id">{c.id.slice(0, 12)}</span></td>
-                          <td><span className="code-tag">{c.image}</span></td>
-                          <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{c.status}</td>
-                          <td>
-                            <span className={`badge ${c.state}`}>
-                              {c.state}
-                            </span>
-                          </td>
-                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{c.ports || 'None'}</td>
-                          <td>
-                            <div className="action-btns">
-                              {c.state !== 'running' ? (
-                                <button 
-                                  className="icon-btn success" 
-                                  title="Start"
-                                  onClick={() => triggerDockerAction('start', c.id)}
-                                >
-                                  <Play size={14} />
-                                </button>
-                              ) : (
-                                <button 
-                                  className="icon-btn danger" 
-                                  title="Stop"
-                                  onClick={() => triggerDockerAction('stop', c.id)}
-                                >
-                                  <Square size={14} />
-                                </button>
-                              )}
-                              <button 
-                                className="icon-btn primary" 
-                                title="Restart"
-                                onClick={() => triggerDockerAction('restart', c.id)}
-                              >
-                                <RefreshCw size={14} />
-                              </button>
-                              <button 
-                                className="icon-btn secondary" 
-                                title="View Logs"
-                                onClick={() => openLogsModal('docker', c.id, c.name)}
-                              >
-                                <FileText size={14} />
-                              </button>
-                              <button 
-                                className="icon-btn danger" 
-                                title="Force Remove"
-                                onClick={() => triggerDockerAction('remove', c.id)}
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* KUBERNETES TAB */}
-        {activeTab === 'k8s' && (
-          <div className="tab-panel">
-            {/* NODES SECTION */}
-            <div className="k8s-section">
-              <div 
-                className="k8s-section-header"
-                onClick={() => setExpandedK8s(prev => ({ ...prev, nodes: !prev.nodes }))}
-              >
-                <div className="k8s-section-title">
-                  {expandedK8s.nodes ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                  <span>💻 Nodes</span>
-                  <span className="k8s-section-count">{k8sResources.nodes.length}</span>
-                </div>
-              </div>
-              {expandedK8s.nodes && (
-                <div className="k8s-section-content">
-                  <div className="table-wrapper">
-                    <table className="resource-table">
-                      <thead>
-                        <tr>
-                          <th>Name</th>
-                          <th>Status</th>
-                          <th>Role</th>
-                          <th>Version</th>
-                          <th>Internal IP</th>
-                          <th>OS</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {k8sResources.nodes.length === 0 ? (
-                          <tr>
-                            <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>No Nodes detected.</td>
-                          </tr>
-                        ) : (
-                          k8sResources.nodes.map(node => (
-                            <tr key={node.name}>
-                              <td><strong>{node.name}</strong></td>
-                              <td><span className={`badge ${node.status.toLowerCase()}`}>{node.status}</span></td>
-                              <td><span className="code-id">{node.role}</span></td>
-                              <td>{node.version}</td>
-                              <td>{node.ip}</td>
-                              <td>{node.os}</td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
               )}
-            </div>
-
             {/* DEPLOYMENTS SECTION */}
-            <div className="k8s-section">
-              <div 
-                className="k8s-section-header"
-                onClick={() => setExpandedK8s(prev => ({ ...prev, deployments: !prev.deployments }))}
-              >
-                <div className="k8s-section-title">
-                  {expandedK8s.deployments ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                  <span>📦 Deployments</span>
-                  <span className="k8s-section-count">{k8sResources.deployments.length}</span>
+            {(k8sSubTab === 'all' || k8sSubTab === 'deployments') && (
+              <div className="k8s-section">
+                <div 
+                  className="k8s-section-header"
+                  onClick={() => setExpandedK8s(prev => ({ ...prev, deployments: !prev.deployments }))}
+                >
+                  <div className="k8s-section-title">
+                    {expandedK8s.deployments ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                    <span>📦 Deployments</span>
+                    <span className="k8s-section-count">{filteredK8sDeployments.length}</span>
+                  </div>
                 </div>
-              </div>
-              {expandedK8s.deployments && (
-                <div className="k8s-section-content">
-                  <div className="table-wrapper">
-                    <table className="resource-table">
-                      <thead>
-                        <tr>
-                          <th>Name</th>
-                          <th>Namespace</th>
-                          <th>Ready Replicas</th>
-                          <th>Available</th>
-                          <th>Updated</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {k8sResources.deployments.length === 0 ? (
+                {expandedK8s.deployments && (
+                  <div className="k8s-section-content">
+                    <div className="table-wrapper">
+                      <table className="resource-table">
+                        <thead>
                           <tr>
-                            <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>No Deployments detected.</td>
+                            <th>Deployment Name</th>
+                            <th>Namespace</th>
+                            <th>Ready Replicas</th>
+                            <th>Available</th>
+                            <th>Updated</th>
+                            <th>Actions</th>
                           </tr>
-                        ) : (
-                          k8sResources.deployments.map(d => (
-                            <tr key={`${d.namespace}/${d.name}`}>
-                              <td><strong>{d.name}</strong></td>
-                              <td><span className="code-tag">{d.namespace}</span></td>
-                              <td><span className={`badge ${d.available > 0 ? 'running' : 'warning'}`}>{d.ready}</span></td>
-                              <td>{d.available}</td>
-                              <td>{d.updated}</td>
-                              <td>
-                                <div className="action-btns">
-                                  <button 
-                                    className="icon-btn primary" 
-                                    title="Scale Deployment"
-                                    onClick={() => setScaleModal({ open: true, name: d.name, namespace: d.namespace, currentReplicas: d.replicas, value: d.replicas })}
-                                  >
-                                    <Sliders size={14} />
-                                  </button>
-                                  <button 
-                                    className="icon-btn warning" 
-                                    title="Restart Rollout"
-                                    onClick={() => triggerK8sAction('restart_deploy', d.name, d.namespace)}
-                                  >
-                                    <RefreshCw size={14} />
-                                  </button>
-                                </div>
+                        </thead>
+                        <tbody>
+                          {filteredK8sDeployments.length === 0 ? (
+                            <tr>
+                              <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '24px' }}>
+                                No deployments detected or matching search.
                               </td>
                             </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
+                          ) : (
+                            filteredK8sDeployments.map(d => (
+                              <tr key={`${d.namespace}/${d.name}`}>
+                                <td><strong>{d.name}</strong></td>
+                                <td><span className="code-tag">{d.namespace}</span></td>
+                                <td><span className={`badge ${d.available > 0 ? 'running' : 'warning'}`}>{d.ready}</span></td>
+                                <td>{d.available}</td>
+                                <td>{d.updated}</td>
+                                <td>
+                                  <div className="action-btns">
+                                    <button 
+                                      className="icon-btn primary" 
+                                      title="Scale Deployment"
+                                      onClick={() => setScaleModal({ open: true, name: d.name, namespace: d.namespace, currentReplicas: d.replicas, value: d.replicas })}
+                                    >
+                                      <Sliders size={14} />
+                                    </button>
+                                    <button 
+                                      className="icon-btn warning" 
+                                      title="Restart Rollout"
+                                      onClick={() => triggerK8sAction('restart_deploy', d.name, d.namespace)}
+                                    >
+                                      <RefreshCw size={14} />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
 
             {/* SERVICES SECTION */}
-            <div className="k8s-section">
-              <div 
-                className="k8s-section-header"
-                onClick={() => setExpandedK8s(prev => ({ ...prev, services: !prev.services }))}
-              >
-                <div className="k8s-section-title">
-                  {expandedK8s.services ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                  <span>⚙️ Services</span>
-                  <span className="k8s-section-count">{k8sResources.services.length}</span>
-                </div>
-              </div>
-              {expandedK8s.services && (
-                <div className="k8s-section-content">
-                  <div className="table-wrapper">
-                    <table className="resource-table">
-                      <thead>
-                        <tr>
-                          <th>Name</th>
-                          <th>Namespace</th>
-                          <th>Type</th>
-                          <th>Cluster IP</th>
-                          <th>External IP</th>
-                          <th>Ports</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {k8sResources.services.length === 0 ? (
-                          <tr>
-                            <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>No Services detected.</td>
-                          </tr>
-                        ) : (
-                          k8sResources.services.map(s => (
-                            <tr key={`${s.namespace}/${s.name}`}>
-                              <td><strong>{s.name}</strong></td>
-                              <td><span className="code-tag">{s.namespace}</span></td>
-                              <td><span className="badge neutral">{s.type}</span></td>
-                              <td>{s.clusterIp}</td>
-                              <td>{s.externalIp}</td>
-                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{s.ports || 'None'}</td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
+            {(k8sSubTab === 'all' || k8sSubTab === 'services') && (
+              <div className="k8s-section">
+                <div 
+                  className="k8s-section-header"
+                  onClick={() => setExpandedK8s(prev => ({ ...prev, services: !prev.services }))}
+                >
+                  <div className="k8s-section-title">
+                    {expandedK8s.services ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                    <span>⚙️ Services</span>
+                    <span className="k8s-section-count">{filteredK8sServices.length}</span>
                   </div>
                 </div>
-              )}
-            </div>
+                {expandedK8s.services && (
+                  <div className="k8s-section-content">
+                    <div className="table-wrapper">
+                      <table className="resource-table">
+                        <thead>
+                          <tr>
+                            <th>Service Name</th>
+                            <th>Namespace</th>
+                            <th>Type</th>
+                            <th>Cluster IP</th>
+                            <th>External IP</th>
+                            <th>Ports</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredK8sServices.length === 0 ? (
+                            <tr>
+                              <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '24px' }}>
+                                No services detected or matching search.
+                              </td>
+                            </tr>
+                          ) : (
+                            filteredK8sServices.map(s => (
+                              <tr key={`${s.namespace}/${s.name}`}>
+                                <td><strong>{s.name}</strong></td>
+                                <td><span className="code-tag">{s.namespace}</span></td>
+                                <td><span className="badge neutral">{s.type}</span></td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{s.clusterIp}</td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{s.externalIp}</td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{s.ports || 'None'}</td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* PODS SECTION */}
-            <div className="k8s-section">
-              <div 
-                className="k8s-section-header"
-                onClick={() => setExpandedK8s(prev => ({ ...prev, pods: !prev.pods }))}
-              >
-                <div className="k8s-section-title">
-                  {expandedK8s.pods ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                  <span>🛸 Pods</span>
-                  <span className="k8s-section-count">{k8sResources.pods.length}</span>
-                </div>
-              </div>
-              {expandedK8s.pods && (
-                <div className="k8s-section-content">
-                  <div className="table-wrapper">
-                    <table className="resource-table">
-                      <thead>
-                        <tr>
-                          <th>Name</th>
-                          <th>Namespace</th>
-                          <th>Status</th>
-                          <th>Ready</th>
-                          <th>IP</th>
-                          <th>Node</th>
-                          <th>Restarts</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {k8sResources.pods.length === 0 ? (
-                          <tr>
-                            <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>No Pods detected.</td>
-                          </tr>
-                        ) : (
-                          k8sResources.pods.map(p => (
-                            <tr key={`${p.namespace}/${p.name}`}>
-                              <td title={p.name}><strong>{p.name.length > 30 ? `${p.name.slice(0, 28)}...` : p.name}</strong></td>
-                              <td><span className="code-tag">{p.namespace}</span></td>
-                              <td>
-                                <span className={`badge ${p.status.toLowerCase()}`}>
-                                  {p.status}
-                                </span>
-                              </td>
-                              <td>{p.ready}</td>
-                              <td>{p.ip}</td>
-                              <td style={{ fontSize: '13px' }}>{p.node}</td>
-                              <td>{p.restarts}</td>
-                              <td>
-                                <div className="action-btns">
-                                  <button 
-                                    className="icon-btn primary" 
-                                    title="View logs"
-                                    onClick={() => openLogsModal('k8s', p.name, p.name, p.namespace)}
-                                  >
-                                    <FileText size={14} />
-                                  </button>
-                                  <button 
-                                    className="icon-btn danger" 
-                                    title="Delete Pod"
-                                    onClick={() => triggerK8sAction('delete_pod', p.name, p.namespace)}
-                                  >
-                                    <Trash2 size={14} />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
+            {(k8sSubTab === 'all' || k8sSubTab === 'pods') && (
+              <div className="k8s-section">
+                <div 
+                  className="k8s-section-header"
+                  onClick={() => setExpandedK8s(prev => ({ ...prev, pods: !prev.pods }))}
+                >
+                  <div className="k8s-section-title">
+                    {expandedK8s.pods ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                    <span>🛸 Pods</span>
+                    <span className="k8s-section-count">{filteredK8sPods.length}</span>
                   </div>
                 </div>
-              )}
-            </div>
+                {expandedK8s.pods && (
+                  <div className="k8s-section-content">
+                    <div className="table-wrapper">
+                      <table className="resource-table">
+                        <thead>
+                          <tr>
+                            <th>Pod Name</th>
+                            <th>Namespace</th>
+                            <th>Status</th>
+                            <th>Ready</th>
+                            <th>IP</th>
+                            <th>Node</th>
+                            <th>Restarts</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredK8sPods.length === 0 ? (
+                            <tr>
+                              <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '24px' }}>
+                                No pods detected or matching search.
+                              </td>
+                            </tr>
+                          ) : (
+                            filteredK8sPods.map(p => (
+                              <tr key={`${p.namespace}/${p.name}`}>
+                                <td title={p.name}><strong>{p.name.length > 30 ? `${p.name.slice(0, 28)}...` : p.name}</strong></td>
+                                <td><span className="code-tag">{p.namespace}</span></td>
+                                <td>
+                                  <span className={`badge ${p.status.toLowerCase()}`}>
+                                    {p.status}
+                                  </span>
+                                </td>
+                                <td>{p.ready}</td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{p.ip}</td>
+                                <td style={{ fontSize: '13px' }}>{p.node}</td>
+                                <td>{p.restarts}</td>
+                                <td>
+                                  <div className="action-btns">
+                                    <button 
+                                      className="icon-btn primary" 
+                                      title="View Pod Logs"
+                                      onClick={() => openLogsModal('k8s', p.name, p.name, p.namespace)}
+                                    >
+                                      <FileText size={14} />
+                                    </button>
+                                    <button 
+                                      className="icon-btn danger" 
+                                      title="Delete Pod"
+                                      onClick={() => triggerK8sAction('delete_pod', p.name, p.namespace)}
+                                    >
+                                      <Trash2 size={14} />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -1657,7 +1925,8 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             )}
           </div>
         )}
-      </main>
+      </div>
+    </div>
 
       {/* LOGS MODAL */}
       {logsModal?.open && (
