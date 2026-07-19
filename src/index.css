@@ -1432,3 +1432,68 @@ body {
 .cy-tooltip .tt-red {
   color: #ef4444;
 }
+
+/* ─── ReactFlow Edge & Connection Overrides ─────────────────────────────── */
+
+/* Smooth transitions on all edge paths */
+.react-flow__edge-path {
+  transition: stroke 0.25s ease, stroke-width 0.25s ease, opacity 0.25s ease, filter 0.25s ease;
+}
+
+/* Edge labels — premium glassmorphism pill */
+.react-flow__edge-textbg {
+  rx: 4;
+  ry: 4;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.4));
+}
+
+.react-flow__edge-text {
+  transition: fill 0.2s ease, opacity 0.2s ease;
+  pointer-events: none;
+}
+
+/* Animated edges — subtle glow */
+.react-flow__edge.animated .react-flow__edge-path {
+  animation: edgeFlowPulse 3s ease-in-out infinite;
+}
+
+@keyframes edgeFlowPulse {
+  0%, 100% { filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.05)); }
+  50% { filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.12)); }
+}
+
+/* Handle visibility transitions */
+.react-flow__handle {
+  transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease;
+}
+
+.react-flow__node:hover .react-flow__handle {
+  opacity: 0.8 !important;
+  transform: scale(1.3);
+}
+
+/* Marker arrowhead transitions */
+.react-flow__arrowhead {
+  transition: fill 0.2s ease;
+}
+
+/* Controls panel override for dark theme */
+.react-flow__controls button {
+  background: rgba(15, 23, 42, 0.95) !important;
+  color: #e2e8f0 !important;
+  border: none !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+}
+
+.react-flow__controls button:hover {
+  background: rgba(30, 41, 59, 0.95) !important;
+}
+
+.react-flow__controls button svg {
+  fill: #e2e8f0 !important;
+}
+
+/* Attribution hide */
+.react-flow__attribution {
+  display: none !important;
+}

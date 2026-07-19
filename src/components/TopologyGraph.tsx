@@ -1,12 +1,19 @@
-import React, { useMemo, useState, memo, useCallback, useEffect } from 'react';
+import React, { useMemo, useState, memo, useCallback, useEffect, useRef } from 'react';
 import ReactFlow, {
   Background,
   Controls,
+  MiniMap,
   Handle,
   Position,
-  MarkerType
+  MarkerType,
+  ReactFlowProvider,
+  useReactFlow,
+  BaseEdge,
+  EdgeLabelRenderer,
+  getBezierPath,
+  getSmoothStepPath
 } from 'reactflow';
-import type { NodeProps, Node, Edge } from 'reactflow';
+import type { NodeProps, Node, Edge, EdgeProps } from 'reactflow';
 import 'reactflow/dist/style.css';
 import {
   Search,
@@ -22,8 +29,18 @@ import {
   Scale,
   AlertTriangle,
   Clock,
-  Info
+  Info,
+  Maximize2,
+  Minimize2,
+  Container,
+  Plug,
+  Zap,
+  Rocket,
+  Box,
+  Server,
+  Network
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
 interface Container {
   id: string;
@@ -66,223 +83,274 @@ function formatAge(creationTime: string | number | undefined): string {
   return `${diffDay}d ${diffHour % 24}h ago`;
 }
 
-// ─── Custom DevOps Card Node ────────────────────────────────────────────────
+// ─── Custom Premium DevOps Card Node ────────────────────────────────────────
 const DevOpsNode = memo(({ id, data }: NodeProps) => {
   const { type, name, status, ip, ports, image, ready, replicas, role, state, isHovered, isFocused, onHover, heatmapMode, restarts, created } = data;
 
-  let icon = '📦';
-  let themeColor = '#8b5cf6'; // purple
-  let borderColor = 'rgba(139, 92, 246, 0.25)';
-  let cardTitle = name;
+  // Theme configuration per resource type — one flat accent color each, no gradients
+  const themes: Record<string, { icon: LucideIcon; color: string; label: string }> = {
+    'docker':     { icon: Container, color: '#38bdf8', label: 'CONTAINER' },
+    'port':       { icon: Plug, color: '#818cf8', label: 'PORT' },
+    'service':    { icon: Zap, color: '#fbbf24', label: 'SERVICE' },
+    'deployment': { icon: Rocket, color: '#a78bfa', label: 'DEPLOYMENT' },
+    'pod':        { icon: Box, color: '#34d399', label: 'POD' },
+    'k8s-node':   { icon: Server, color: '#94a3b8', label: 'NODE' },
+  };
 
-  if (type === 'docker') {
-    icon = '🐳';
-    themeColor = '#0ea5e9'; // sky blue
-    borderColor = 'rgba(14, 165, 233, 0.25)';
-  } else if (type === 'port') {
-    icon = '🌐';
-    themeColor = '#818cf8'; // indigo
-    borderColor = 'rgba(129, 140, 248, 0.25)';
-  } else if (type === 'service') {
-    icon = '⚙️';
-    themeColor = '#f59e0b'; // amber
-    borderColor = 'rgba(245, 158, 11, 0.25)';
-  } else if (type === 'deployment') {
-    icon = '📦';
-    themeColor = '#a78bfa'; // violet
-    borderColor = 'rgba(167, 139, 250, 0.25)';
-  } else if (type === 'pod') {
-    icon = '🛸';
-    themeColor = '#10b981'; // emerald
-    borderColor = 'rgba(16, 185, 129, 0.25)';
-  } else if (type === 'k8s-node') {
-    icon = '💻';
-    themeColor = '#9ca3af'; // grey
-    borderColor = 'rgba(156, 163, 175, 0.25)';
-  }
+  const theme = themes[type] || themes['docker'];
+  let accentColor = theme.color;
 
-  // Handle errors
+  // Status-based color overrides. LED behaves like a real server indicator light:
+  // solid glow = healthy, fast blink = down/error, slow blink = pending/starting, dim static = stopped.
   let statusText = status || state || '';
+  let statusDotColor = '#10b981'; // default green
+  let ledMode: 'glow' | 'blink-fast' | 'blink-slow' | 'off' = 'glow';
+
   if (statusText) {
     const sLower = statusText.toLowerCase();
-    if (sLower.includes('fail') || sLower.includes('err') || sLower.includes('crash') || (sLower.includes('exited') && !sLower.includes('(0)'))) {
-      themeColor = '#f43f5e'; // rose red
-      borderColor = '#f43f5e';
+    if (sLower.includes('running') || sLower === 'ready') {
+      statusDotColor = '#10b981';
+      ledMode = 'glow';
+    } else if (sLower.includes('fail') || sLower.includes('err') || sLower.includes('crash') || (sLower.includes('exited') && !sLower.includes('(0)'))) {
+      accentColor = '#f43f5e';
+      statusDotColor = '#f43f5e';
+      ledMode = 'blink-fast';
+    } else if (sLower.includes('pending') || sLower.includes('creating')) {
+      accentColor = '#fbbf24';
+      statusDotColor = '#fbbf24';
+      ledMode = 'blink-slow';
     } else if (sLower.includes('stop') || sLower.includes('exited')) {
-      themeColor = '#f59e0b'; // amber
-      borderColor = 'rgba(245, 158, 11, 0.5)';
+      accentColor = '#64748b';
+      statusDotColor = '#64748b';
+      ledMode = 'off';
     }
   }
 
-  // Apply Heatmap Overlays
+  // A crash-looping workload should never read as healthy, even while "Running"
+  if (ledMode === 'glow' && typeof restarts === 'number' && restarts >= 3) {
+    accentColor = '#f43f5e';
+    statusDotColor = '#f43f5e';
+    ledMode = 'blink-fast';
+  }
+
+  // Heatmap overlays
   let heatmapGlow = '';
   if (heatmapMode === 'restarts' && restarts !== undefined && restarts > 0) {
     const intensity = Math.min(restarts / 5, 1);
-    themeColor = '#f43f5e';
-    borderColor = `rgba(244, 63, 94, ${0.4 + intensity * 0.6})`;
-    heatmapGlow = `0 0 16px rgba(244, 63, 94, ${0.5 + intensity * 0.5})`;
+    accentColor = '#f43f5e';
+    heatmapGlow = `0 0 ${12 + intensity * 16}px rgba(244, 63, 94, ${0.4 + intensity * 0.5})`;
   } else if (heatmapMode === 'age' && created) {
     const parsedTime = Date.parse(created.toString());
     if (!isNaN(parsedTime)) {
       const ageMs = Date.now() - parsedTime;
-      // If created within the last 15 minutes, glow neon cyan (recently deployed)
       if (ageMs < 15 * 60 * 1000) {
-        themeColor = '#06b6d4'; // cyan
-        borderColor = '#06b6d4';
-        heatmapGlow = '0 0 16px rgba(6, 182, 212, 0.8)';
-      } else if (ageMs < 2 * 60 * 60 * 1000) { // last 2 hours
-        themeColor = '#22d3ee';
-        borderColor = 'rgba(34, 211, 238, 0.6)';
-      } else { // long-running, stable resources
-        themeColor = '#475569'; // slate grey
-        borderColor = 'rgba(71, 85, 105, 0.3)';
+        accentColor = '#06b6d4';
+        heatmapGlow = '0 0 20px rgba(6, 182, 212, 0.7)';
+      } else if (ageMs < 2 * 60 * 60 * 1000) {
+        accentColor = '#22d3ee';
+      } else {
+        accentColor = '#475569';
       }
     }
   }
 
   const isHighlighted = isHovered || isFocused;
-  const borderStyle = isHighlighted
-    ? `2px solid ${themeColor}`
-    : `1px solid ${borderColor}`;
+  const isPortType = type === 'port';
+  // Detail rows only appear when the node is hovered/focused — keeps the resting canvas uncluttered
+  const showMeta = isHighlighted && !isPortType;
 
-  const glowStyle = heatmapGlow
+  const cardWidth = isPortType ? 80 : 180;
+
+  const boxShadow = heatmapGlow
     ? heatmapGlow
     : isHighlighted
-      ? `0 0 16px ${themeColor}60, 0 4px 20px rgba(0, 0, 0, 0.4)`
-      : `0 4px 12px rgba(0, 0, 0, 0.25)`;
+      ? `0 0 0 1px ${accentColor}40, 0 0 18px ${accentColor}25, 0 10px 28px rgba(0,0,0,0.45)`
+      : '0 1px 2px rgba(0,0,0,0.25)';
+
+  // Helper to render a row
+  const MetaRow = ({ label, value, mono }: { label: string; value: string | number; mono?: boolean }) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+      <span style={{ color: '#64748b', fontSize: '10px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em', flexShrink: 0 }}>{label}</span>
+      <span style={{ color: '#e2e8f0', fontSize: '10.5px', fontWeight: 500, fontFamily: mono ? 'JetBrains Mono, monospace' : 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: isPortType ? '50px' : '105px', textAlign: 'right' }} title={String(value)}>{value}</span>
+    </div>
+  );
 
   return (
     <div
       onMouseEnter={() => onHover?.(id)}
       onMouseLeave={() => onHover?.(null)}
+      title={created ? `${name} · ${formatAge(created)}` : name}
       style={{
-        background: 'rgba(15, 23, 42, 0.85)',
-        backdropFilter: 'blur(8px)',
-        border: borderStyle,
+        width: cardWidth,
+        boxSizing: 'border-box',
+        display: 'flex',
+        alignItems: 'stretch',
+        background: 'rgba(13, 17, 23, 0.92)',
         borderRadius: '10px',
-        padding: '10px',
+        border: `1px solid ${isHighlighted ? accentColor + '60' : 'rgba(255,255,255,0.07)'}`,
+        boxShadow,
         color: '#f8fafc',
         fontFamily: 'Outfit, sans-serif',
-        boxShadow: glowStyle,
-        width: type === 'port' ? '80px' : '170px',
-        boxSizing: 'border-box',
-        fontSize: '11px',
-        transition: 'all 0.2s ease',
-        textAlign: 'left'
+        transition: 'border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease',
+        transform: isHighlighted ? 'translateY(-1px)' : 'none',
+        overflow: 'hidden',
+        textAlign: 'left',
+        cursor: 'pointer'
       }}
     >
-      <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
+      <Handle type="target" position={Position.Left} style={{ width: 6, height: 6, background: accentColor, border: 'none', opacity: 0.4, minWidth: 6, minHeight: 6 }} />
+      <Handle type="target" position={Position.Top} id="top-target" style={{ width: 6, height: 6, background: accentColor, border: 'none', opacity: 0, minWidth: 6, minHeight: 6 }} />
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, fontSize: '11.5px', marginBottom: '4px' }}>
-        <span>{icon}</span>
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexGrow: 1 }} title={cardTitle}>
-          {cardTitle}
-        </span>
-        {restarts > 0 && (
-          <span style={{ color: '#ef4444', fontSize: '9px', fontWeight: 'bold', background: 'rgba(239, 68, 68, 0.15)', padding: '1px 4px', borderRadius: '4px' }} title={`${restarts} restarts`}>
-            ↺{restarts}
-          </span>
+      {/* Left accent stripe — replaces the old top gradient bar */}
+      <div style={{ width: '3px', flexShrink: 0, background: accentColor, opacity: isHighlighted ? 1 : 0.6, transition: 'opacity 0.2s' }} />
+
+      <div style={{ padding: isPortType ? '7px 10px' : '9px 11px', flex: 1, minWidth: 0 }}>
+        {/* Header row — always visible */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: isPortType ? 0 : '7px' }}>
+          <theme.icon size={isPortType ? 13 : 15} strokeWidth={2.25} style={{ color: accentColor, flexShrink: 0 }} />
+          <div style={{ flexGrow: 1, overflow: 'hidden', minWidth: 0 }}>
+            <div style={{ fontSize: isPortType ? '10px' : '11.5px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: 1.25, color: '#f1f5f9' }} title={name}>
+              {isPortType ? `:${data.hostPort}` : name}
+            </div>
+            {!isPortType && (
+              <div style={{ fontSize: '8px', fontWeight: 600, color: accentColor, textTransform: 'uppercase', letterSpacing: '0.09em', marginTop: '1px', opacity: 0.65 }}>
+                {theme.label}
+              </div>
+            )}
+          </div>
+          {/* Restart badge (persistent — it signals a problem) */}
+          {restarts > 0 && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: '2px',
+              color: '#fecaca', fontSize: '9px', fontWeight: 700,
+              background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.3)',
+              padding: '1px 5px', borderRadius: '6px', flexShrink: 0
+            }} title={`${restarts} restarts`}>
+              <RotateCw size={8} strokeWidth={2.5} />{restarts}
+            </span>
+          )}
+          {/* Server-style status LED */}
+          {statusText && !isPortType && (
+            <div style={{ position: 'relative', width: '9px', height: '9px', flexShrink: 0 }} title={statusText}>
+              {ledMode !== 'off' && (
+                <div
+                  className={`led-halo led-halo-${ledMode}`}
+                  style={{
+                    position: 'absolute', inset: '-4px', borderRadius: '50%',
+                    background: statusDotColor,
+                    opacity: 0.35,
+                    filter: 'blur(3px)'
+                  }}
+                />
+              )}
+              <div
+                className={ledMode !== 'off' ? `led-core led-core-${ledMode}` : undefined}
+                style={{
+                  position: 'relative',
+                  width: '9px', height: '9px', borderRadius: '50%',
+                  background: `radial-gradient(circle at 35% 30%, ${statusDotColor}, ${statusDotColor}dd 60%, ${statusDotColor}88)`,
+                  border: `1px solid ${statusDotColor}${ledMode === 'off' ? '55' : 'aa'}`,
+                  boxShadow: ledMode === 'off' ? 'none' : `0 0 5px ${statusDotColor}, 0 0 1px ${statusDotColor}`,
+                  opacity: ledMode === 'off' ? 0.4 : 1
+                }}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Metadata: one key line always visible; full detail expands on hover/focus */}
+        {!isPortType && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {type === 'docker' && (
+              <>
+                <MetaRow label="Image" value={(image || '').split('@')[0].split(':').slice(0, 2).join(':')} mono />
+                {showMeta && <MetaRow label="State" value={state} />}
+              </>
+            )}
+            {type === 'service' && (
+              <>
+                <MetaRow label="Ports" value={ports} mono />
+                {showMeta && <MetaRow label="Type" value={data.svcType} />}
+                {showMeta && <MetaRow label="ClusterIP" value={data.clusterIp} mono />}
+              </>
+            )}
+            {type === 'deployment' && (
+              <>
+                <MetaRow label="Ready" value={`${ready} / ${replicas}`} />
+                {showMeta && <MetaRow label="Available" value={data.available} />}
+              </>
+            )}
+            {type === 'pod' && (
+              <>
+                <MetaRow label="Ready" value={ready} />
+                {showMeta && <MetaRow label="Status" value={status} />}
+                {showMeta && <MetaRow label="IP" value={ip || 'N/A'} mono />}
+              </>
+            )}
+            {type === 'k8s-node' && (
+              <>
+                <MetaRow label="Role" value={role} />
+                {showMeta && <MetaRow label="IP" value={ip || 'N/A'} mono />}
+              </>
+            )}
+          </div>
         )}
       </div>
 
-      <hr style={{ border: 'none', borderTop: '1px solid rgba(255,255,255,0.08)', margin: '4px 0 6px 0' }} />
+      <Handle type="source" position={Position.Right} style={{ width: 6, height: 6, background: accentColor, border: 'none', opacity: 0.4, minWidth: 6, minHeight: 6 }} />
+      <Handle type="source" position={Position.Bottom} id="bottom-source" style={{ width: 6, height: 6, background: accentColor, border: 'none', opacity: 0, minWidth: 6, minHeight: 6 }} />
 
-      {type === 'docker' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>State:</span>
-            <span style={{ color: themeColor, fontWeight: 500 }}>{state}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>Image:</span>
-            <span style={{ color: '#cbd5e1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '95px' }} title={image}>
-              {image}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {type === 'port' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', alignItems: 'center' }}>
-          <span style={{ fontWeight: 600, color: themeColor }}>:{data.hostPort}</span>
-          <span style={{ color: '#94a3b8' }}>→ {data.containerPort}</span>
-        </div>
-      )}
-
-      {type === 'service' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>Type:</span>
-            <span style={{ color: '#cbd5e1' }}>{data.svcType}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>IP:</span>
-            <span style={{ color: '#cbd5e1' }}>{data.clusterIp}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>Ports:</span>
-            <span style={{ color: '#cbd5e1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '95px' }} title={ports}>
-              {ports}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {type === 'deployment' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>Replicas:</span>
-            <span style={{ color: '#cbd5e1' }}>{ready}/{replicas}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>Available:</span>
-            <span style={{ color: '#cbd5e1' }}>{data.available}</span>
-          </div>
-        </div>
-      )}
-
-      {type === 'pod' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>Status:</span>
-            <span style={{ color: themeColor, fontWeight: 500 }}>{status}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>Ready:</span>
-            <span style={{ color: '#cbd5e1' }}>{ready}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>IP:</span>
-            <span style={{ color: '#cbd5e1' }}>{ip}</span>
-          </div>
-        </div>
-      )}
-
-      {type === 'k8s-node' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>Status:</span>
-            <span style={{ color: themeColor, fontWeight: 500 }}>{status}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>Role:</span>
-            <span style={{ color: '#cbd5e1' }}>{role}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ color: '#94a3b8' }}>IP:</span>
-            <span style={{ color: '#cbd5e1' }}>{ip}</span>
-          </div>
-        </div>
-      )}
-
-      <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
+      {/* Server-LED animation keyframes (injected inline once) */}
+      <style>{`
+        @keyframes led-glow-core {
+          0%, 100% { filter: brightness(1); }
+          50% { filter: brightness(1.35); }
+        }
+        @keyframes led-glow-halo {
+          0%, 100% { opacity: 0.25; transform: scale(1); }
+          50% { opacity: 0.5; transform: scale(1.25); }
+        }
+        @keyframes led-blink-fast {
+          0%, 45% { opacity: 1; }
+          50%, 100% { opacity: 0.12; }
+        }
+        @keyframes led-blink-slow {
+          0%, 65% { opacity: 1; }
+          75%, 100% { opacity: 0.2; }
+        }
+        .led-halo-glow { animation: led-glow-halo 2.2s ease-in-out infinite; }
+        .led-halo-blink-fast { animation: led-blink-fast 0.6s steps(1) infinite; }
+        .led-halo-blink-slow { animation: led-blink-slow 1.6s steps(1) infinite; }
+        .led-core-glow { animation: led-glow-core 2.2s ease-in-out infinite; }
+        .led-core-blink-fast { animation: led-blink-fast 0.6s steps(1) infinite; }
+        .led-core-blink-slow { animation: led-blink-slow 1.6s steps(1) infinite; }
+        @media (prefers-reduced-motion: reduce) {
+          .led-halo, .led-core { animation: none !important; opacity: 1 !important; }
+        }
+      `}</style>
     </div>
   );
 });
 DevOpsNode.displayName = 'DevOpsNode';
 
-// ─── Custom Group Container Node ────────────────────────────────────────────
+// ─── Custom Premium Group Container Node ────────────────────────────────────
 const GroupNode = memo(({ data, style }: any) => {
+  const isK8s = data.label?.includes('Kubernetes');
+  const isDocker = data.label?.includes('Docker');
+  const isNs = data.label?.startsWith('ns:');
+
+  let borderColor = 'rgba(255,255,255,0.07)';
+  let iconSize = '11px';
+
+  if (isK8s) {
+    borderColor = 'rgba(139, 92, 246, 0.18)';
+  } else if (isDocker) {
+    borderColor = 'rgba(14, 165, 233, 0.18)';
+  } else if (isNs) {
+    borderColor = 'rgba(147, 197, 253, 0.12)';
+    iconSize = '10px';
+  }
+
   return (
     <div
       style={{
@@ -291,40 +359,112 @@ const GroupNode = memo(({ data, style }: any) => {
         width: '100%',
         height: '100%',
         boxSizing: 'border-box',
-        pointerEvents: 'none'
+        pointerEvents: 'none',
+        borderRadius: isNs ? '10px' : '14px',
+        border: `1px solid ${borderColor}`,
+        background: isNs ? 'transparent' : 'rgba(255,255,255,0.012)',
+        overflow: 'hidden'
       }}
     >
+      {/* Header label bar */}
       <div
         style={{
           position: 'absolute',
-          top: '12px',
-          left: '16px',
-          fontSize: '11px',
-          fontWeight: 700,
-          color: data.textColor || '#94a3b8',
-          fontFamily: 'Outfit, sans-serif',
-          letterSpacing: '0.08em',
-          textTransform: 'uppercase'
+          top: 0,
+          left: 0,
+          right: 0,
+          padding: isNs ? '6px 14px' : '8px 16px',
+          borderBottom: `1px solid ${borderColor}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px'
         }}
       >
-        {data.label}
+        {data.icon && (
+          <data.icon size={parseInt(iconSize, 10) + 2} strokeWidth={2.25} style={{ color: data.textColor || '#94a3b8', flexShrink: 0 }} />
+        )}
+        <span style={{
+          fontSize: iconSize,
+          fontWeight: 800,
+          color: data.textColor || '#94a3b8',
+          fontFamily: 'Outfit, sans-serif',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase'
+        }}>
+          {data.label}
+        </span>
       </div>
     </div>
   );
 });
 GroupNode.displayName = 'GroupNode';
 
+// ─── Custom edge that renders a traveling dot along the path to show live data flow ───
+const FlowEdge = memo(({
+  id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition,
+  style, markerEnd, data, label, labelStyle, labelBgStyle, labelBgPadding, labelBgBorderRadius, animated
+}: EdgeProps) => {
+  const isBezier = data?.pathType === 'bezier';
+  const [edgePath, labelX, labelY] = isBezier
+    ? getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })
+    : getSmoothStepPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, borderRadius: 10 });
+
+  const strokeColor = (style as any)?.stroke || '#e2e8f0';
+  const edgeOpacity = (style as any)?.opacity ?? 1;
+  const showFlow = !!animated && edgeOpacity > 0.15;
+
+  return (
+    <>
+      <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd as string} />
+      {showFlow && (
+        <circle r={2.6} fill={strokeColor} style={{ filter: `drop-shadow(0 0 3px ${strokeColor})` }}>
+          <animateMotion dur="1.6s" repeatCount="indefinite" path={edgePath} />
+        </circle>
+      )}
+      {label && (
+        <EdgeLabelRenderer>
+          <div
+            style={{
+              position: 'absolute',
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+              transition: 'opacity 0.2s ease',
+              ...(labelStyle as React.CSSProperties),
+              background: (labelBgStyle as any)?.fill,
+              padding: labelBgPadding ? `${labelBgPadding[0]}px ${labelBgPadding[1]}px` : undefined,
+              borderRadius: labelBgBorderRadius
+            }}
+          >
+            {label}
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
+  );
+});
+FlowEdge.displayName = 'FlowEdge';
+
+const edgeTypes = {
+  flow: FlowEdge
+};
+
 const nodeTypes = {
   devopsNode: DevOpsNode,
   groupNode: GroupNode
 };
 
-export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sResources }) => {
+
+const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResources }) => {
+  const { fitView } = useReactFlow();
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
   // Navigation & Search State
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedNamespace, setSelectedNamespace] = useState('All');
   const [selectedType, setSelectedType] = useState('All');
   const [heatmapMode, setHeatmapMode] = useState<'none' | 'restarts' | 'age'>('none');
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Selected Detail Drawer state
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -363,7 +503,7 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
     const nsNodes: Node[] = [];
     const nsEdges: Edge[] = [];
 
-    const spacingY = 120; // vertical spacing
+    const spacingY = 120; // vertical spacing between sibling cards within a stage column
     const k8s = k8sResources;
 
     // Filter Docker
@@ -415,12 +555,9 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
         position: { x: 70, y: dockerYOffsetVal },
         style: {
           width: 380,
-          height: totalDockerHeight + 40,
-          background: 'rgba(14, 165, 233, 0.02)',
-          border: '1.5px dashed rgba(14, 165, 233, 0.2)',
-          borderRadius: '16px',
+          height: totalDockerHeight + 50,
         },
-        data: { label: '🐳 Docker Engine', textColor: '#38bdf8' }
+        data: { label: 'Docker Engine', icon: Container, textColor: '#38bdf8' }
       });
     }
 
@@ -431,12 +568,9 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
         position: { x: 500, y: k8sYOffsetVal },
         style: {
           width: 870,
-          height: totalK8sHeight + 40,
-          background: 'rgba(139, 92, 246, 0.02)',
-          border: '1.5px dashed rgba(139, 92, 246, 0.2)',
-          borderRadius: '16px',
+          height: totalK8sHeight + 50,
         },
-        data: { label: '☸️ Kubernetes Cluster', textColor: '#a78bfa' }
+        data: { label: 'Kubernetes Cluster', icon: Network, textColor: '#a78bfa' }
       });
 
       // Namespaces rows
@@ -447,13 +581,10 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
         nsNodes.push({
           id: `ns-group-${ns}`,
           type: 'groupNode',
-          position: { x: 520, y: rowYStart + 25 },
+          position: { x: 520, y: rowYStart + 30 },
           style: {
             width: 630,
-            height: rowHeight + 10,
-            background: 'rgba(255, 255, 255, 0.01)',
-            border: '1.2px dashed rgba(147, 197, 253, 0.15)',
-            borderRadius: '12px',
+            height: rowHeight + 15,
           },
           data: { label: `ns: ${ns}`, textColor: '#93c5fd' }
         });
@@ -520,10 +651,15 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
                 id: `edge-${portId}-${nodeId}`,
                 source: portId,
                 target: nodeId,
-                type: 'smoothstep',
+                type: 'flow',
                 animated: true,
-                style: { stroke: '#818cf8', strokeWidth: 1.5, opacity: 0.8 },
-                markerEnd: { type: MarkerType.ArrowClosed, color: '#818cf8', width: 12, height: 12 }
+                label: 'expose',
+                labelStyle: { fill: '#818cf8', fontSize: 8, fontWeight: 600, fontFamily: 'Outfit, sans-serif', letterSpacing: '0.05em', opacity: 0 },
+                labelBgStyle: { fill: 'rgba(15, 23, 42, 0.85)', strokeWidth: 0 },
+                labelBgPadding: [4, 2] as [number, number],
+                labelBgBorderRadius: 4,
+                style: { stroke: '#818cf8', strokeWidth: 1.5, opacity: 0.7, strokeLinecap: 'round' },
+                markerEnd: { type: MarkerType.ArrowClosed, color: '#a5b4fc', width: 14, height: 14 }
               });
             }
           });
@@ -636,9 +772,15 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
               id: `edge-${depId}-${podId}`,
               source: depId,
               target: podId,
-              type: 'smoothstep',
-              style: { stroke: '#a78bfa', strokeWidth: 2, opacity: 0.8 },
-              markerEnd: { type: MarkerType.ArrowClosed, color: '#a78bfa', width: 12, height: 12 }
+              type: 'flow',
+              animated: true,
+              label: 'manages',
+              labelStyle: { fill: '#a78bfa', fontSize: 8, fontWeight: 600, fontFamily: 'Outfit, sans-serif', letterSpacing: '0.05em', opacity: 0 },
+              labelBgStyle: { fill: 'rgba(15, 23, 42, 0.85)', strokeWidth: 0 },
+              labelBgPadding: [4, 2] as [number, number],
+              labelBgBorderRadius: 4,
+              style: { stroke: '#a78bfa', strokeWidth: 2, opacity: 0.65, strokeLinecap: 'round' },
+              markerEnd: { type: MarkerType.ArrowClosed, color: '#c4b5fd', width: 14, height: 14 }
             });
           }
         });
@@ -647,12 +789,17 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
         if (p.node && p.node !== 'None') {
           const hostNodeId = `k8snode-${p.node.replace(/[^a-zA-Z0-9]/g, '_')}`;
           nsEdges.push({
-            id: `edge-${hostNodeId}-${podId}`,
-            source: hostNodeId,
-            target: podId,
-            type: 'smoothstep',
-            style: { stroke: '#9ca3af', strokeWidth: 1.5, strokeDasharray: '4,4', opacity: 0.6 },
-            markerEnd: { type: MarkerType.ArrowClosed, color: '#9ca3af', width: 12, height: 12 }
+            id: `edge-${podId}-${hostNodeId}`,
+            source: podId,
+            target: hostNodeId,
+            type: 'flow',
+            label: 'runs on',
+            labelStyle: { fill: '#94a3b8', fontSize: 8, fontWeight: 600, fontFamily: 'Outfit, sans-serif', letterSpacing: '0.05em', opacity: 0 },
+            labelBgStyle: { fill: 'rgba(15, 23, 42, 0.85)', strokeWidth: 0 },
+            labelBgPadding: [4, 2] as [number, number],
+            labelBgBorderRadius: 4,
+            style: { stroke: '#64748b', strokeWidth: 1.5, strokeDasharray: '6,4', opacity: 0.5, strokeLinecap: 'round' },
+            markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8', width: 12, height: 12 }
           });
         }
       });
@@ -678,10 +825,15 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
               id: `edge-${svcId}-${podId}`,
               source: svcId,
               target: podId,
-              type: 'smoothstep',
+              type: 'flow',
               animated: true,
-              style: { stroke: '#fbbf24', strokeWidth: 2, strokeDasharray: '5,5', opacity: 0.8 },
-              markerEnd: { type: MarkerType.ArrowClosed, color: '#fbbf24', width: 12, height: 12 }
+              label: 'routes to',
+              labelStyle: { fill: '#fbbf24', fontSize: 8, fontWeight: 600, fontFamily: 'Outfit, sans-serif', letterSpacing: '0.05em', opacity: 0 },
+              labelBgStyle: { fill: 'rgba(15, 23, 42, 0.85)', strokeWidth: 0 },
+              labelBgPadding: [4, 2] as [number, number],
+              labelBgBorderRadius: 4,
+              style: { stroke: '#fbbf24', strokeWidth: 1.8, strokeDasharray: '6,4', opacity: 0.6, strokeLinecap: 'round' },
+              markerEnd: { type: MarkerType.ArrowClosed, color: '#fde68a', width: 14, height: 14 }
             });
           }
         });
@@ -704,8 +856,14 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
                   id: `edge-${podId}-${dockerNodeId}`,
                   source: podId,
                   target: dockerNodeId,
-                  type: 'bezier',
-                  style: { stroke: '#38bdf8', strokeWidth: 1.2, strokeDasharray: '3,3', opacity: 0.15 },
+                  type: 'flow',
+                  data: { pathType: 'bezier' },
+                  label: 'backs',
+                  labelStyle: { fill: '#38bdf8', fontSize: 7, fontWeight: 600, fontFamily: 'Outfit, sans-serif', opacity: 0 },
+                  labelBgStyle: { fill: 'rgba(15, 23, 42, 0.85)', strokeWidth: 0 },
+                  labelBgPadding: [3, 2] as [number, number],
+                  labelBgBorderRadius: 3,
+                  style: { stroke: '#38bdf8', strokeWidth: 1.2, strokeDasharray: '4,4', opacity: 0.3 },
                   markerEnd: { type: MarkerType.ArrowClosed, color: '#38bdf8', width: 10, height: 10 }
                 });
               }
@@ -725,8 +883,14 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
               id: `edge-${nodeId}-${dockerNodeId}`,
               source: nodeId,
               target: dockerNodeId,
-              type: 'bezier',
-              style: { stroke: '#38bdf8', strokeWidth: 1.2, strokeDasharray: '3,3', opacity: 0.15 },
+              type: 'flow',
+              data: { pathType: 'bezier' },
+              label: 'hosts',
+              labelStyle: { fill: '#38bdf8', fontSize: 7, fontWeight: 600, fontFamily: 'Outfit, sans-serif', opacity: 0 },
+              labelBgStyle: { fill: 'rgba(15, 23, 42, 0.85)', strokeWidth: 0 },
+              labelBgPadding: [3, 2] as [number, number],
+              labelBgBorderRadius: 3,
+              style: { stroke: '#38bdf8', strokeWidth: 1.2, strokeDasharray: '4,4', opacity: 0.3 },
               markerEnd: { type: MarkerType.ArrowClosed, color: '#38bdf8', width: 10, height: 10 }
             });
           }
@@ -777,6 +941,42 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
     );
   }, [searchTerm]);
 
+  // IDs of resource nodes currently matching the search term
+  const searchMatchIds = useMemo(() => {
+    if (!searchTerm) return [];
+    return rawNodes.filter(n => n.type === 'devopsNode' && matchesSearch(n)).map(n => n.id);
+  }, [rawNodes, searchTerm, matchesSearch]);
+
+  // Auto-pan/zoom to the result when the search narrows to a single match
+  useEffect(() => {
+    if (searchMatchIds.length === 1) {
+      fitView({ nodes: [{ id: searchMatchIds[0] }], duration: 500, padding: 1.2, maxZoom: 1 });
+    }
+  }, [searchMatchIds, fitView]);
+
+  // Keyboard shortcuts: "/" focuses search, "Escape" clears search / closes drawer
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+
+      if (e.key === '/' && !isTyping) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      } else if (e.key === 'Escape') {
+        if (searchTerm) {
+          setSearchTerm('');
+        } else if (selectedNodeId) {
+          setSelectedNodeId(null);
+        } else if (isFullscreen) {
+          setIsFullscreen(false);
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [searchTerm, selectedNodeId, isFullscreen]);
+
   // Map raw nodes & inject states (search matching, dimming, hover states)
   const flowNodes = useMemo(() => {
     return rawNodes.map(node => {
@@ -816,24 +1016,35 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
 
       let edgeStyle = { ...edge.style };
       if (isDimmed) {
-        edgeStyle.opacity = 0.08;
+        edgeStyle.opacity = 0.06;
       } else if (isHovered) {
-        edgeStyle.stroke = '#f43f5e'; // pink glow on hover
-        edgeStyle.strokeWidth = 3;
-        edgeStyle.opacity = 1;
+        edgeStyle.stroke = '#e2e8f0'; // bright white glow on hover
+        edgeStyle.strokeWidth = 2.5;
+        edgeStyle.opacity = 0.9;
+        edgeStyle.filter = 'drop-shadow(0 0 4px rgba(226, 232, 240, 0.5))';
       } else if (isCrossPanel) {
-        edgeStyle.opacity = 0.15;
+        edgeStyle.opacity = 0.12;
       }
 
       let markerEnd = edge.markerEnd;
       if (isHovered) {
-        markerEnd = typeof markerEnd === 'object' ? { ...markerEnd, color: '#f43f5e' } : markerEnd;
+        markerEnd = typeof markerEnd === 'object' ? { ...markerEnd, color: '#e2e8f0' } : markerEnd;
+      }
+
+      // Update label visibility on hover/dim
+      let labelStyle = edge.labelStyle ? { ...edge.labelStyle as any } : undefined;
+      if (isDimmed && labelStyle) {
+        labelStyle.opacity = 0.1;
+      } else if (isHovered && labelStyle) {
+        labelStyle.opacity = 1;
+        labelStyle.fill = '#f1f5f9';
       }
 
       return {
         ...edge,
         style: edgeStyle,
-        markerEnd
+        markerEnd,
+        ...(labelStyle ? { labelStyle } : {})
       };
     });
   }, [rawEdges, hoveredNodeId]);
@@ -1032,8 +1243,9 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
         <div style={{ position: 'relative', display: 'flex', alignItems: 'center', flexGrow: 1, minWidth: '200px' }}>
           <Search size={14} style={{ position: 'absolute', left: '10px', color: '#64748b' }} />
           <input
+            ref={searchInputRef}
             type="text"
-            placeholder="Search name, type, state, IP or ports..."
+            placeholder="Search name, type, state, IP or ports... (press /)"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             style={{
@@ -1050,11 +1262,23 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
             }}
           />
           {searchTerm && (
-            <X
-              size={12}
-              onClick={() => setSearchTerm('')}
-              style={{ position: 'absolute', right: '10px', color: '#64748b', cursor: 'pointer' }}
-            />
+            <>
+              <span style={{
+                position: 'absolute', right: '28px', fontSize: '10px', fontWeight: 600,
+                color: searchMatchIds.length > 0 ? '#38bdf8' : '#f43f5e', pointerEvents: 'none'
+              }}>
+                {searchMatchIds.length} match{searchMatchIds.length === 1 ? '' : 'es'}
+              </span>
+              <X
+                size={12}
+                role="button"
+                tabIndex={0}
+                aria-label="Clear search"
+                onClick={() => setSearchTerm('')}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSearchTerm(''); }}
+                style={{ position: 'absolute', right: '10px', color: '#64748b', cursor: 'pointer' }}
+              />
+            </>
           )}
         </div>
 
@@ -1165,24 +1389,113 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
             <Clock size={11} /> Age / Freshness
           </button>
         </div>
+
+        {/* Fit View */}
+        <button
+          onClick={() => fitView({ duration: 500, padding: 0.15 })}
+          title="Reset zoom & pan to fit the whole graph"
+          style={{
+            background: 'rgba(2, 6, 23, 0.4)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: '6px',
+            color: '#94a3b8',
+            padding: '6px 12px',
+            fontSize: '12px',
+            cursor: 'pointer',
+            fontWeight: 500,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            marginLeft: 'auto'
+          }}
+        >
+          <RefreshCw size={13} /> Fit View
+        </button>
+
+        {/* Fullscreen Toggle */}
+        <button
+          onClick={() => setIsFullscreen(prev => !prev)}
+          style={{
+            background: isFullscreen ? 'rgba(56, 189, 248, 0.15)' : 'rgba(2, 6, 23, 0.4)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: '6px',
+            color: isFullscreen ? '#38bdf8' : '#94a3b8',
+            padding: '6px 12px',
+            fontSize: '12px',
+            cursor: 'pointer',
+            fontWeight: 500,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px'
+          }}
+        >
+          {isFullscreen ? (
+            <>
+              <Minimize2 size={13} /> Exit Fullscreen
+            </>
+          ) : (
+            <>
+              <Maximize2 size={13} /> Fullscreen Map
+            </>
+          )}
+        </button>
       </div>
 
       {/* ─── Graph Canvas Container ─── */}
       <div
-        style={{
+        style={isFullscreen ? {
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          background: 'radial-gradient(ellipse at 30% 20%, rgba(15, 23, 42, 0.99), rgba(2, 6, 23, 0.99))',
+          zIndex: 9999,
+          overflow: 'hidden',
+          padding: '20px',
+          boxSizing: 'border-box'
+        } : {
           position: 'relative',
           width: '100%',
-          height: '580px',
-          background: 'rgba(2, 6, 23, 0.6)',
-          borderRadius: '10px',
-          border: '1px solid rgba(255,255,255,0.06)',
+          height: '620px',
+          background: 'radial-gradient(ellipse at 20% 30%, rgba(15, 23, 42, 0.7), rgba(2, 6, 23, 0.7))',
+          borderRadius: '12px',
+          border: '1px solid rgba(255,255,255,0.05)',
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03), 0 4px 24px rgba(0,0,0,0.3)',
           overflow: 'hidden'
         }}
       >
+        {isFullscreen && (
+          <button
+            onClick={() => setIsFullscreen(false)}
+            style={{
+              position: 'absolute',
+              top: '20px',
+              right: '20px',
+              zIndex: 10001,
+              background: 'rgba(239, 68, 68, 0.2)',
+              border: '1px solid #ef4444',
+              borderRadius: '6px',
+              color: '#f43f5e',
+              padding: '8px 12px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              fontWeight: 600,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+            }}
+          >
+            <Minimize2 size={14} /> Exit Fullscreen
+          </button>
+        )}
+
         <ReactFlow
           nodes={flowNodes}
           edges={flowEdges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodeClick={onNodeClick}
           fitView
           fitViewOptions={{ padding: 0.15 }}
@@ -1193,16 +1506,39 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
           preventScrolling={false}
           nodesConnectable={false}
           nodesDraggable={true}
+          style={{ width: '100%', height: isFullscreen ? 'calc(100vh - 40px)' : '100%' }}
         >
-          <Background color="rgba(255,255,255,0.05)" gap={16} size={1} />
+          <Background color="rgba(255,255,255,0.03)" gap={24} size={0.8} />
           <Controls
             showInteractive={false}
             style={{
-              background: 'rgba(15, 23, 42, 0.85)',
-              border: '1px solid rgba(255,255,255,0.08)',
-              color: '#fff',
-              borderRadius: '8px',
-              overflow: 'hidden'
+              background: 'rgba(15, 23, 42, 0.9)',
+              backdropFilter: 'blur(12px)',
+              border: '1px solid rgba(255,255,255,0.06)',
+              color: '#e2e8f0',
+              borderRadius: '10px',
+              overflow: 'hidden',
+              boxShadow: '0 4px 16px rgba(0,0,0,0.3)'
+            }}
+          />
+          <MiniMap
+            pannable
+            zoomable
+            nodeStrokeWidth={0}
+            nodeColor={(n: Node) => {
+              if (n.type === 'groupNode') return 'transparent';
+              const nodeColors: Record<string, string> = {
+                docker: '#38bdf8', port: '#818cf8', service: '#fbbf24',
+                deployment: '#a78bfa', pod: '#34d399', 'k8s-node': '#94a3b8'
+              };
+              return nodeColors[(n.data as any)?.type] || 'rgba(148,163,184,0.5)';
+            }}
+            maskColor="rgba(2, 6, 23, 0.75)"
+            style={{
+              background: 'rgba(15, 23, 42, 0.9)',
+              border: '1px solid rgba(255,255,255,0.06)',
+              borderRadius: '10px',
+              boxShadow: '0 4px 16px rgba(0,0,0,0.3)'
             }}
           />
         </ReactFlow>
@@ -1241,7 +1577,11 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
               </div>
               <X
                 size={18}
+                role="button"
+                tabIndex={0}
+                aria-label="Close details panel"
                 onClick={() => setSelectedNodeId(null)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedNodeId(null); }}
                 style={{ color: '#94a3b8', cursor: 'pointer', hover: { color: '#fff' } } as any}
               />
             </div>
@@ -1772,6 +2112,10 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
         display: 'flex', gap: '16px', marginTop: '10px', flexWrap: 'wrap',
         padding: '8px 4px', fontSize: '11px', color: 'var(--text-muted)'
       }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: '5px', marginRight: '8px', paddingRight: '12px', borderRight: '1px solid rgba(255,255,255,0.08)' }}>
+          <span style={{ fontSize: '10px', fontWeight: 600, color: '#94a3b8', letterSpacing: '0.04em' }}>FLOW →</span>
+          <span style={{ fontSize: '9px', color: '#64748b' }}>Port → Container → Service → Deploy → Pod → Node</span>
+        </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
           <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#0ea5e9', display: 'inline-block' }}></span> Docker
         </span>
@@ -1797,5 +2141,11 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ containers, k8sRes
     </div>
   );
 };
+
+export const TopologyGraph: React.FC<TopologyGraphProps> = (props) => (
+  <ReactFlowProvider>
+    <TopologyGraphInner {...props} />
+  </ReactFlowProvider>
+);
 
 export default TopologyGraph;

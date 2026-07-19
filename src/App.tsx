@@ -20,10 +20,12 @@ import {
   EyeOff,
   SlidersHorizontal,
   Info,
-  ShieldAlert
+  ShieldAlert,
+  Cpu
 } from 'lucide-react';
 import TopologyGraph from './components/TopologyGraph';
 import MermaidChart from './components/MermaidChart';
+import AgentTeamwork from './components/AgentTeamwork';
 
 interface Container {
   id: string;
@@ -107,7 +109,7 @@ interface ChatMessage {
 
 export function App() {
   // Tabs & Config
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'docker' | 'k8s' | 'chat' | 'security'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'docker' | 'k8s' | 'chat' | 'security' | 'agents'>('dashboard');
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [provider, setProvider] = useState<'gemini' | 'local'>(() => (localStorage.getItem('kalam_llm_provider') as 'gemini' | 'local') || 'gemini');
@@ -171,10 +173,25 @@ export function App() {
   } | null>(null);
 
   // Chat/Agent
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
-    {
-      role: 'agent',
-      content: `Hello! I am **Kalam**, your local DevOps agent. 
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>(() => {
+    const saved = localStorage.getItem('kalam_chat_history');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((m: any) => ({
+            ...m,
+            timestamp: m.timestamp ? new Date(m.timestamp) : new Date()
+          }));
+        }
+      } catch (e) {
+        console.error('Failed to parse saved chat history:', e);
+      }
+    }
+    return [
+      {
+        role: 'agent',
+        content: `Hello! I am **Kalam**, your local DevOps agent. 
 I have scanned your local workspace. I can see your running Docker containers and Kubernetes clusters.
 
 I can help you:
@@ -183,14 +200,24 @@ I can help you:
 3. Automatically execute actions like restarting containers, scaling deployments, or viewing logs upon your approval.
 
 Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the settings panel by clicking the Sliders icon in the top header. Otherwise, you can still view your resources in the tabs above and use standard controls!`,
-      timestamp: new Date()
-    }
-  ]);
+        timestamp: new Date()
+      }
+    ];
+  });
   const [chatInput, setChatInput] = useState<string>('');
   const [chatLoading, setChatLoading] = useState<boolean>(false);
   
   // Interactive Diagram State
-  const [agentMermaidChart, setAgentMermaidChart] = useState<string>('');
+  const [agentMermaidChart, setAgentMermaidChart] = useState<string>(() => localStorage.getItem('kalam_agent_mermaid_chart') || '');
+
+  // Persist chat and diagram state
+  useEffect(() => {
+    localStorage.setItem('kalam_chat_history', JSON.stringify(chatHistory));
+  }, [chatHistory]);
+
+  useEffect(() => {
+    localStorage.setItem('kalam_agent_mermaid_chart', agentMermaidChart);
+  }, [agentMermaidChart]);
 
   // Floating Hover State for Node Tooltips
   const [hoveredNode, setHoveredNode] = useState<{
@@ -830,6 +857,13 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           <ShieldAlert size={18} />
           Image Hardener
         </button>
+        <button 
+          className={`tab-btn ${activeTab === 'agents' ? 'active' : ''}`}
+          onClick={() => setActiveTab('agents')}
+        >
+          <Cpu size={18} />
+          Agent Teamwork
+        </button>
       </nav>
 
       {/* Tab Contents */}
@@ -937,6 +971,20 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 </div>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* AGENTS TEAMWORK TAB */}
+        {activeTab === 'agents' && (
+          <div className="tab-panel">
+            <AgentTeamwork
+              containers={dockerContainers}
+              k8sResources={k8sResources}
+              localUrl={localUrl}
+              localModel={localModel}
+              apiKey={apiKey}
+              provider={provider}
+            />
           </div>
         )}
 
@@ -1310,6 +1358,36 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
             {/* Right Panel: Chat Console */}
             <div className="chat-main">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 8px 12px 8px', borderBottom: '1px solid var(--border-color)', marginBottom: '12px' }}>
+                <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)' }}>Chat Conversation</span>
+                <button 
+                  onClick={() => {
+                    if (window.confirm("Are you sure you want to clear your chat history?")) {
+                      localStorage.removeItem('kalam_chat_history');
+                      setChatHistory([
+                        {
+                          role: 'agent',
+                          content: `Hello! I am **Kalam**, your local DevOps agent. 
+I have scanned your local workspace. I can see your running Docker containers and Kubernetes clusters.
+
+I can help you:
+1. Explain the state of your clusters and individual resources.
+2. Render visual graphs of relationships between containers, nodes, and pods.
+3. Automatically execute actions like restarting containers, scaling deployments, or viewing logs upon your approval.
+
+Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the settings panel by clicking the Sliders icon in the top header. Otherwise, you can still view your resources in the tabs above and use standard controls!`,
+                          timestamp: new Date()
+                        }
+                      ]);
+                      setAgentMermaidChart('');
+                    }
+                  }}
+                  style={{ background: 'transparent', border: 'none', color: 'var(--status-error)', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 8px', borderRadius: '4px' }}
+                >
+                  <Trash2 size={13} />
+                  Clear Chat
+                </button>
+              </div>
               <div className="chat-messages-wrapper">
                 {chatHistory.map((msg, msgIdx) => (
                   <div key={msgIdx} className={`chat-message ${msg.role}`}>
