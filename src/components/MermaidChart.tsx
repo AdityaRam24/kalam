@@ -139,7 +139,7 @@ export const MermaidChart: React.FC<MermaidChartProps> = ({ chart, onNodeHover }
   if (error) {
     return (
       <div className="mermaid-error">
-        <div className="error-title">⚠️ Graph syntax error</div>
+        <div className="error-title">Graph syntax error</div>
         <pre className="error-code">{chart}</pre>
       </div>
     );

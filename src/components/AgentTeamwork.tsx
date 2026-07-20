@@ -1,5 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { Play, AlertTriangle, Users, Terminal, CheckCircle2, Cpu, Activity } from 'lucide-react';
+import { 
+  Play, 
+  AlertTriangle, 
+  Users, 
+  Terminal, 
+  CheckCircle2, 
+  Cpu, 
+  Activity, 
+  FileText, 
+  Database, 
+  Server, 
+  ShieldAlert 
+} from 'lucide-react';
 
 interface AgentStep {
   agent: 'Planner' | 'Docker Specialist' | 'K8s Administrator' | 'Security Officer' | 'System Verifier';
@@ -19,11 +31,11 @@ interface AgentTeamworkProps {
 }
 
 const AGENTS_LIST = [
-  { name: 'Planner', avatar: '📋', role: 'Task & Workflow Coordinator', color: '#38bdf8', glow: 'rgba(56, 189, 248, 0.2)' },
-  { name: 'Docker Specialist', avatar: '🐳', role: 'Container Engine & Logs', color: '#0ea5e9', glow: 'rgba(14, 165, 233, 0.2)' },
-  { name: 'K8s Administrator', avatar: '☸️', role: 'Pods & Cluster Scaling', color: '#a78bfa', glow: 'rgba(167, 139, 250, 0.2)' },
-  { name: 'Security Officer', avatar: '🛡️', role: 'CVE Scan & Hardening', color: '#f43f5e', glow: 'rgba(244, 63, 94, 0.2)' },
-  { name: 'System Verifier', avatar: '🔬', role: 'Telemetry & Verification', color: '#10b981', glow: 'rgba(16, 185, 129, 0.2)' }
+  { name: 'Planner', icon: FileText, role: 'Task & Workflow Coordinator', color: '#01A781', glow: 'rgba(1, 167, 129, 0.25)' },
+  { name: 'Docker Specialist', icon: Database, role: 'Container Engine & Logs', color: '#0073E6', glow: 'rgba(0, 115, 230, 0.25)' },
+  { name: 'K8s Administrator', icon: Server, role: 'Pods & Cluster Scaling', color: '#00C99B', glow: 'rgba(0, 201, 155, 0.25)' },
+  { name: 'Security Officer', icon: ShieldAlert, role: 'CVE Scan & Hardening', color: '#FF8D00', glow: 'rgba(255, 141, 0, 0.25)' },
+  { name: 'System Verifier', icon: Activity, role: 'Telemetry & Verification', color: '#10B981', glow: 'rgba(16, 185, 129, 0.25)' }
 ] as const;
 
 export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
@@ -49,7 +61,6 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
     }
     
     setSwarmActive(true);
-    // Reveal steps rapidly across all side-by-side columns to simulate concurrent parallel execution
     let currentIdx = 0;
     setVisibleSteps([]);
 
@@ -64,7 +75,7 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
         clearInterval(interval);
         setSwarmActive(false);
       }
-    }, 600); // Fast 600ms parallel streaming for all side-by-side agents
+    }, 500);
 
     return () => clearInterval(interval);
   }, [trace]);
@@ -114,8 +125,8 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
       <div className="panel-card">
         <div className="panel-card-title">
           <h2>
-            <Users size={20} style={{ color: 'var(--accent-purple)' }} />
-            <span>Parallel Multi-Agent Swarm Orchestrator</span>
+            <Users size={18} style={{ color: 'var(--hpe-green)' }} />
+            <span>HPE GreenLake Agentic Swarm Orchestrator</span>
           </h2>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span className={`badge ${swarmActive || loading ? 'running' : visibleSteps.length > 0 ? 'success' : 'neutral'}`}>
@@ -126,13 +137,13 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
         </div>
 
         <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
-          Deploy 5 specialized AI agents working <strong>side-by-side in parallel</strong>. Each agent handles a specific domain (Planning, Docker, Kubernetes, Security Audit, Verification) concurrently.
+          Deploy 5 specialized enterprise AI agents working <strong>side-by-side in parallel</strong>. Each agent handles a specific domain (Workflow Planning, Docker Runtime, Kubernetes Cluster, Security Audit, Telemetry Verification) concurrently.
         </p>
 
         <form onSubmit={deployTeam} style={{ display: 'flex', gap: '12px', marginTop: '6px' }}>
           <input
             type="text"
-            placeholder="e.g. Audit default namespace, scan container CVEs, check pod health, and scale deployments..."
+            placeholder="e.g., Audit default namespace, scan container CVEs, check pod health, and scale deployments..."
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
             disabled={loading}
@@ -140,7 +151,7 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
               flex: 1,
               background: 'var(--bg-tertiary)',
               border: '1px solid var(--border-color)',
-              borderRadius: '10px',
+              borderRadius: '8px',
               padding: '12px 16px',
               color: 'var(--text-primary)',
               fontSize: '13.5px',
@@ -160,7 +171,7 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
               </>
             ) : (
               <>
-                <Play size={16} />
+                <Play size={15} />
                 <span>Deploy Side-by-Side Swarm</span>
               </>
             )}
@@ -181,8 +192,8 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
       {/* ─── SIDE-BY-SIDE 5-COLUMN AGENT SWARM GRID ─── */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Cpu size={16} style={{ color: 'var(--accent-cyan)' }} />
+          <h3 style={{ margin: 0, fontSize: '13px', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Cpu size={16} style={{ color: 'var(--hpe-green)' }} />
             <span>Active Side-by-Side Swarm Matrix (5 Parallel Agents)</span>
           </h3>
           <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
@@ -192,6 +203,7 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
 
         <div className="agent-swarm-grid">
           {AGENTS_LIST.map((agentMeta) => {
+            const AgentIcon = agentMeta.icon;
             const agentSteps = visibleSteps.filter(s => s.agent === agentMeta.name);
             const isAgentActive = (swarmActive || loading) && (agentSteps.length > 0 || visibleSteps.length === 0);
             const hasFinished = visibleSteps.length > 0 && !swarmActive && !loading;
@@ -203,7 +215,7 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
                 style={{
                   background: 'var(--bg-card)',
                   border: `1px solid ${isAgentActive ? agentMeta.color : 'var(--border-color)'}`,
-                  borderRadius: '14px',
+                  borderRadius: '12px',
                   padding: '16px',
                   display: 'flex',
                   flexDirection: 'column',
@@ -216,8 +228,8 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
                 {/* Agent Header */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid var(--border-color)', paddingBottom: '10px' }}>
                   <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                    <div style={{ fontSize: '24px', width: '36px', height: '36px', borderRadius: '8px', background: 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid var(--border-color)' }}>
-                      {agentMeta.avatar}
+                    <div style={{ width: '36px', height: '36px', borderRadius: '8px', background: 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: `1px solid ${agentMeta.color}40`, color: agentMeta.color }}>
+                      <AgentIcon size={18} />
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column' }}>
                       <strong style={{ fontSize: '13.5px', color: agentMeta.color }}>{agentMeta.name}</strong>
@@ -272,7 +284,7 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
                         <span style={{ lineHeight: '1.4', color: 'var(--text-primary)' }}>{step.message}</span>
                         {step.command && (
                           <div style={{ background: 'var(--bg-primary)', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', marginTop: '2px' }}>
-                            <div style={{ fontSize: '10px', color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>
+                            <div style={{ fontSize: '10px', color: 'var(--hpe-green)', fontFamily: 'var(--font-mono)' }}>
                               $ {step.command}
                             </div>
                           </div>
@@ -291,7 +303,7 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
       <div className="panel-card">
         <div className="panel-card-title">
           <h3>
-            <Terminal size={16} style={{ color: 'var(--accent-cyan)' }} />
+            <Terminal size={16} style={{ color: 'var(--hpe-green)' }} />
             <span>Parallel Terminal Command Stream</span>
           </h3>
           <span className="badge neutral">Real-Time Output</span>

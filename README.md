@@ -53,16 +53,45 @@ Open your browser and navigate to **[http://localhost:5173](http://localhost:517
 
 ---
 
+## 🧠 HPE Private Cloud AI (PCAI) Assistant
+
+Kalam includes a dedicated **PCAI Assistant** panel — a retrieval-grounded chatbot that knows HPE Private Cloud AI end to end (AI Essentials / MLDE / MLDM / MLIS, the data lakehouse, NVIDIA AI Enterprise & NIM, HPE GreenLake management, and the Kubernetes platform PCAI runs on).
+
+It is a **RAG (Retrieval-Augmented Generation)** system, not a memorized model: it ingests real HPE documentation into a local knowledge base, retrieves the most relevant docs for every question, and answers **grounded in those sources with inline `[[n]]` citations** — so it doesn't hallucinate HPE-specific details.
+
+**Using it**
+1. Open the **PCAI Assistant** tab (sidebar → AI Intelligence).
+2. Click **Train / Build Knowledge Base** to ingest. This crawls the public HPE docs (HPE Developer Portal, `docs.ai-solutions.ext.hpe.com`, MLDE docs) and merges them with a curated offline seed of PCAI facts + common errors. Re-run any time to refresh ("train yourself").
+3. **Ask** mode — ask anything about PCAI. **Diagnose Error** mode — paste an error, log, or stack trace and get likely root cause + ordered fix steps (kubectl / GreenLake / AI Essentials).
+
+**How it works**
+* Embeddings + chat use whichever engine you configured in Settings — **Google Gemini** or a **Local LLM (Ollama / LM Studio)** — switchable. With no engine configured it still works via **lexical search** and returns the raw retrieved docs.
+* Knowledge base is stored at `server/pcai/kb.json` (git-ignored, rebuildable). Backend lives in `server/pcai/`; endpoints: `GET /api/pcai/status`, `POST /api/pcai/ingest`, `POST /api/pcai/chat`.
+
+> Note: This assistant is an independent tool and is **not affiliated with or endorsed by HPE**. It cites public HPE documentation for reference.
+
 ## 🛠️ Command Line Interface (CLI)
 
-Kalam comes with a terminal CLI. To view help and commands:
+Kalam ships a global `kalam` command. **Install it once** so you can type `kalam` from anywhere:
+
 ```bash
-node bin/kalam.cjs help
+npm run cli:install     # or: npm link   (Windows: double-click install-cli.bat)
 ```
 
-### Supported Commands:
-* `status` - Check if local Docker and Kubernetes daemons are running.
-* `list <docker|k8s>` - Print active containers or pod namespaces.
-* `scan <container-id>` - Scan container image layers for vulnerabilities.
-* `fix <container-id>` - Rebuild and launch the container on a secure base image.
-* `chat [message]` - Command line conversational agent prompt loop.
+Then open a **new** terminal and run `kalam help`. (Not ready to install globally? Use `node bin/kalam.cjs <command>` instead.)
+
+Commands that need AI **auto-start the backend server for you** — no need to run `npm run dev` first. For composed (LLM-written) answers, put your `GEMINI_API_KEY` in `.env`, or run a local LLM (Ollama). Without either, it still works and returns the exact retrieved HPE docs.
+
+### HPE PCAI brain
+* `kalam solve "<error/log>"` — diagnose a PCAI error and get an ordered fix (also reads piped input: `kubectl logs pod | kalam solve`).
+* `kalam ask "<question>"` — ask anything about HPE Private Cloud AI.
+* `kalam pcai` — interactive PCAI assistant shell (prefix a line with `solve:` to force diagnosis).
+* `kalam train [--offline]` — build/refresh the knowledge base (crawls live HPE docs unless `--offline`).
+* `kalam kb` — show knowledge-base status.
+
+### Local DevOps
+* `kalam status` — check local Docker and Kubernetes daemons.
+* `kalam list <docker|k8s>` — print active containers or Kubernetes pods.
+* `kalam scan <container-id>` — scan a container image for CVEs.
+* `kalam fix <container-id>` — rebuild the container on a secure base image.
+* `kalam chat [message]` — cluster-aware DevOps agent (single message or prompt loop).

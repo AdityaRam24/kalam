@@ -12,7 +12,9 @@
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "cli": "node bin/kalam.cjs",
+    "cli:install": "npm link"
   },
   "dependencies": {
     "@google/genai": "^2.11.0",

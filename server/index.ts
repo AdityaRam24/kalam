@@ -4,6 +4,8 @@ import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
+import { llmRouter } from './llm.js';
 
 dotenv.config();
 
@@ -12,7 +14,12 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' })); // allow pasting large logs/stack traces
+
+// HPE Private Cloud AI assistant (RAG knowledge base + grounded chat).
+app.use(pcaiRouter);
+// Local LLM model discovery + pull (Ollama / LM Studio).
+app.use(llmRouter);
 
 // Helper for safe command execution
 async function runCmd(cmd: string): Promise<{ stdout: string; stderr: string; success: boolean }> {
@@ -452,20 +459,12 @@ app.get('/api/k8s/logs/:namespace/:pod', async (req, res) => {
   res.json({ logs: stdout || stderr });
 });
 
-app.post('/api/agent/chat', async (req, res) => {
-  const { 
-    prompt, 
-    chatHistory = [], 
-    apiKey, 
-    provider = 'gemini', 
-    localUrl = 'http://localhost:11434/v1', 
-    localModel = 'qwen2.5-coder:7b' 
-  } = req.body;
-  // Let's gather the live cluster status to inject into the LLM context
+// Gather the live Docker + Kubernetes state, formatted for LLM context. Shared
+// by the DevOps agent's streaming and non-streaming routes.
+async function gatherClusterState() {
   const dockerVer = await runCmd('docker --version');
   const k8sVer = await runCmd('kubectl version --client');
-  
-  // Get docker containers
+
   let dockerStateStr = 'Docker status: Not running or failed to list containers.';
   const dockerRes = await runCmd('docker ps -a --format "{{json .}}"');
   if (dockerRes.success) {
@@ -478,12 +477,11 @@ app.post('/api/agent/chat', async (req, res) => {
         return null;
       }
     }).filter(Boolean);
-    dockerStateStr = conts.length > 0 
-      ? `Docker is running with the following containers:\n${conts.join('\n')}` 
+    dockerStateStr = conts.length > 0
+      ? `Docker is running with the following containers:\n${conts.join('\n')}`
       : 'Docker is running, but no containers are currently present.';
   }
 
-  // Get kubernetes resources
   let k8sStateStr = 'Kubernetes status: Not running or failed to list resources.';
   const k8sRes = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces');
   if (k8sRes.success) {
@@ -524,24 +522,33 @@ ${pods.join('\n')}`;
     }
   }
 
-  const systemInstruction = `You are Kalam, a DevOps AI Agent. You run locally on the user's machine and help them visualize, analyze, and manage their local Docker and Kubernetes environments.
+  return { dockerVer, k8sVer, dockerRes, k8sRes, dockerStateStr, k8sStateStr };
+}
+
+function buildAgentSystemInstruction(s: {
+  dockerVer: { stdout: string };
+  k8sVer: { stdout: string };
+  dockerStateStr: string;
+  k8sStateStr: string;
+}): string {
+  return `You are Kalam, a DevOps AI Agent. You run locally on the user's machine and help them visualize, analyze, and manage their local Docker and Kubernetes environments.
 You are talking to the user. You have direct read and write access (via local execution) to Docker and Kubernetes.
 
 Here is the current live cluster environment state:
 ---
 SYSTEM ENVIRONMENT:
-- Docker Version: ${dockerVer.stdout.trim() || 'Unknown'}
-- Kubernetes Client Version: ${k8sVer.stdout.trim() || 'Unknown'}
+- Docker Version: ${s.dockerVer.stdout.trim() || 'Unknown'}
+- Kubernetes Client Version: ${s.k8sVer.stdout.trim() || 'Unknown'}
 
-${dockerStateStr}
+${s.dockerStateStr}
 
-${k8sStateStr}
+${s.k8sStateStr}
 ---
 
 INSTRUCTIONS:
 1. Explain the state clearly when asked.
-2. If the user wants to see relationships, connections, or topology, generate a Mermaid diagram. 
-   Wrap the diagram in a markdown code block starting with \`\`\`mermaid. 
+2. If the user wants to see relationships, connections, or topology, generate a Mermaid diagram.
+   Wrap the diagram in a markdown code block starting with \`\`\`mermaid.
    Inside the diagram, represent containers, pods, services, and nodes. Use clean design, subgraphs for namespaces or Docker vs K8s, and arrows indicating service/port mappings or node hosting relationships.
 3. If the user asks you to take an action (e.g. restart container, scale deployment, delete pod), explain what you will do and recommend that action.
    To recommend an action, append a structured JSON block at the VERY END of your response (after all your chat explanation) using this exact syntax:
@@ -553,8 +560,22 @@ INSTRUCTIONS:
    [ACTION: {"type": "k8s_delete_pod", "name": "POD_NAME", "namespace": "NAMESPACE", "label": "Delete pod Name"}]
 
    Only output actions that make direct sense based on the user's intent. Do not output placeholders.
-   
+
 4. Keep answers friendly, technical but accessible, and crisp. Avoid extra wordy responses.`;
+}
+
+app.post('/api/agent/chat', async (req, res) => {
+  const {
+    prompt,
+    chatHistory = [],
+    apiKey,
+    provider = 'gemini',
+    localUrl = 'http://localhost:11434/v1',
+    localModel = 'qwen2.5-coder:7b'
+  } = req.body;
+
+  const { dockerVer, k8sVer, dockerRes, k8sRes, dockerStateStr, k8sStateStr } = await gatherClusterState();
+  const systemInstruction = buildAgentSystemInstruction({ dockerVer, k8sVer, dockerStateStr, k8sStateStr });
 
   if (provider === 'local') {
     try {
@@ -669,6 +690,72 @@ Kalam:`;
   } catch (error: any) {
     console.error('Gemini API Error:', error);
     res.status(500).json({ error: 'Failed to call Gemini API', details: error.message });
+  }
+});
+
+// API: DevOps agent chat, streamed token-by-token (SSE). Powers the CLI's
+// "types as it responds" experience. Never hard-errors — streams a helpful
+// message if no engine is reachable.
+app.post('/api/agent/chat/stream', async (req, res) => {
+  const {
+    prompt,
+    chatHistory = [],
+    apiKey,
+    provider = 'gemini',
+    localUrl = 'http://localhost:11434/v1',
+    localModel = 'qwen2.5-coder:7b'
+  } = req.body;
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  const sse = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  const finish = () => { sse({ type: 'done' }); res.write('data: [DONE]\n\n'); res.end(); };
+
+  if (!prompt || !String(prompt).trim()) {
+    sse({ type: 'delta', text: 'Ask me something about your Docker / Kubernetes environment.' });
+    return finish();
+  }
+
+  const { dockerVer, k8sVer, dockerStateStr, k8sStateStr } = await gatherClusterState();
+  const systemInstruction = buildAgentSystemInstruction({ dockerVer, k8sVer, dockerStateStr, k8sStateStr });
+
+  try {
+    if (provider === 'local') {
+      const result = await streamLocalChat({
+        localUrl, localModel, systemInstruction, chatHistory, prompt,
+        numCtx: 4096,
+        onDelta: (t) => sse({ type: 'delta', text: t }),
+      });
+      if (!result.success) sse({ type: 'delta', text: `⚠️ ${result.reason}` });
+      return finish();
+    }
+
+    const finalKey = apiKey || process.env.GEMINI_API_KEY;
+    if (!finalKey) {
+      sse({ type: 'delta', text: 'No AI engine is configured. Add a **Gemini API key** to `.env`, or switch to **Local LLM** (Ollama) with `/provider local`. Meanwhile, try `/status`, `list docker`, or `list k8s`.' });
+      return finish();
+    }
+
+    const geminiPrompt = `${systemInstruction}
+
+Let's look at the chat history:
+${chatHistory.map((h: any) => `${h.role === 'user' ? 'User' : 'Kalam'}: ${h.content}`).join('\n')}
+User: ${prompt}
+Kalam:`;
+    const result = await streamGemini({
+      apiKey: finalKey,
+      contents: geminiPrompt,
+      onDelta: (t) => sse({ type: 'delta', text: t }),
+    });
+    if (!result.success) sse({ type: 'delta', text: `⚠️ ${result.reason}` });
+    return finish();
+  } catch (e: any) {
+    sse({ type: 'delta', text: `⚠️ Unexpected error: ${e.message}` });
+    return finish();
   }
 });
 
@@ -846,6 +933,25 @@ app.post('/api/agent/orchestrate', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Kalam Backend Server running on port ${PORT}`);
+const server = app.listen(PORT, () => {
+  console.log(`✅ Kalam Backend Server running on http://localhost:${PORT}`);
 });
+
+// Clear, actionable message on the most common failure: the port is taken by a
+// leftover backend (e.g. a previous `npm run dev` or a CLI auto-start).
+server.on('error', (err: any) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n❌ Port ${PORT} is already in use — another Kalam backend is probably still running.`);
+    console.error(`   Stop it, then restart. On Windows (PowerShell):`);
+    console.error(`   Get-NetTCPConnection -LocalPort ${PORT} | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }`);
+    console.error(`   Or set a different PORT in your .env file.\n`);
+  } else {
+    console.error('\n❌ Backend server failed to start:', err);
+  }
+  process.exit(1);
+});
+
+// Keep the server alive if a single request throws unexpectedly, instead of
+// letting one bad error take down the whole backend.
+process.on('uncaughtException', (e) => console.error('⚠️  Uncaught exception (server stays up):', e));
+process.on('unhandledRejection', (e) => console.error('⚠️  Unhandled rejection (server stays up):', e));

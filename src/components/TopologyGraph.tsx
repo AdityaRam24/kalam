@@ -1392,7 +1392,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
         {/* Fit View */}
         <button
-          onClick={() => fitView({ duration: 500, padding: 0.15 })}
+          onClick={() => fitView({ duration: 500, padding: 0.2 })}
           title="Reset zoom & pan to fit the whole graph"
           style={{
             background: 'rgba(2, 6, 23, 0.4)',
@@ -1457,7 +1457,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         } : {
           position: 'relative',
           width: '100%',
-          height: '620px',
+          height: '680px',
           background: 'radial-gradient(ellipse at 20% 30%, rgba(15, 23, 42, 0.7), rgba(2, 6, 23, 0.7))',
           borderRadius: '12px',
           border: '1px solid rgba(255,255,255,0.05)',
@@ -1498,7 +1498,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           edgeTypes={edgeTypes}
           onNodeClick={onNodeClick}
           fitView
-          fitViewOptions={{ padding: 0.15 }}
+          fitViewOptions={{ padding: 0.2 }}
           minZoom={0.2}
           maxZoom={1.5}
           zoomOnScroll={true}

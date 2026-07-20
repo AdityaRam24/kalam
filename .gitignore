@@ -13,6 +13,9 @@ dist-ssr
 *.local
 .env
 
+# PCAI generated knowledge base (rebuildable via ingest)
+server/pcai/kb.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

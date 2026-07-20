@@ -57,6 +57,17 @@ if %errorlevel% neq 0 (
 )
 echo [SUCCESS] All dependencies successfully installed.
 
+:: 3b. Register the global 'kalam' CLI command
+echo.
+echo [3b/4] Registering the global 'kalam' command (npm link)...
+call npm link
+if %errorlevel% neq 0 (
+    echo [WARNING] 'npm link' failed. You can retry later by running install-cli.bat
+    echo           (running as Administrator often fixes this).
+) else (
+    echo [SUCCESS] 'kalam' command registered. Open a NEW terminal to use it.
+)
+
 :: 4. Check Optional Prerequisites (Docker & kubectl)
 echo.
 echo [4/4] Checking optional cluster tools (Docker / kubectl)...

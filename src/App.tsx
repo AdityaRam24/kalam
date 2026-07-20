@@ -8,8 +8,6 @@ import {
   Play, 
   Square, 
   Trash2, 
-  Send, 
-  Check, 
   AlertCircle, 
   FileText, 
   ChevronRight, 
@@ -19,19 +17,23 @@ import {
   MessageSquare,
   Eye,
   EyeOff,
-  SlidersHorizontal,
-  Info,
   ShieldAlert,
+  Info,
   Cpu,
   Search,
   X,
   Activity,
   Sparkles,
-  HardDrive
+  HardDrive,
+  Sun,
+  Moon,
+  Network
 } from 'lucide-react';
 import TopologyGraph from './components/TopologyGraph';
-import MermaidChart from './components/MermaidChart';
 import AgentTeamwork from './components/AgentTeamwork';
+import HPEAgentChat from './components/HPEAgentChat';
+import PcaiAssistant from './components/PcaiAssistant';
+import ModelPicker from './components/ModelPicker';
 
 interface Container {
   id: string;
@@ -115,14 +117,16 @@ interface ChatMessage {
 
 export function App() {
   // Tabs & Config
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'docker' | 'k8s' | 'chat' | 'security' | 'agents'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'docker' | 'k8s' | 'chat' | 'security' | 'agents' | 'pcai'>('dashboard');
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [provider, setProvider] = useState<'gemini' | 'local'>(() => (localStorage.getItem('kalam_llm_provider') as 'gemini' | 'local') || 'gemini');
   const [localUrl, setLocalUrl] = useState<string>(() => localStorage.getItem('kalam_local_url') || 'http://localhost:11434/v1');
   const [localModel, setLocalModel] = useState<string>(() => localStorage.getItem('kalam_local_model') || 'qwen2.5-coder:7b');
+  const [embedModel, setEmbedModel] = useState<string>(() => localStorage.getItem('kalam_local_embed_model') || 'nomic-embed-text');
   const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('kalam_theme') as 'light' | 'dark') || 'light');
   const [globalSearch, setGlobalSearch] = useState<string>('');
   const [dockerFilter, setDockerFilter] = useState<'all' | 'running' | 'stopped'>('all');
   const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services'>('all');
@@ -229,6 +233,12 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
   useEffect(() => {
     localStorage.setItem('kalam_agent_mermaid_chart', agentMermaidChart);
   }, [agentMermaidChart]);
+
+  // Apply & persist theme (light default / refined dark)
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('kalam_theme', theme);
+  }, [theme]);
 
   // Floating Hover State for Node Tooltips
   const [hoveredNode, setHoveredNode] = useState<{
@@ -464,13 +474,13 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
       });
       const data = await res.json();
       if (res.ok) {
-        setFixOutput(`✅ ${data.message}\nCommand executed: ${data.cmdRun}\nNew Container ID: ${data.newContainerId}`);
+        setFixOutput(`[OK] ${data.message}\nCommand executed: ${data.cmdRun}\nNew Container ID: ${data.newContainerId}`);
         fetchClusterState();
       } else {
-        setFixOutput(`❌ Upgrade failed: ${data.error}\nDetails: ${data.details || ''}`);
+        setFixOutput(`[FAIL] Upgrade failed: ${data.error}\nDetails: ${data.details || ''}`);
       }
     } catch (err: any) {
-      setFixOutput(`❌ Network error: ${err.message}`);
+      setFixOutput(`[FAIL] Network error: ${err.message}`);
     } finally {
       setFixExecuting(false);
     }
@@ -488,8 +498,15 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
     }
     setErrorMsg(null);
     try {
-      // Get Status
-      const statusRes = await fetch('/api/status');
+      // Get Status. A network/proxy failure here means the BACKEND is down
+      // (not Docker/K8s) — surface that distinctly so it's actionable.
+      let statusRes: Response;
+      try {
+        statusRes = await fetch('/api/status');
+      } catch {
+        throw new Error('BACKEND_DOWN');
+      }
+      if (!statusRes.ok) throw new Error('BACKEND_DOWN');
       const statusData = await statusRes.json();
       setStatus(statusData);
 
@@ -512,7 +529,11 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
       }
     } catch (err: any) {
       console.error(err);
-      setErrorMsg('Failed to query cluster resource states. Make sure Docker Desktop and/or Kubernetes are active.');
+      if (err?.message === 'BACKEND_DOWN') {
+        setErrorMsg('Backend server not reachable on port 3001. Start it with "npm run dev" (or "npm run server"). If it keeps dying, a leftover process may be holding the port — stop it and restart.');
+      } else {
+        setErrorMsg('Failed to query cluster resource states. Make sure Docker Desktop and/or Kubernetes are active.');
+      }
     } finally {
       setLoading(false);
       hasDataRef.current = true;
@@ -638,7 +659,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
       if (!response.ok) {
         const errorMsg: ChatMessage = {
           role: 'agent',
-          content: `⚠️ **Error talking to backend:** ${data.error || 'Unknown error occurred'}\n\n*Details: ${data.details || 'Check console logs.'}*`,
+          content: `**Error talking to backend:** ${data.error || 'Unknown error occurred'}\n\n*Details: ${data.details || 'Check console logs.'}*`,
           timestamp: new Date()
         };
         setChatHistory(prev => [...prev, errorMsg]);
@@ -689,7 +710,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
     } catch (e: any) {
       const errorMsg: ChatMessage = {
         role: 'agent',
-        content: `❌ **Failed to send message:** Network error. Make sure your server is running.\n\n*Details: ${e.message}*`,
+        content: `**Failed to send message:** Network error. Make sure your server is running.\n\n*Details: ${e.message}*`,
         timestamp: new Date()
       };
       setChatHistory(prev => [...prev, errorMsg]);
@@ -835,10 +856,10 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
       <aside className={`app-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
           <a href="#" className="sidebar-brand" onClick={(e) => { e.preventDefault(); setActiveTab('dashboard'); }}>
-            <div className="brand-logo-icon">K</div>
+            <div className="brand-logo-icon" title="Hewlett Packard Enterprise">HPE</div>
             <div className="brand-info">
-              <h1>Kalam</h1>
-              <span>Cluster Console</span>
+              <h1><span className="hpe-text">HPE</span> Kalam</h1>
+              <span className="sub-text">GreenLake Console</span>
             </div>
           </a>
           <button 
@@ -895,13 +916,21 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               <span className="nav-item-text">Agent Chat</span>
               <span className="nav-item-badge">{provider === 'gemini' ? 'Gemini' : 'Local'}</span>
             </button>
-            <button 
+            <button
               className={`nav-item ${activeTab === 'agents' ? 'active' : ''}`}
               onClick={() => setActiveTab('agents')}
             >
               <span className="nav-item-icon"><Cpu size={18} /></span>
               <span className="nav-item-text">Agent Teamwork</span>
               <span className="nav-item-badge">Swarm</span>
+            </button>
+            <button
+              className={`nav-item ${activeTab === 'pcai' ? 'active' : ''}`}
+              onClick={() => setActiveTab('pcai')}
+            >
+              <span className="nav-item-icon"><Info size={18} /></span>
+              <span className="nav-item-text">PCAI Assistant</span>
+              <span className="nav-item-badge">HPE AI</span>
             </button>
           </div>
 
@@ -949,12 +978,13 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           <div className="topbar-left">
             <div className="page-title-badge">
               <h2>
-                {activeTab === 'dashboard' && '📌 Dashboard & Topology Overview'}
-                {activeTab === 'docker' && '🐳 Docker Container Operations'}
-                {activeTab === 'k8s' && '☸️ Kubernetes Cluster Management'}
-                {activeTab === 'chat' && '🤖 Kalam Agentic DevOps Assistant'}
-                {activeTab === 'security' && '🛡️ Container Security & CVE Patching'}
-                {activeTab === 'agents' && '🐝 Multi-Agent Swarm Visualizer'}
+                {activeTab === 'dashboard' && 'Dashboard & Topology Overview'}
+                {activeTab === 'docker' && 'Docker Container Operations'}
+                {activeTab === 'k8s' && 'Kubernetes Cluster Management'}
+                {activeTab === 'chat' && 'Kalam Agentic DevOps Assistant'}
+                {activeTab === 'security' && 'Container Security & CVE Patching'}
+                {activeTab === 'agents' && 'Multi-Agent Swarm Visualizer'}
+                {activeTab === 'pcai' && 'HPE Private Cloud AI Assistant'}
               </h2>
             </div>
 
@@ -977,13 +1007,18 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           </div>
 
           <div className="topbar-right">
-            {/* Live KPI Pills */}
+            {/* HPE GreenLake Tenant & SLA Badges */}
+            <div className="cluster-kpi-pill" title="HPE Tenant" style={{ borderColor: 'var(--hpe-green-border)', background: 'rgba(1, 167, 129, 0.06)' }}>
+              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--hpe-green)' }}></span>
+              <span style={{ fontSize: '11px', color: 'var(--hpe-green)' }}>Tenant: <strong>HPE-PROD-EAST-01</strong></span>
+            </div>
+
             <div className="cluster-kpi-pill" title="Containers">
-              <Database size={13} style={{ color: 'var(--accent-cyan)' }} />
+              <Database size={13} style={{ color: 'var(--hpe-green)' }} />
               <span>Containers: <strong>{dockerContainers.length}</strong></span>
             </div>
             <div className="cluster-kpi-pill" title="Pods">
-              <Server size={13} style={{ color: 'var(--accent-purple)' }} />
+              <Server size={13} style={{ color: 'var(--hpe-blue)' }} />
               <span>Pods: <strong>{k8sResources.pods.length}</strong></span>
             </div>
 
@@ -1009,12 +1044,23 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             </button>
 
             {/* Provider Pill */}
-            <span className="badge neutral" style={{ fontSize: '12px', padding: '6px 10px' }}>
-              Agent: {provider === 'gemini' ? 'Gemini 3.5' : localModel}
+            <span className="badge running" style={{ fontSize: '11px', padding: '6px 10px' }}>
+              HPE AI: {provider === 'gemini' ? 'Gemini 3.5' : localModel}
             </span>
 
+            {/* Theme Toggle */}
+            <button
+              type="button"
+              className="theme-toggle-btn"
+              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+              title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+              aria-label="Toggle color theme"
+            >
+              {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
+            </button>
+
             {/* Settings Trigger */}
-            <button 
+            <button
               type="button"
               className="icon-btn primary"
               onClick={() => setSettingsModalOpen(true)}
@@ -1027,7 +1073,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
         </header>
 
         {/* Viewport Content */}
-        <div className={`app-viewport ${activeTab === 'chat' ? 'full-bleed' : ''}`}>
+        <div className={`app-viewport ${activeTab === 'chat' || activeTab === 'pcai' ? 'full-bleed' : ''}`}>
           {errorMsg && (
             <div className="panel-card" style={{ borderLeft: '4px solid var(--status-error)' }}>
               <div style={{ display: 'flex', gap: 12, alignItems: 'center', color: 'var(--status-error)' }}>
@@ -1097,70 +1143,69 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 </div>
               </div>
 
-              {/* Main Dashboard Grid */}
-              <div className="dashboard-main-grid">
-                <div className="panel-card" style={{ height: 'fit-content' }}>
+              {/* Full-Width Topology Map */}
+              <div className="panel-card" style={{ height: 'fit-content', width: '100%' }}>
+                <div className="panel-card-title">
+                  <h2><Network size={18} /> Cluster Topology Map</h2>
+                  <span className="badge neutral">Interactive Visualizer</span>
+                </div>
+                <div className="topology-visualizer-container" style={{ width: '100%' }}>
+                  {loading ? (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '400px', gap: '12px', color: 'var(--text-secondary)' }}>
+                      <div className="loader"></div>
+                      <span>Scanning cluster topology graph...</span>
+                    </div>
+                  ) : dockerContainers.length > 0 || k8sResources.pods.length > 0 ? (
+                    <TopologyGraph containers={dockerContainers} k8sResources={k8sResources} />
+                  ) : (
+                    <div className="text-secondary" style={{ fontStyle: 'italic', padding: '32px', textAlign: 'center' }}>
+                      No active containers or nodes detected to generate visual map.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Secondary Info Grid */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '16px' }}>
+                <div className="panel-card">
                   <div className="panel-card-title">
-                    <h2>💻 Cluster Topology Map</h2>
-                    <span className="badge neutral">Interactive Visualizer</span>
+                    <h2><Activity size={18} /> Host and Daemon Health</h2>
                   </div>
-                  <div className="topology-visualizer-container">
-                    {loading ? (
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '400px', gap: '12px', color: 'var(--text-secondary)' }}>
-                        <div className="loader"></div>
-                        <span>Scanning cluster topology graph...</span>
-                      </div>
-                    ) : dockerContainers.length > 0 || k8sResources.pods.length > 0 ? (
-                      <TopologyGraph containers={dockerContainers} k8sResources={k8sResources} />
-                    ) : (
-                      <div className="text-secondary" style={{ fontStyle: 'italic', padding: '32px', textAlign: 'center' }}>
-                        No active containers or nodes detected to generate visual map.
-                      </div>
-                    )}
+                  <div className="context-card">
+                    <div className="context-row">
+                      <span className="context-key">Docker Daemon:</span>
+                      <span className="context-val">{status.docker.running ? <><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', marginRight: '6px' }} />Active</> : <><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#ef4444', marginRight: '6px' }} />Down</>}</span>
+                    </div>
+                    <div className="context-row">
+                      <span className="context-key">Docker Version:</span>
+                      <span className="context-val" style={{ fontSize: '11px' }}>{status.docker.version || 'N/A'}</span>
+                    </div>
+                    <div className="context-row" style={{ marginTop: '8px', borderTop: '1px solid var(--border-color)', paddingTop: '8px' }}>
+                      <span className="context-key">Kubernetes:</span>
+                      <span className="context-val">{status.kubernetes.running ? <><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', marginRight: '6px' }} />Active</> : <><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#ef4444', marginRight: '6px' }} />Down</>}</span>
+                    </div>
+                    <div className="context-row">
+                      <span className="context-key">Kube Client:</span>
+                      <span className="context-val" style={{ fontSize: '11px' }}>{status.kubernetes.version.split(' ')[0] || 'N/A'}</span>
+                    </div>
                   </div>
                 </div>
 
-                <div className="context-panel" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                  <div className="panel-card">
-                    <div className="panel-card-title">
-                      <h2>🔍 Host & Daemon Health</h2>
-                    </div>
-                    <div className="context-card">
-                      <div className="context-row">
-                        <span className="context-key">Docker Daemon:</span>
-                        <span className="context-val">{status.docker.running ? '🟢 Active' : '🔴 Down'}</span>
-                      </div>
-                      <div className="context-row">
-                        <span className="context-key">Docker Version:</span>
-                        <span className="context-val" style={{ fontSize: '11px' }}>{status.docker.version || 'N/A'}</span>
-                      </div>
-                      <div className="context-row" style={{ marginTop: '8px', borderTop: '1px solid var(--border-color)', paddingTop: '8px' }}>
-                        <span className="context-key">Kubernetes:</span>
-                        <span className="context-val">{status.kubernetes.running ? '🟢 Active' : '🔴 Down'}</span>
-                      </div>
-                      <div className="context-row">
-                        <span className="context-key">Kube Client:</span>
-                        <span className="context-val" style={{ fontSize: '11px' }}>{status.kubernetes.version.split(' ')[0] || 'N/A'}</span>
-                      </div>
-                    </div>
+                <div className="panel-card">
+                  <div className="panel-card-title">
+                    <h2><Cpu size={18} /> Kalam AI Assistant</h2>
                   </div>
-
-                  <div className="panel-card">
-                    <div className="panel-card-title">
-                      <h2>🤖 Kalam AI Assistant</h2>
-                    </div>
-                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.4' }}>
-                      Ask Kalam to inspect logs, troubleshoot CrashLoopBackOff pods, scale deployments, or harden Docker images.
-                    </p>
-                    <button 
-                      className="btn primary" 
-                      onClick={() => setActiveTab('chat')}
-                      style={{ width: '100%', marginTop: '6px' }}
-                    >
-                      <Sparkles size={16} />
-                      <span>Launch AI Console</span>
-                    </button>
-                  </div>
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.4' }}>
+                    Ask Kalam to inspect logs, troubleshoot CrashLoopBackOff pods, scale deployments, or harden Docker images.
+                  </p>
+                  <button 
+                    className="btn primary" 
+                    onClick={() => setActiveTab('chat')}
+                    style={{ width: '100%', marginTop: '6px' }}
+                  >
+                    <Sparkles size={16} />
+                    <span>Launch AI Console</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -1185,7 +1230,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             <div className="tab-panel">
               <div className="panel-card">
                 <div className="panel-card-title">
-                  <h2>🐳 Docker Container Operations</h2>
+                  <h2><Database size={18} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> Docker Container Operations</h2>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <div className="subnav-pills">
                       <button 
@@ -1300,7 +1345,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             <div className="tab-panel" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
               <div className="panel-card" style={{ paddingBottom: '12px' }}>
                 <div className="panel-card-title" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: 0 }}>
-                  <h2>☸️ Kubernetes Resource Manager</h2>
+                  <h2><Server size={18} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> Kubernetes Resource Manager</h2>
                   <div className="subnav-pills">
                     <button 
                       className={`subnav-pill-btn ${k8sSubTab === 'all' ? 'active' : ''}`}
@@ -1345,7 +1390,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                   >
                     <div className="k8s-section-title">
                       {expandedK8s.nodes ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                      <span>💻 Nodes</span>
+                      <span>Nodes</span>
                       <span className="k8s-section-count">{filteredK8sNodes.length}</span>
                     </div>
                   </div>
@@ -1398,7 +1443,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 >
                   <div className="k8s-section-title">
                     {expandedK8s.deployments ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                    <span>📦 Deployments</span>
+                    <span>Deployments</span>
                     <span className="k8s-section-count">{filteredK8sDeployments.length}</span>
                   </div>
                 </div>
@@ -1469,7 +1514,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 >
                   <div className="k8s-section-title">
                     {expandedK8s.services ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                    <span>⚙️ Services</span>
+                    <span>Services</span>
                     <span className="k8s-section-count">{filteredK8sServices.length}</span>
                   </div>
                 </div>
@@ -1523,7 +1568,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 >
                   <div className="k8s-section-title">
                     {expandedK8s.pods ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                    <span>🛸 Pods</span>
+                    <span>Pods</span>
                     <span className="k8s-section-count">{filteredK8sPods.length}</span>
                   </div>
                 </div>
@@ -1597,181 +1642,32 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
         {/* CHAT TAB */}
         {activeTab === 'chat' && (
-          <div className="tab-panel chat-container">
-            {/* Left Panel: Diagram / Workspace view */}
-            <div className="chat-sidebar">
-              <div className="chat-sidebar-section">
-                <h3>🗺️ Agent Visualizer</h3>
-                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: 0 }}>
-                  Mermaid diagrams drawn by the agent are displayed below.
-                </p>
-                <div className="mermaid-wrapper" style={{ minHeight: '300px', maxHeight: '500px', padding: '8px' }}>
-                  {agentMermaidChart ? (
-                    <MermaidChart chart={agentMermaidChart} onNodeHover={handleNodeHover} />
-                  ) : (
-                    <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px', fontStyle: 'italic', padding: '16px' }}>
-                      No customized agent diagrams yet. Ask the agent: "Show me a graph of my cluster."
-                    </div>
-                  )}
-                </div>
-              </div>
-              
-              <div style={{ marginTop: 'auto', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', color: 'var(--text-muted)', fontSize: '12px' }}>
-                  <Info size={14} />
-                  <span>Talk directly or click interactive buttons inside bubbles to run tasks!</span>
-                </div>
-              </div>
-            </div>
+          <HPEAgentChat
+            chatHistory={chatHistory}
+            setChatHistory={setChatHistory}
+            chatLoading={chatLoading}
+            chatInput={chatInput}
+            setChatInput={setChatInput}
+            handleSendMessage={handleSendMessage}
+            handleExecuteAgentAction={handleExecuteAgentAction}
+            agentMermaidChart={agentMermaidChart}
+            setAgentMermaidChart={setAgentMermaidChart}
+            provider={provider}
+            apiKey={apiKey}
+            localModel={localModel}
+            handleNodeHover={handleNodeHover}
+          />
+        )}
 
-            {/* Right Panel: Chat Console */}
-            <div className="chat-main">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 8px 12px 8px', borderBottom: '1px solid var(--border-color)', marginBottom: '12px' }}>
-                <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)' }}>Chat Conversation</span>
-                <button 
-                  onClick={() => {
-                    if (window.confirm("Are you sure you want to clear your chat history?")) {
-                      localStorage.removeItem('kalam_chat_history');
-                      setChatHistory([
-                        {
-                          role: 'agent',
-                          content: `Hello! I am **Kalam**, your local DevOps agent. 
-I have scanned your local workspace. I can see your running Docker containers and Kubernetes clusters.
-
-I can help you:
-1. Explain the state of your clusters and individual resources.
-2. Render visual graphs of relationships between containers, nodes, and pods.
-3. Automatically execute actions like restarting containers, scaling deployments, or viewing logs upon your approval.
-
-Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the settings panel by clicking the Sliders icon in the top header. Otherwise, you can still view your resources in the tabs above and use standard controls!`,
-                          timestamp: new Date()
-                        }
-                      ]);
-                      setAgentMermaidChart('');
-                    }
-                  }}
-                  style={{ background: 'transparent', border: 'none', color: 'var(--status-error)', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 8px', borderRadius: '4px' }}
-                >
-                  <Trash2 size={13} />
-                  Clear Chat
-                </button>
-              </div>
-              <div className="chat-messages-wrapper">
-                {chatHistory.map((msg, msgIdx) => (
-                  <div key={msgIdx} className={`chat-message ${msg.role}`}>
-                    <div className="chat-avatar">
-                      {msg.role === 'user' ? 'U' : '🤖'}
-                    </div>
-                    <div className="chat-bubble">
-                      {/* Simple custom renderer for bold/italic/code block formats */}
-                      <div className="chat-text-content" style={{ whiteSpace: 'pre-wrap' }}>
-                        {msg.content.split('\n').map((line, lineIdx) => {
-                          // Very basic markdown translation for highlights
-                          
-                          return (
-                            <p key={lineIdx} style={{ margin: '0 0 6px 0' }}>
-                              {line.split(' ').map((word, wIdx) => {
-                                if (word.startsWith('**') && word.endsWith('**')) {
-                                  return <strong key={wIdx}>{word.slice(2, -2)} </strong>;
-                                }
-                                if (word.startsWith('*') && word.endsWith('*')) {
-                                  return <em key={wIdx}>{word.slice(1, -1)} </em>;
-                                }
-                                if (word.startsWith('`') && word.endsWith('`')) {
-                                  return <code key={wIdx} style={{ padding: '2px 4px', background: 'var(--bg-primary)', borderRadius: '4px', fontFamily: 'var(--font-mono)', fontSize: '13px' }}>{word.slice(1, -1)}</code>;
-                                }
-                                return word + ' ';
-                              })}
-                            </p>
-                          );
-                        })}
-                      </div>
-
-                      {/* Display Actions recommended by the agent */}
-                      {msg.actions && msg.actions.length > 0 && (
-                        <div className="chat-actions-container">
-                          <span className="chat-actions-title">
-                            <SlidersHorizontal size={14} />
-                            Recommended Agent Actions
-                          </span>
-                          <div className="chat-actions-list">
-                            {msg.actions.map((action, actionIdx) => {
-                              const actKey = `act-${actionIdx}`;
-                              const statusObj = msg.actionStatuses?.[actKey] || { status: 'idle' };
-
-                              return (
-                                <div key={actionIdx} style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    <button
-                                      className="agent-action-btn"
-                                      disabled={statusObj.status === 'running' || statusObj.status === 'success'}
-                                      onClick={() => handleExecuteAgentAction(msgIdx, actionIdx, action)}
-                                    >
-                                      {statusObj.status === 'running' && <span className="loader" style={{ width: '12px', height: '12px', borderWidth: '2px' }}></span>}
-                                      {statusObj.status === 'success' && <Check size={14} style={{ color: 'var(--status-success)' }} />}
-                                      <span>{action.label}</span>
-                                    </button>
-                                  </div>
-
-                                  {/* Action execution output */}
-                                  {statusObj.output && (
-                                    <div className={`action-status-card ${statusObj.status}`}>
-                                      {statusObj.output}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-                
-                {chatLoading && (
-                  <div className="chat-message agent">
-                    <div className="chat-avatar">🤖</div>
-                    <div className="chat-bubble" style={{ padding: '16px 24px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        <div className="loader"></div>
-                        <span style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>Kalam is analyzing cluster state...</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
-                
-                <div ref={chatEndRef} />
-              </div>
-
-              {/* Chat Input Bar */}
-              <div className="chat-input-wrapper">
-                <form className="chat-input-form" onSubmit={handleSendMessage}>
-                  <textarea 
-                    className="chat-input"
-                    placeholder={(provider === 'local' || apiKey) ? "Ask Kalam: 'Which container has ports mapped?' or 'Restart my PG container'" : "Configure your settings in the header to start chat..."}
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    disabled={(provider === 'gemini' && !apiKey) || chatLoading}
-                    rows={1}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        handleSendMessage(e);
-                      }
-                    }}
-                  />
-                  <button 
-                    type="submit" 
-                    className="chat-send-btn"
-                    disabled={!chatInput.trim() || (provider === 'gemini' && !apiKey) || chatLoading}
-                  >
-                    <Send size={16} />
-                  </button>
-                </form>
-              </div>
-            </div>
-          </div>
+        {/* PCAI ASSISTANT TAB */}
+        {activeTab === 'pcai' && (
+          <PcaiAssistant
+            provider={provider}
+            apiKey={apiKey}
+            localUrl={localUrl}
+            localModel={localModel}
+            embedModel={embedModel}
+          />
         )}
 
         {/* SECURITY TAB */}
@@ -1779,11 +1675,11 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           <div className="tab-panel">
             <div className="panel-card" style={{ marginBottom: '20px' }}>
               <div className="panel-card-title">
-                <h2>🛡️ Container Image Security Hardener</h2>
+                <h2><ShieldAlert size={18} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> Container Image Security Hardener</h2>
                 <span className="badge warning">Scout & Patch</span>
               </div>
               <p style={{ color: 'var(--text-secondary)', fontSize: '13.5px', marginTop: '6px' }}>
-                Scan your local running container images for CVE vulnerabilities and apply a **one-click secure upgrade** by automatically converting base images to optimized Alpine, slim, or distroless architectures.
+                Scan your local running container images for CVE vulnerabilities and apply a one-click secure upgrade by automatically converting base images to optimized Alpine, slim, or distroless architectures.
               </p>
               
               <form onSubmit={handleScanImage} style={{ display: 'flex', gap: '12px', alignItems: 'center', marginTop: '16px', flexWrap: 'wrap' }}>
@@ -1825,16 +1721,16 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                   {/* Summary badges */}
                   <div style={{ display: 'flex', gap: '10px', margin: '14px 0', flexWrap: 'wrap' }}>
                     <div style={{ padding: '6px 12px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '6px', color: '#ef4444', fontSize: '12px', fontWeight: 'bold' }}>
-                      🚨 {scanResult.summary.critical} Critical
+                      {scanResult.summary.critical} Critical
                     </div>
                     <div style={{ padding: '6px 12px', background: 'rgba(249,115,22,0.1)', border: '1px solid rgba(249,115,22,0.3)', borderRadius: '6px', color: '#f97316', fontSize: '12px', fontWeight: 'bold' }}>
-                      🔥 {scanResult.summary.high} High
+                      {scanResult.summary.high} High
                     </div>
                     <div style={{ padding: '6px 12px', background: 'rgba(234,179,8,0.1)', border: '1px solid rgba(234,179,8,0.3)', borderRadius: '6px', color: '#eab308', fontSize: '12px', fontWeight: 'bold' }}>
-                      ⚠️ {scanResult.summary.medium} Medium
+                      {scanResult.summary.medium} Medium
                     </div>
                     <div style={{ padding: '6px 12px', background: 'rgba(107,114,128,0.1)', border: '1px solid rgba(107,114,128,0.3)', borderRadius: '6px', color: '#9ca3af', fontSize: '12px', fontWeight: 'bold' }}>
-                      ℹ️ {scanResult.summary.low} Low
+                      {scanResult.summary.low} Low
                     </div>
                   </div>
 
@@ -1869,7 +1765,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 {/* One-Place Fix Console */}
                 <div className="panel-card" style={{ border: '2px solid rgba(168, 85, 247, 0.4)', background: 'rgba(168, 85, 247, 0.02)' }}>
                   <div className="panel-card-title">
-                    <h3>⚡ One-Place Secure Patch</h3>
+                    <h3><Sparkles size={16} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> One-Place Secure Patch</h3>
                     <span className="badge success">Ready</span>
                   </div>
 
@@ -1914,7 +1810,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
                     {fixOutput && (
                       <div className="logs-pre" style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '12px', maxHeight: '180px', overflowY: 'auto' }}>
-                        <code style={{ fontSize: '11px', whiteSpace: 'pre-wrap', color: fixOutput.includes('❌') ? 'var(--status-error)' : '#34d399' }}>
+                        <code style={{ fontSize: '11px', whiteSpace: 'pre-wrap', color: fixOutput.includes('[FAIL]') || fixOutput.includes('error') ? 'var(--status-error)' : '#34d399' }}>
                           {fixOutput}
                         </code>
                       </div>
@@ -1937,7 +1833,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 <Terminal size={18} />
                 Logs: {logsModal.name} {logsModal.namespace ? `[ns: ${logsModal.namespace}]` : ''}
               </h3>
-              <button className="icon-btn" onClick={() => setLogsModal(null)}>✕</button>
+              <button className="icon-btn" onClick={() => setLogsModal(null)}><X size={16} /></button>
             </div>
             <div className="modal-body">
               {logsLoading ? (
@@ -1964,7 +1860,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 <Sliders size={18} />
                 Scale Deployment: {scaleModal.name}
               </h3>
-              <button className="icon-btn" onClick={() => setScaleModal(null)}>✕</button>
+              <button className="icon-btn" onClick={() => setScaleModal(null)}><X size={16} /></button>
             </div>
             <div className="modal-body">
               <form 
@@ -2002,17 +1898,17 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
       {/* AGENT SETTINGS MODAL */}
       {settingsModalOpen && (
         <div className="modal-overlay" onClick={() => setSettingsModalOpen(false)}>
-          <div className="modal-content" style={{ maxHeight: '480px', maxWidth: '500px' }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal-content" style={{ maxHeight: '88vh', maxWidth: '520px', display: 'flex', flexDirection: 'column' }} onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3>
                 <Sliders size={18} />
                 DevOps Agent Configuration
               </h3>
-              <button className="icon-btn" onClick={() => setSettingsModalOpen(false)}>✕</button>
+              <button className="icon-btn" onClick={() => setSettingsModalOpen(false)}><X size={16} /></button>
             </div>
-            <div className="modal-body" style={{ padding: '20px' }}>
+            <div className="modal-body" style={{ padding: '20px', overflowY: 'auto', flex: 1 }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                
+
                 {/* Provider Selector */}
                 <div className="form-group">
                   <label style={{ fontSize: '13px', fontWeight: '600' }}>LLM Provider</label>
@@ -2077,22 +1973,13 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                       </span>
                     </div>
 
-                    <div className="form-group">
-                      <label style={{ fontSize: '13px', fontWeight: '600' }}>Model Name</label>
-                      <input 
-                        type="text" 
-                        className="form-input" 
-                        placeholder="qwen2.5-coder"
-                        value={localModel}
-                        onChange={(e) => {
-                          setLocalModel(e.target.value);
-                          localStorage.setItem('kalam_local_model', e.target.value);
-                        }}
-                      />
-                      <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                        Specify the model downloaded locally (e.g., <code>qwen2.5-coder</code>, <code>llama3</code>, <code>mistral</code>).
-                      </span>
-                    </div>
+                    <ModelPicker
+                      localUrl={localUrl}
+                      localModel={localModel}
+                      onSelectModel={(m) => { setLocalModel(m); localStorage.setItem('kalam_local_model', m); }}
+                      embedModel={embedModel}
+                      onSelectEmbed={(m) => { setEmbedModel(m); localStorage.setItem('kalam_local_embed_model', m); }}
+                    />
                   </>
                 )}
 
