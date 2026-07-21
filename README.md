@@ -72,26 +72,97 @@ It is a **RAG (Retrieval-Augmented Generation)** system, not a memorized model: 
 
 ## 🛠️ Command Line Interface (CLI)
 
-Kalam ships a global `kalam` command. **Install it once** so you can type `kalam` from anywhere:
+Kalam ships a global `kalam` command — a streaming, Claude-Code-style terminal assistant for HPE Private Cloud AI plus agentic Docker/Kubernetes ops.
+
+### Install the `kalam` command
+
+Install it once so you can type `kalam` from anywhere:
 
 ```bash
-npm run cli:install     # or: npm link   (Windows: double-click install-cli.bat)
+npm run cli:install     # runs `npm link`
 ```
 
-Then open a **new** terminal and run `kalam help`. (Not ready to install globally? Use `node bin/kalam.cjs <command>` instead.)
+Platform shortcuts:
+* **Windows** — double-click `install-cli.bat` (run as Administrator if `npm link` is blocked).
+* **macOS / Linux** — `npm link` (use `sudo npm link` if permission is denied).
 
-Commands that need AI **auto-start the backend server for you** — no need to run `npm run dev` first. For composed (LLM-written) answers, put your `GEMINI_API_KEY` in `.env`, or run a local LLM (Ollama). Without either, it still works and returns the exact retrieved HPE docs.
+Then open a **new** terminal so the updated `PATH` is picked up, and run:
 
-### HPE PCAI brain
-* `kalam solve "<error/log>"` — diagnose a PCAI error and get an ordered fix (also reads piped input: `kubectl logs pod | kalam solve`).
-* `kalam ask "<question>"` — ask anything about HPE Private Cloud AI.
-* `kalam pcai` — interactive PCAI assistant shell (prefix a line with `solve:` to force diagnosis).
+```bash
+kalam help
+```
+
+> Not ready to install globally? Every command works via `node bin/kalam.cjs <command>` or `npm run cli -- <command>` from the project root.
+
+### No setup required
+
+Commands that need AI **auto-start the backend server for you** — you don't have to run `npm run dev` first. On first use, Kalam also builds an offline PCAI knowledge base automatically.
+
+For fully composed (LLM-written) answers, either put a `GEMINI_API_KEY` in `.env`, or run a local LLM (Ollama / LM Studio). With **neither** configured it still works via lexical search and returns the exact retrieved HPE docs.
+
+### Interactive assistant (recommended)
+
+Just run `kalam` with no arguments to launch the streaming REPL:
+
+```bash
+kalam
+```
+
+Type naturally — Kalam auto-routes each message to the right engine (PCAI answer, error diagnosis, or the DevOps agent). Inside the REPL you have these **slash commands**:
+
+| Command | What it does |
+| --- | --- |
+| `/model` | Pick which installed local model to use (interactive) |
+| `/models` | List installed Ollama / local models |
+| `/provider <gemini\|local>` | Switch the engine |
+| `/mode <auto\|ask\|diagnose\|devops>` | Force how messages are routed (default `auto`) |
+| `/train [--offline]` | Build / refresh the HPE knowledge base |
+| `/kb` | Knowledge-base status |
+| `/status` | Local Docker & Kubernetes health |
+| `/run <n>` | Execute suggested action #n from the last reply |
+| `/key <api-key>` | Save your Gemini API key and switch to Gemini |
+| `/clear` | Clear the screen & conversation memory |
+| `/help` | Show the command list |
+| `/exit` | Quit |
+
+> Tip: prefix any line with `solve:` to force error diagnosis, or just paste a stack trace.
+
+### One-shot commands
+
+Run a single task without entering the REPL:
+
+**HPE PCAI brain**
+* `kalam ask "<question>"` — ask anything about HPE Private Cloud AI (streamed, with citations).
+* `kalam solve "<error/log>"` — diagnose a PCAI error and get an ordered fix. Also reads piped input:
+  ```bash
+  kubectl logs mypod | kalam solve
+  ```
+* `kalam pcai` — open the interactive PCAI assistant shell.
 * `kalam train [--offline]` — build/refresh the knowledge base (crawls live HPE docs unless `--offline`).
 * `kalam kb` — show knowledge-base status.
 
-### Local DevOps
+**Models**
+* `kalam models` — list installed Ollama / local models.
+* `kalam model` — pick the default local model interactively.
+
+**Local DevOps**
 * `kalam status` — check local Docker and Kubernetes daemons.
-* `kalam list <docker|k8s>` — print active containers or Kubernetes pods.
+* `kalam list <docker|k8s>` — print active containers or Kubernetes pods (`kalam ps` also works).
 * `kalam scan <container-id>` — scan a container image for CVEs.
-* `kalam fix <container-id>` — rebuild the container on a secure base image.
-* `kalam chat [message]` — cluster-aware DevOps agent (single message or prompt loop).
+* `kalam fix <container-id>` — rebuild the container on a secure base image (asks for confirmation).
+* `kalam chat [message]` — cluster-aware DevOps agent; pass a message for one-shot, or omit it for a prompt loop.
+
+> Anything unrecognized is treated as a question, e.g. `kalam what is MLIS?`.
+
+Your chosen provider, model, mode, and Gemini key persist across sessions in `~/.kalam.json`.
+
+### Examples
+
+```bash
+kalam                                                    # launch the interactive assistant
+kalam ask "how do I connect an external S3 bucket to the lakehouse?"
+kubectl logs mypod | kalam solve                         # diagnose from a live log
+kalam scan my-nginx                                       # CVE scan a container
+kalam list k8s                                            # list Kubernetes pods
+kalam model                                               # switch local model
+```
