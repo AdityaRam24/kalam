@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
 import { llmRouter } from './llm.js';
+import { vmsRouter } from './vms.js';
 
 dotenv.config();
 
@@ -20,6 +21,8 @@ app.use(express.json({ limit: '2mb' })); // allow pasting large logs/stack trace
 app.use(pcaiRouter);
 // Local LLM model discovery + pull (Ollama / LM Studio).
 app.use(llmRouter);
+// Virtual Machine monitoring + SSH (manual inventory).
+app.use(vmsRouter);
 
 // Helper for safe command execution
 async function runCmd(cmd: string): Promise<{ stdout: string; stderr: string; success: boolean }> {
@@ -392,6 +395,7 @@ app.get('/api/k8s/resources', async (req, res) => {
           version: status.nodeInfo?.kubeletVersion || 'Unknown',
           ip: internalIPObj ? internalIPObj.address : 'Unknown',
           os: status.nodeInfo?.operatingSystem || 'Linux',
+          gpus: (status.capacity && status.capacity['nvidia.com/gpu']) || '0',
           created: age
         });
       }
@@ -571,7 +575,8 @@ app.post('/api/agent/chat', async (req, res) => {
     apiKey,
     provider = 'gemini',
     localUrl = 'http://localhost:11434/v1',
-    localModel = 'qwen2.5-coder:7b'
+    localModel = 'qwen2.5-coder:7b',
+    authKey
   } = req.body;
 
   const { dockerVer, k8sVer, dockerRes, k8sRes, dockerStateStr, k8sStateStr } = await gatherClusterState();
@@ -591,7 +596,7 @@ app.post('/api/agent/chat', async (req, res) => {
 
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(authKey ? { Authorization: `Bearer ${authKey}` } : {}) },
         body: JSON.stringify({
           model: localModel,
           messages,
@@ -703,7 +708,8 @@ app.post('/api/agent/chat/stream', async (req, res) => {
     apiKey,
     provider = 'gemini',
     localUrl = 'http://localhost:11434/v1',
-    localModel = 'qwen2.5-coder:7b'
+    localModel = 'qwen2.5-coder:7b',
+    authKey
   } = req.body;
 
   res.writeHead(200, {
@@ -727,7 +733,7 @@ app.post('/api/agent/chat/stream', async (req, res) => {
     if (provider === 'local') {
       const result = await streamLocalChat({
         localUrl, localModel, systemInstruction, chatHistory, prompt,
-        numCtx: 4096,
+        numCtx: 4096, authKey,
         onDelta: (t) => sse({ type: 'delta', text: t }),
       });
       if (!result.success) sse({ type: 'delta', text: `⚠️ ${result.reason}` });
@@ -763,10 +769,11 @@ Kalam:`;
 app.post('/api/agent/orchestrate', async (req, res) => {
   const { 
     prompt, 
-    provider = 'gemini', 
-    localUrl = 'http://localhost:11434/v1', 
+    provider = 'gemini',
+    localUrl = 'http://localhost:11434/v1',
     localModel = 'qwen2.5-coder:7b',
-    apiKey 
+    apiKey,
+    authKey
   } = req.body;
 
   if (!prompt) {
@@ -826,7 +833,7 @@ app.post('/api/agent/orchestrate', async (req, res) => {
       const endpoint = `${localUrl.replace(/\/$/, '')}/chat/completions`;
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(authKey ? { Authorization: `Bearer ${authKey}` } : {}) },
         body: JSON.stringify({
           model: localModel,
           messages: [{ role: 'user', content: systemInstruction }],

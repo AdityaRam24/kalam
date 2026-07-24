@@ -16,6 +16,9 @@ dist-ssr
 # PCAI generated knowledge base (rebuildable via ingest)
 server/pcai/kb.json
 
+# VM SSH inventory (may contain host/user details)
+server/vms.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -34,6 +34,8 @@ import AgentTeamwork from './components/AgentTeamwork';
 import HPEAgentChat from './components/HPEAgentChat';
 import PcaiAssistant from './components/PcaiAssistant';
 import ModelPicker from './components/ModelPicker';
+import PcaiStackView from './components/PcaiStackView';
+import VmMonitor from './components/VmMonitor';
 
 interface Container {
   id: string;
@@ -85,6 +87,7 @@ interface NodeResource {
   version: string;
   ip: string;
   os: string;
+  gpus?: string;
   created: string;
 }
 
@@ -117,13 +120,18 @@ interface ChatMessage {
 
 export function App() {
   // Tabs & Config
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'docker' | 'k8s' | 'chat' | 'security' | 'agents' | 'pcai'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'chat' | 'security' | 'agents' | 'pcai'>('dashboard');
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
-  const [provider, setProvider] = useState<'gemini' | 'local'>(() => (localStorage.getItem('kalam_llm_provider') as 'gemini' | 'local') || 'gemini');
+  const [provider, setProvider] = useState<'gemini' | 'local' | 'custom'>(() => (localStorage.getItem('kalam_llm_provider') as 'gemini' | 'local' | 'custom') || 'gemini');
   const [localUrl, setLocalUrl] = useState<string>(() => localStorage.getItem('kalam_local_url') || 'http://localhost:11434/v1');
   const [localModel, setLocalModel] = useState<string>(() => localStorage.getItem('kalam_local_model') || 'qwen2.5-coder:7b');
   const [embedModel, setEmbedModel] = useState<string>(() => localStorage.getItem('kalam_local_embed_model') || 'nomic-embed-text');
+  // Custom OpenAI-compatible model endpoint (e.g. HPE MLIS, vLLM, OpenAI)
+  const [customUrl, setCustomUrl] = useState<string>(() => localStorage.getItem('kalam_custom_url') || '');
+  const [customModel, setCustomModel] = useState<string>(() => localStorage.getItem('kalam_custom_model') || '');
+  const [customKey, setCustomKey] = useState<string>(() => localStorage.getItem('kalam_custom_key') || '');
+  const [showCustomKey, setShowCustomKey] = useState<boolean>(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('kalam_theme') as 'light' | 'dark') || 'light');
@@ -649,9 +657,10 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           prompt: userPrompt,
           chatHistory: chatHistory.map(h => ({ role: h.role, content: h.content })),
           apiKey: apiKey,
-          provider: provider,
-          localUrl: localUrl,
-          localModel: localModel
+          provider: effProvider,
+          localUrl: effLocalUrl,
+          localModel: effLocalModel,
+          authKey: effAuthKey
         })
       });
 
@@ -850,6 +859,16 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
     });
   }, [k8sResources.services, globalSearch]);
 
+  // Effective LLM params sent to the backend. A "custom" endpoint is an
+  // OpenAI-compatible model server (HPE MLIS / vLLM / OpenAI), so it rides the
+  // same "local" path but with its own URL/model and a Bearer auth key.
+  const effProvider: 'gemini' | 'local' = provider === 'gemini' ? 'gemini' : 'local';
+  const effLocalUrl = provider === 'custom' ? customUrl : localUrl;
+  const effLocalModel = provider === 'custom' ? customModel : localModel;
+  const effAuthKey = provider === 'custom' ? customKey : undefined;
+  const llmParams = { provider: effProvider, apiKey, localUrl: effLocalUrl, localModel: effLocalModel, authKey: effAuthKey };
+  const providerLabel = provider === 'gemini' ? 'Gemini' : provider === 'custom' ? (customModel || 'Endpoint') : localModel;
+
   return (
     <div className="app-shell">
       {/* Enterprise Left Sidebar */}
@@ -895,7 +914,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               <span className="nav-item-text">Docker Engine</span>
               <span className="nav-item-badge">{dockerContainers.length}</span>
             </button>
-            <button 
+            <button
               className={`nav-item ${activeTab === 'k8s' ? 'active' : ''}`}
               onClick={() => setActiveTab('k8s')}
               disabled={!status.kubernetes.installed}
@@ -904,17 +923,33 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               <span className="nav-item-text">Kubernetes</span>
               <span className="nav-item-badge">{k8sResources.pods.length}</span>
             </button>
+            <button
+              className={`nav-item ${activeTab === 'vms' ? 'active' : ''}`}
+              onClick={() => setActiveTab('vms')}
+            >
+              <span className="nav-item-icon"><HardDrive size={18} /></span>
+              <span className="nav-item-text">Virtual Machines</span>
+              <span className="nav-item-badge">SSH</span>
+            </button>
           </div>
 
           <div className="nav-group">
-            <span className="nav-group-label">AI Intelligence</span>
-            <button 
+            <span className="nav-group-label">HPE Private Cloud AI</span>
+            <button
+              className={`nav-item ${activeTab === 'pcaistack' ? 'active' : ''}`}
+              onClick={() => setActiveTab('pcaistack')}
+            >
+              <span className="nav-item-icon"><Network size={18} /></span>
+              <span className="nav-item-text">PCAI Stack</span>
+              <span className="nav-item-badge">Map</span>
+            </button>
+            <button
               className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`}
               onClick={() => setActiveTab('chat')}
             >
               <span className="nav-item-icon"><MessageSquare size={18} /></span>
               <span className="nav-item-text">Agent Chat</span>
-              <span className="nav-item-badge">{provider === 'gemini' ? 'Gemini' : 'Local'}</span>
+              <span className="nav-item-badge">{provider === 'gemini' ? 'Gemini' : provider === 'custom' ? 'Endpoint' : 'Local'}</span>
             </button>
             <button
               className={`nav-item ${activeTab === 'agents' ? 'active' : ''}`}
@@ -979,8 +1014,10 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             <div className="page-title-badge">
               <h2>
                 {activeTab === 'dashboard' && 'Dashboard & Topology Overview'}
+                {activeTab === 'pcaistack' && 'HPE Private Cloud AI — Stack Visualizer'}
                 {activeTab === 'docker' && 'Docker Container Operations'}
                 {activeTab === 'k8s' && 'Kubernetes Cluster Management'}
+                {activeTab === 'vms' && 'Virtual Machine Monitoring & SSH'}
                 {activeTab === 'chat' && 'Kalam Agentic DevOps Assistant'}
                 {activeTab === 'security' && 'Container Security & CVE Patching'}
                 {activeTab === 'agents' && 'Multi-Agent Swarm Visualizer'}
@@ -1045,7 +1082,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
             {/* Provider Pill */}
             <span className="badge running" style={{ fontSize: '11px', padding: '6px 10px' }}>
-              HPE AI: {provider === 'gemini' ? 'Gemini 3.5' : localModel}
+              HPE AI: {providerLabel}
             </span>
 
             {/* Theme Toggle */}
@@ -1211,16 +1248,30 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             </div>
           )}
 
+          {/* PCAI STACK VISUALIZER TAB */}
+          {activeTab === 'pcaistack' && (
+            <div className="tab-panel">
+              <PcaiStackView k8sResources={k8sResources} status={status} llm={llmParams} />
+            </div>
+          )}
+
+          {/* VIRTUAL MACHINES TAB */}
+          {activeTab === 'vms' && (
+            <div className="tab-panel">
+              <VmMonitor />
+            </div>
+          )}
+
           {/* AGENTS TEAMWORK TAB */}
           {activeTab === 'agents' && (
             <div className="tab-panel">
               <AgentTeamwork
                 containers={dockerContainers}
                 k8sResources={k8sResources}
-                localUrl={localUrl}
-                localModel={localModel}
+                localUrl={effLocalUrl}
+                localModel={effLocalModel}
                 apiKey={apiKey}
-                provider={provider}
+                provider={effProvider}
               />
             </div>
           )}
@@ -1652,9 +1703,9 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             handleExecuteAgentAction={handleExecuteAgentAction}
             agentMermaidChart={agentMermaidChart}
             setAgentMermaidChart={setAgentMermaidChart}
-            provider={provider}
+            provider={effProvider}
             apiKey={apiKey}
-            localModel={localModel}
+            localModel={effLocalModel}
             handleNodeHover={handleNodeHover}
           />
         )}
@@ -1662,11 +1713,12 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
         {/* PCAI ASSISTANT TAB */}
         {activeTab === 'pcai' && (
           <PcaiAssistant
-            provider={provider}
+            provider={effProvider}
             apiKey={apiKey}
-            localUrl={localUrl}
-            localModel={localModel}
+            localUrl={effLocalUrl}
+            localModel={effLocalModel}
             embedModel={embedModel}
+            authKey={effAuthKey}
           />
         )}
 
@@ -1912,11 +1964,11 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 {/* Provider Selector */}
                 <div className="form-group">
                   <label style={{ fontSize: '13px', fontWeight: '600' }}>LLM Provider</label>
-                  <select 
-                    className="form-input" 
-                    value={provider} 
+                  <select
+                    className="form-input"
+                    value={provider}
                     onChange={(e) => {
-                      const val = e.target.value as 'gemini' | 'local';
+                      const val = e.target.value as 'gemini' | 'local' | 'custom';
                       setProvider(val);
                       localStorage.setItem('kalam_llm_provider', val);
                     }}
@@ -1924,10 +1976,57 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                   >
                     <option value="gemini">Google Gemini (Cloud)</option>
                     <option value="local">Local LLM (Ollama / LM Studio)</option>
+                    <option value="custom">Custom Model Endpoint (HPE MLIS / vLLM / OpenAI)</option>
                   </select>
                 </div>
 
-                {provider === 'gemini' ? (
+                {provider === 'custom' ? (
+                  /* Custom OpenAI-compatible endpoint */
+                  <>
+                    <div className="form-group">
+                      <label style={{ fontSize: '13px', fontWeight: '600' }}>Endpoint Base URL</label>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="https://mlis.my-pcai.example.com/v1"
+                        value={customUrl}
+                        onChange={(e) => { setCustomUrl(e.target.value); localStorage.setItem('kalam_custom_url', e.target.value); }}
+                      />
+                      <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                        OpenAI-compatible base URL. For an HPE <strong>MLIS</strong> deployment use its serving URL ending in <code>/v1</code>.
+                      </span>
+                    </div>
+                    <div className="form-group">
+                      <label style={{ fontSize: '13px', fontWeight: '600' }}>Model Name</label>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="e.g. meta-llama/Llama-3.1-8B-Instruct"
+                        value={customModel}
+                        onChange={(e) => { setCustomModel(e.target.value); localStorage.setItem('kalam_custom_model', e.target.value); }}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label style={{ fontSize: '13px', fontWeight: '600' }}>API Key / Bearer Token (optional)</label>
+                      <div style={{ display: 'flex', gap: '8px', position: 'relative' }}>
+                        <input
+                          type={showCustomKey ? 'text' : 'password'}
+                          className="form-input"
+                          placeholder="Deployment token — leave blank if the endpoint is unauthenticated"
+                          value={customKey}
+                          onChange={(e) => { setCustomKey(e.target.value); localStorage.setItem('kalam_custom_key', e.target.value); }}
+                          style={{ flex: 1 }}
+                        />
+                        <button type="button" className="icon-btn" onClick={() => setShowCustomKey(!showCustomKey)} style={{ position: 'absolute', right: '10px', top: '10px', background: 'transparent', border: 'none' }}>
+                          {showCustomKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                      </div>
+                      <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                        Sent as <code>Authorization: Bearer …</code>. Stored locally in your browser.
+                      </span>
+                    </div>
+                  </>
+                ) : provider === 'gemini' ? (
                   /* Gemini Key Input */
                   <div className="form-group">
                     <label style={{ fontSize: '13px', fontWeight: '600' }}>Gemini API Key</label>

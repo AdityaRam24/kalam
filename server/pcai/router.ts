@@ -208,6 +208,7 @@ pcaiRouter.post('/api/pcai/chat', async (req, res) => {
     provider = 'gemini',
     localUrl = 'http://localhost:11434/v1',
     localModel = 'qwen2.5-coder:7b',
+    authKey,
   } = req.body || {};
 
   if (!prompt || !prompt.trim()) {
@@ -236,7 +237,7 @@ pcaiRouter.post('/api/pcai/chat', async (req, res) => {
       try {
         const response = await fetch(endpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(authKey ? { Authorization: `Bearer ${authKey}` } : {}) },
           body: JSON.stringify({ model: localModel, messages, temperature: 0.2, options: { num_ctx: 8192 } }),
         });
         if (!response.ok) {
@@ -288,6 +289,7 @@ pcaiRouter.post('/api/pcai/chat/stream', async (req, res) => {
     provider = 'gemini',
     localUrl = 'http://localhost:11434/v1',
     localModel = 'qwen2.5-coder:7b',
+    authKey,
   } = req.body || {};
 
   res.writeHead(200, {
@@ -325,6 +327,7 @@ pcaiRouter.post('/api/pcai/chat/stream', async (req, res) => {
         systemInstruction,
         chatHistory,
         prompt,
+        authKey,
         onDelta: (t) => sse({ type: 'delta', text: t }),
       });
       if (!ok.success) emitFallback(ok.reason);
@@ -363,6 +366,7 @@ export async function streamLocalChat(opts: {
   prompt: string;
   onDelta: (text: string) => void;
   numCtx?: number;
+  authKey?: string; // Bearer token for custom OpenAI-compatible endpoints (e.g. HPE MLIS)
 }): Promise<StreamResult> {
   const endpoint = `${opts.localUrl.replace(/\/$/, '')}/chat/completions`;
   const messages = [
@@ -373,7 +377,7 @@ export async function streamLocalChat(opts: {
   try {
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(opts.authKey ? { Authorization: `Bearer ${opts.authKey}` } : {}) },
       body: JSON.stringify({ model: opts.localModel, messages, temperature: 0.2, stream: true, options: { num_ctx: opts.numCtx ?? 8192 } }),
     });
     if (!response.ok || !response.body) {

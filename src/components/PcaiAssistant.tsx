@@ -48,6 +48,7 @@ interface PcaiAssistantProps {
   localUrl: string;
   localModel: string;
   embedModel?: string;
+  authKey?: string;
 }
 
 const QUICK_PROMPTS: Array<{ label: string; prompt: string; mode: 'ask' | 'diagnose' }> = [
@@ -148,7 +149,7 @@ const renderInline = (text: string): React.ReactNode => {
   });
 };
 
-const PcaiAssistant: React.FC<PcaiAssistantProps> = ({ provider, apiKey, localUrl, localModel, embedModel }) => {
+const PcaiAssistant: React.FC<PcaiAssistantProps> = ({ provider, apiKey, localUrl, localModel, embedModel, authKey }) => {
   const [messages, setMessages] = useState<PcaiMessage[]>(() => {
     const saved = localStorage.getItem('kalam_pcai_history');
     if (saved) {
@@ -259,7 +260,7 @@ const PcaiAssistant: React.FC<PcaiAssistantProps> = ({ provider, apiKey, localUr
       const res = await fetch('/api/pcai/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: text, mode: sendMode, chatHistory: history, apiKey, provider, localUrl, localModel }),
+        body: JSON.stringify({ prompt: text, mode: sendMode, chatHistory: history, apiKey, provider, localUrl, localModel, authKey }),
       });
       if (!res.ok || !res.body) {
         const data = await res.json().catch(() => ({} as any));
