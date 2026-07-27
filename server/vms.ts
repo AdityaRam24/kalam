@@ -163,6 +163,238 @@ vmsRouter.get('/api/vms/ssh-command/:name', async (req, res) => {
   res.json({ command: cmd });
 });
 
+// ---------------------------------------------------------------------------
+// Read-only Kubernetes diagnosis over SSH.
+//
+// POST /api/vms/diagnose { name } — SSH into the VM and run ONLY inspection
+// commands (kubectl get / describe / logs / events). It finds unhealthy nodes
+// and pods, pulls their logs and events, matches them against known failure
+// patterns, and reports the likely cause plus suggested fix commands.
+// IT NEVER EXECUTES A FIX: every suggestion is returned as text for a human.
+// ---------------------------------------------------------------------------
+
+// Phase 1: one SSH round trip gathering cluster state (all read-only).
+const DIAG_CMD = [
+  'echo @@KVER@@',
+  '(kubectl version --client=true 2>/dev/null | head -1 || true)',
+  'echo @@NODES@@',
+  '(kubectl get nodes -o json 2>/dev/null || true)',
+  'echo @@PODS@@',
+  '(kubectl get pods -A -o json 2>/dev/null || true)',
+  'echo @@EVENTS@@',
+  "(kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp 2>/dev/null | tail -25 || true)",
+  'echo @@END@@',
+].join('; ');
+
+interface Finding {
+  severity: 'critical' | 'warning' | 'info';
+  kind: string;            // Pod | Node
+  namespace?: string;
+  name: string;
+  reason: string;          // CrashLoopBackOff, OOMKilled, ...
+  detail: string;          // human explanation of the likely cause
+  logExcerpt?: string;     // tail of the failing container's logs
+  events?: string;         // relevant describe/event lines
+  suggestedFixes: string[]; // commands/actions to REPORT ONLY — never run
+}
+
+// Known failure patterns → likely cause + suggested (not executed) fixes.
+function diagnoseReason(reason: string, extra: { exitCode?: number; restarts?: number } = {}): { detail: string; fixes: string[]; severity: Finding['severity'] } {
+  switch (reason) {
+    case 'CrashLoopBackOff':
+      return {
+        severity: 'critical',
+        detail: `Container keeps crashing after start (${extra.restarts ?? '?'} restarts). Usually a bad config/env var, a failing dependency (DB, service), or the process exiting on error. Check the log excerpt below for the actual error.`,
+        fixes: [
+          'Fix the root error shown in the logs (config/env/dependency), then: kubectl rollout restart deployment/<name> -n <ns>',
+          'If config changed recently: kubectl rollout undo deployment/<name> -n <ns>',
+        ],
+      };
+    case 'OOMKilled':
+      return {
+        severity: 'critical',
+        detail: `Container was killed by the kernel for exceeding its memory limit${extra.exitCode === 137 ? ' (exit code 137)' : ''}. The workload needs more memory than its limit allows, or it has a memory leak.`,
+        fixes: [
+          'Raise the memory limit: kubectl set resources deployment/<name> -n <ns> --limits=memory=<bigger, e.g. 2Gi>',
+          'Or investigate a leak: compare "kubectl top pod" over time against the limit.',
+        ],
+      };
+    case 'ImagePullBackOff':
+    case 'ErrImagePull':
+      return {
+        severity: 'critical',
+        detail: 'Kubernetes cannot pull the container image. Either the image name/tag is wrong, the registry needs credentials (imagePullSecret), or the node has no network path to the registry.',
+        fixes: [
+          'Verify the image exists: docker pull <image> (or check the registry UI).',
+          'If private registry: kubectl create secret docker-registry regcred ... and reference it in imagePullSecrets.',
+          'Fix a typo in the tag: kubectl set image deployment/<name> <container>=<correct-image> -n <ns>',
+        ],
+      };
+    case 'CreateContainerConfigError':
+      return {
+        severity: 'critical',
+        detail: 'The container references a ConfigMap or Secret that does not exist (or a missing key in one).',
+        fixes: ['Check the describe/events output for the missing name, then create it: kubectl create configmap/secret <name> -n <ns> ...'],
+      };
+    case 'Pending':
+      return {
+        severity: 'warning',
+        detail: 'Pod cannot be scheduled. Common causes: not enough CPU/memory/GPU on any node, node selector/taint mismatch, or an unbound PersistentVolumeClaim.',
+        fixes: [
+          'See the exact reason in the events (FailedScheduling line).',
+          'If resources: lower requests, or add capacity. If PVC: check kubectl get pvc -n <ns>. If taints: add a toleration or remove the taint.',
+        ],
+      };
+    case 'Evicted':
+      return {
+        severity: 'warning',
+        detail: 'Pod was evicted, typically because the node ran out of disk or memory (node pressure).',
+        fixes: ['Free disk on the node (old images: crictl rmi --prune / docker system prune), then delete the evicted pod record: kubectl delete pod <name> -n <ns>'],
+      };
+    case 'NotReady':
+      return {
+        severity: 'critical',
+        detail: 'Node is NotReady — kubelet is not reporting healthy. Causes: kubelet/containerd down, disk pressure, network partition.',
+        fixes: [
+          'On the node: systemctl status kubelet && journalctl -u kubelet -n 50',
+          'Check pressure conditions in the node describe output (DiskPressure/MemoryPressure).',
+        ],
+      };
+    default:
+      return {
+        severity: 'warning',
+        detail: `Container/pod is unhealthy (reason: ${reason || 'unknown'}). See logs and events below.`,
+        fixes: ['Inspect: kubectl describe pod <name> -n <ns> and kubectl logs <name> -n <ns> --previous'],
+      };
+  }
+}
+
+function shq(s: string): string {
+  // Values come from the cluster's own JSON but quote them anyway.
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+vmsRouter.post('/api/vms/diagnose', async (req, res) => {
+  const { name } = req.body || {};
+  const vm = (await loadVms()).find((v) => v.name === name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+
+  if (!(await tcpReachable(vm.host, vm.port))) {
+    return res.json({ reachable: false, error: 'SSH port unreachable' });
+  }
+
+  const { stdout, stderr, ok } = await sshRun(vm, DIAG_CMD, 45000);
+  if (!ok && !stdout.trim()) {
+    return res.json({ reachable: true, error: (stderr.split('\n')[0] || 'SSH failed').slice(0, 200) });
+  }
+
+  const kubectlAvailable = section(stdout, 'KVER').length > 0 || section(stdout, 'PODS').startsWith('{');
+  if (!kubectlAvailable) {
+    return res.json({ reachable: true, kubectlAvailable: false, error: 'kubectl is not available (or not configured) on this host.' });
+  }
+
+  const findings: Finding[] = [];
+
+  // ---- Nodes -------------------------------------------------------------
+  try {
+    const nraw = section(stdout, 'NODES');
+    if (nraw.startsWith('{')) {
+      for (const n of JSON.parse(nraw).items || []) {
+        const conds = n.status?.conditions || [];
+        const ready = conds.find((c: any) => c.type === 'Ready');
+        if (ready && ready.status !== 'True') {
+          const d = diagnoseReason('NotReady');
+          findings.push({ severity: d.severity, kind: 'Node', name: n.metadata?.name || '?', reason: 'NotReady', detail: d.detail, events: ready.message || '', suggestedFixes: d.fixes });
+        }
+        for (const c of conds) {
+          if (['MemoryPressure', 'DiskPressure', 'PIDPressure'].includes(c.type) && c.status === 'True') {
+            findings.push({
+              severity: 'warning', kind: 'Node', name: n.metadata?.name || '?', reason: c.type,
+              detail: `Node reports ${c.type}: ${c.message || ''}`.trim(),
+              suggestedFixes: [c.type === 'DiskPressure' ? 'Free disk space on the node (prune unused images/logs).' : 'Reduce workload on this node or add capacity.'],
+            });
+          }
+        }
+      }
+    }
+  } catch { /* ignore node parse errors */ }
+
+  // ---- Pods --------------------------------------------------------------
+  interface ProblemPod { ns: string; pod: string; container?: string; reason: string; restarts: number; exitCode?: number; }
+  const problems: ProblemPod[] = [];
+  try {
+    const praw = section(stdout, 'PODS');
+    if (praw.startsWith('{')) {
+      for (const p of JSON.parse(praw).items || []) {
+        const ns = p.metadata?.namespace || 'default';
+        const pod = p.metadata?.name || '?';
+        const phase = p.status?.phase || 'Unknown';
+        if (phase === 'Succeeded') continue; // completed jobs are fine
+        const statuses = [...(p.status?.containerStatuses || []), ...(p.status?.initContainerStatuses || [])];
+        let flagged = false;
+        for (const cs of statuses) {
+          const waiting = cs.state?.waiting?.reason;
+          const lastTerm = cs.lastState?.terminated;
+          if (waiting && !['ContainerCreating', 'PodInitializing'].includes(waiting)) {
+            problems.push({ ns, pod, container: cs.name, reason: waiting, restarts: cs.restartCount || 0, exitCode: lastTerm?.exitCode });
+            flagged = true;
+          } else if (lastTerm?.reason === 'OOMKilled' || lastTerm?.exitCode === 137) {
+            problems.push({ ns, pod, container: cs.name, reason: 'OOMKilled', restarts: cs.restartCount || 0, exitCode: lastTerm?.exitCode });
+            flagged = true;
+          } else if ((cs.restartCount || 0) >= 5 && !cs.ready) {
+            problems.push({ ns, pod, container: cs.name, reason: 'CrashLoopBackOff', restarts: cs.restartCount });
+            flagged = true;
+          }
+        }
+        if (!flagged && (phase === 'Pending' || phase === 'Failed')) {
+          problems.push({ ns, pod, reason: p.status?.reason === 'Evicted' ? 'Evicted' : phase === 'Pending' ? 'Pending' : (p.status?.reason || 'Failed'), restarts: 0 });
+        }
+      }
+    }
+  } catch { /* ignore pod parse errors */ }
+
+  // ---- Phase 2: pull evidence (describe events + logs) for up to 5 pods --
+  const evidenceTargets = problems.slice(0, 5);
+  if (evidenceTargets.length) {
+    const cmd = evidenceTargets.map((t, i) => {
+      const base = `kubectl -n ${shq(t.ns)}`;
+      const logs = t.reason === 'Pending' || t.reason === 'Evicted'
+        ? 'true' // no logs for unscheduled/evicted pods
+        : `(${base} logs ${shq(t.pod)}${t.container ? ` -c ${shq(t.container)}` : ''} --tail=40 2>/dev/null || ${base} logs ${shq(t.pod)}${t.container ? ` -c ${shq(t.container)}` : ''} --previous --tail=40 2>/dev/null || true)`;
+      return `echo @@EV${i}@@; (${base} describe pod ${shq(t.pod)} 2>/dev/null | sed -n '/^Events:/,$p' | tail -15 || true); echo @@LOG${i}@@; ${logs}`;
+    }).join('; ') + '; echo @@END@@';
+
+    const ev = await sshRun(vm, cmd, 60000);
+    evidenceTargets.forEach((t, i) => {
+      const d = diagnoseReason(t.reason, { restarts: t.restarts, exitCode: t.exitCode });
+      findings.push({
+        severity: d.severity, kind: 'Pod', namespace: t.ns, name: t.pod + (t.container ? ` / ${t.container}` : ''),
+        reason: t.reason, detail: d.detail,
+        events: section(ev.stdout, `EV${i}`).slice(0, 2000) || undefined,
+        logExcerpt: section(ev.stdout, `LOG${i}`).slice(0, 3000) || undefined,
+        suggestedFixes: d.fixes,
+      });
+    });
+  }
+  // Any problems beyond the evidence limit still get a finding (without logs).
+  for (const t of problems.slice(5)) {
+    const d = diagnoseReason(t.reason, { restarts: t.restarts, exitCode: t.exitCode });
+    findings.push({ severity: d.severity, kind: 'Pod', namespace: t.ns, name: t.pod, reason: t.reason, detail: d.detail, suggestedFixes: d.fixes });
+  }
+
+  const critical = findings.filter((f) => f.severity === 'critical').length;
+  res.json({
+    reachable: true,
+    kubectlAvailable: true,
+    reportOnly: true, // this endpoint never mutates anything
+    summary: findings.length === 0
+      ? 'No problems detected: all nodes Ready and all pods healthy.'
+      : `${findings.length} issue(s) found (${critical} critical). Suggested fixes are reported only — nothing was executed.`,
+    findings,
+    warningEvents: section(stdout, 'EVENTS') || undefined,
+  });
+});
+
 // Discover the container/pod workloads actually running ON a VM, over SSH.
 // Probes Docker, Kubernetes (kubectl), and containerd (crictl) — whichever the
 // host has — in a single SSH round trip using section delimiters.

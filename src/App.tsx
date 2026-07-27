@@ -132,6 +132,26 @@ export function App() {
   const [customModel, setCustomModel] = useState<string>(() => localStorage.getItem('kalam_custom_model') || '');
   const [customKey, setCustomKey] = useState<string>(() => localStorage.getItem('kalam_custom_key') || '');
   const [showCustomKey, setShowCustomKey] = useState<boolean>(false);
+  // Model discovery for the custom endpoint (works with any OpenAI-compatible API)
+  const [customModels, setCustomModels] = useState<string[]>([]);
+  const [customDetectMsg, setCustomDetectMsg] = useState<string>('');
+  const detectCustomModels = async () => {
+    if (!customUrl.trim()) { setCustomDetectMsg('Enter the endpoint base URL first.'); return; }
+    setCustomDetectMsg('Detecting…');
+    setCustomModels([]);
+    try {
+      const q = new URLSearchParams({ localUrl: customUrl.trim() });
+      if (customKey.trim()) q.set('authKey', customKey.trim());
+      const res = await fetch(`/api/llm/models?${q.toString()}`);
+      const data = await res.json();
+      if (!data.endpointUp) { setCustomDetectMsg('Endpoint not reachable (check the URL and API key).'); return; }
+      const names = (data.chatModels || data.models || []).map((m: any) => m.name).filter(Boolean);
+      setCustomModels(names);
+      setCustomDetectMsg(names.length ? `${names.length} model(s) found — click one to select it.` : 'Endpoint is up, but it lists no models. Type the model name manually.');
+    } catch (e: any) {
+      setCustomDetectMsg(`Detection failed: ${e.message}`);
+    }
+  };
   const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('kalam_theme') as 'light' | 'dark') || 'light');
@@ -1998,13 +2018,26 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                     </div>
                     <div className="form-group">
                       <label style={{ fontSize: '13px', fontWeight: '600' }}>Model Name</label>
-                      <input
-                        type="text"
-                        className="form-input"
-                        placeholder="e.g. meta-llama/Llama-3.1-8B-Instruct"
-                        value={customModel}
-                        onChange={(e) => { setCustomModel(e.target.value); localStorage.setItem('kalam_custom_model', e.target.value); }}
-                      />
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ flex: 1 }}
+                          placeholder="e.g. meta-llama/Llama-3.1-8B-Instruct"
+                          value={customModel}
+                          onChange={(e) => { setCustomModel(e.target.value); localStorage.setItem('kalam_custom_model', e.target.value); }}
+                        />
+                        <button type="button" className="btn secondary" onClick={detectCustomModels} style={{ whiteSpace: 'nowrap' }}>Detect models</button>
+                      </div>
+                      {customDetectMsg && <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{customDetectMsg}</span>}
+                      {customModels.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '6px', maxHeight: 120, overflow: 'auto' }}>
+                          {customModels.map((m) => (
+                            <button key={m} type="button" className={`badge ${customModel === m ? 'running' : 'neutral'}`} style={{ cursor: 'pointer', border: 'none' }}
+                              onClick={() => { setCustomModel(m); localStorage.setItem('kalam_custom_model', m); }}>{m}</button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <div className="form-group">
                       <label style={{ fontSize: '13px', fontWeight: '600' }}>API Key / Bearer Token (optional)</label>

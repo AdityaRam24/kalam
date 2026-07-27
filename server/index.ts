@@ -2,6 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
@@ -939,6 +942,20 @@ app.post('/api/agent/orchestrate', async (req, res) => {
     res.status(500).json({ error: 'Failed to parse agentic workflow JSON trace', details: parseError.message, raw: responseText });
   }
 });
+
+// Serve the built frontend (dist/) so a production run needs only this server —
+// no Vite dev server. In dev, dist/ may be missing; the Vite proxy covers /api.
+const distDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir));
+  // SPA fallback: any non-API GET returns index.html so client-side routing works.
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && !req.path.startsWith('/api')) {
+      return res.sendFile(path.join(distDir, 'index.html'));
+    }
+    next();
+  });
+}
 
 const server = app.listen(PORT, () => {
   console.log(`✅ Kalam Backend Server running on http://localhost:${PORT}`);

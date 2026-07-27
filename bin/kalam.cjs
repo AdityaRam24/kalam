@@ -139,6 +139,13 @@ function postJSON(p, payload, timeoutMs = 180000) {
 }
 
 // Stream a Server-Sent-Events chat endpoint. Calls handlers as events arrive.
+// The active request is tracked so Ctrl+C can cancel the answer without
+// killing the whole REPL.
+let activeStreamReq = null;
+function cancelActiveStream() {
+  if (activeStreamReq) { activeStreamReq.destroy(new Error('cancelled')); activeStreamReq = null; return true; }
+  return false;
+}
 function streamChat(pathname, payload, { onSources, onDelta } = {}, timeoutMs = 300000) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
@@ -171,9 +178,10 @@ function streamChat(pathname, payload, { onSources, onDelta } = {}, timeoutMs = 
           } catch { /* ignore keepalive */ }
         }
       });
-      res.on('end', () => resolve(full));
+      res.on('end', () => { activeStreamReq = null; resolve(full); });
     });
-    req.on('error', (err) => reject(new Error(err.message)));
+    activeStreamReq = req;
+    req.on('error', (err) => { activeStreamReq = null; reject(new Error(err.message)); });
     req.setTimeout(timeoutMs, () => { req.destroy(new Error('Stream timed out')); });
     req.write(body);
     req.end();
@@ -185,23 +193,35 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ---------------------------------------------------------------------------
 // Auto-start the backend + knowledge base
 // ---------------------------------------------------------------------------
-async function isServerUp() {
-  try { await getJSON('/api/pcai/status', 2000); return true; } catch { return false; }
+let serverKnownUp = false; // once confirmed, skip re-checking on every command
+async function isServerUp(timeoutMs = 1200) {
+  try { await getJSON('/api/pcai/status', timeoutMs); serverKnownUp = true; return true; } catch { return false; }
 }
 
 async function ensureServer() {
-  if (await isServerUp()) return true;
+  if (serverKnownUp || await isServerUp()) return true;
   process.stdout.write(`${colors.gray}Backend not running — starting it for you...${colors.reset}`);
-  const isWin = process.platform === 'win32';
-  const npxBin = isWin ? 'npx.cmd' : 'npx';
-  const child = spawn(npxBin, ['tsx', 'server/index.ts'], {
-    cwd: PROJECT_ROOT, detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env }
-  });
+  // Spawn tsx directly through the current Node binary — much faster than the
+  // `npx` resolver, which adds 1-2s of lookup overhead on every cold start.
+  const tsxCli = path.join(PROJECT_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  let child;
+  if (fs.existsSync(tsxCli)) {
+    child = spawn(process.execPath, [tsxCli, 'server/index.ts'], {
+      cwd: PROJECT_ROOT, detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env }
+    });
+  } else {
+    const npxBin = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+    child = spawn(npxBin, ['tsx', 'server/index.ts'], {
+      cwd: PROJECT_ROOT, detached: true, stdio: 'ignore', windowsHide: true, shell: process.platform === 'win32', env: { ...process.env }
+    });
+  }
   child.unref();
-  for (let i = 0; i < 30; i++) {
-    await sleep(1000);
-    process.stdout.write('.');
-    if (await isServerUp()) {
+  // Poll fast (every 250ms) so we attach the moment the server is ready,
+  // instead of the old 1-second granularity.
+  for (let i = 0; i < 100; i++) {
+    await sleep(250);
+    if (i % 4 === 3) process.stdout.write('.');
+    if (await isServerUp(600)) {
       readline.clearLine(process.stdout, 0); readline.cursorTo(process.stdout, 0);
       console.log(`${colors.green}✅ Backend is up.${colors.reset}`);
       return true;
@@ -213,9 +233,9 @@ async function ensureServer() {
   return false;
 }
 
-async function ensureKnowledgeBase() {
+async function ensureKnowledgeBase(prefetchedStatus) {
   try {
-    const st = await getJSON('/api/pcai/status');
+    const st = prefetchedStatus || await getJSON('/api/pcai/status');
     if (st.ready && st.chunks > 0) return true;
   } catch { /* fall through */ }
   process.stdout.write(`${colors.gray}First run: building the PCAI knowledge base (offline seed)...${colors.reset}`);
@@ -271,17 +291,36 @@ function makeStreamRenderer() {
     }
     process.stdout.write(`${formatLine(line)}\n`);
   };
+  // Long prose lines shouldn't sit invisible until their newline arrives:
+  // once a partial line clearly isn't a heading/bullet/action, stream it live
+  // and finish it in place when the newline shows up.
+  let partialPrinted = 0;
+  const isPlainProse = (s) => partialPrinted > 0 ||
+    (s.length > 60 && !/^\s*([#>*-]|\d+\.|```)/.test(s) && !s.includes('[ACTION'));
   return {
     push(text) {
       lineBuf += text;
       let idx;
       while ((idx = lineBuf.indexOf('\n')) >= 0) {
-        flush(lineBuf.slice(0, idx));
+        const line = lineBuf.slice(0, idx);
+        if (partialPrinted > 0) {
+          // Line already partially on screen — print the remainder + newline.
+          process.stdout.write(inlineFmt(line.slice(partialPrinted)) + '\n');
+          partialPrinted = 0;
+        } else {
+          flush(line);
+        }
         lineBuf = lineBuf.slice(idx + 1);
+      }
+      if (!inCode && isPlainProse(lineBuf)) {
+        process.stdout.write(inlineFmt(lineBuf.slice(partialPrinted)));
+        partialPrinted = lineBuf.length;
       }
     },
     end() {
-      if (lineBuf) { flush(lineBuf); lineBuf = ''; }
+      if (partialPrinted > 0) { process.stdout.write(inlineFmt(lineBuf.slice(partialPrinted)) + '\n'); }
+      else if (lineBuf) { flush(lineBuf); }
+      lineBuf = '';
       return actions;
     },
   };
@@ -472,7 +511,12 @@ ${colors.gray}Tips: prefix a line with ${colors.reset}${colors.bold}solve:${colo
 async function startRepl(initialMode) {
   if (!(await ensureServer())) return;
   if (initialMode) { session.mode = initialMode; }
-  const kb = await ensureKnowledgeBase().then(() => getJSON('/api/pcai/status').catch(() => null));
+  // One status fetch covers both the KB check and the banner (was 3 round trips).
+  let kb = await getJSON('/api/pcai/status').catch(() => null);
+  if (!kb || !kb.ready || !(kb.chunks > 0)) {
+    await ensureKnowledgeBase(kb);
+    kb = await getJSON('/api/pcai/status').catch(() => null);
+  }
 
   printBanner(kb);
 
@@ -482,6 +526,17 @@ async function startRepl(initialMode) {
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: `${colors.green}${colors.bold}kalam ›${colors.reset} ` });
   const reprompt = () => { console.log(); rl.prompt(); };
+
+  // First Ctrl+C cancels a streaming answer; when idle it exits as usual.
+  rl.on('SIGINT', () => {
+    if (cancelActiveStream()) {
+      console.log(`\n${colors.yellow}⏹ Answer cancelled.${colors.reset}`);
+      reprompt();
+    } else {
+      console.log(`\n${colors.gray}Goodbye! 👋${colors.reset}\n`);
+      rl.close();
+    }
+  });
   rl.prompt();
 
   rl.on('line', async (line) => {
@@ -588,7 +643,12 @@ async function singleShot(text, forcedMode) {
     console.log(`\n${colors.red}❌ Provide text.${colors.reset}\n`); return;
   }
   if (!(await ensureServer())) return;
-  if (!(await ensureKnowledgeBase())) return;
+  // ensureServer's health check already fetched /api/pcai/status; reuse the
+  // cheap path — only rebuild if the KB is actually empty.
+  const st = await getJSON('/api/pcai/status', 3000).catch(() => null);
+  if (!st || !st.ready || !(st.chunks > 0)) {
+    if (!(await ensureKnowledgeBase(st))) return;
+  }
   const prevMode = session.mode;
   if (forcedMode) session.mode = forcedMode;
   await ask(text, []);

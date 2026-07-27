@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers } from 'lucide-react';
+import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck } from 'lucide-react';
 
 interface VmEntry { name: string; host: string; user: string; port: number; keyPath?: string; }
 interface VmMetrics {
@@ -33,6 +33,35 @@ export const VmMonitor: React.FC = () => {
   const [discovery, setDiscovery] = useState<Record<string, Discovery>>({});
   const [discoverBusy, setDiscoverBusy] = useState<Record<string, boolean>>({});
   const [discoverFor, setDiscoverFor] = useState<string | null>(null);
+
+  // Read-only cluster diagnosis (kubectl inspection over SSH — reports, never fixes)
+  interface DiagFinding {
+    severity: 'critical' | 'warning' | 'info'; kind: string; namespace?: string; name: string;
+    reason: string; detail: string; logExcerpt?: string; events?: string; suggestedFixes: string[];
+  }
+  interface Diagnosis {
+    reachable: boolean; kubectlAvailable?: boolean; error?: string; summary?: string;
+    findings?: DiagFinding[]; warningEvents?: string;
+  }
+  const [diagnosis, setDiagnosis] = useState<Record<string, Diagnosis>>({});
+  const [diagBusy, setDiagBusy] = useState<Record<string, boolean>>({});
+  const [diagFor, setDiagFor] = useState<string | null>(null);
+
+  const diagnose = async (name: string) => {
+    setDiagBusy((b) => ({ ...b, [name]: true }));
+    setDiagFor(name);
+    try {
+      const res = await fetch('/api/vms/diagnose', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      setDiagnosis((d) => ({ ...d, [name]: data }));
+    } catch (e: any) {
+      setDiagnosis((d) => ({ ...d, [name]: { reachable: false, error: e.message } }));
+    } finally {
+      setDiagBusy((b) => ({ ...b, [name]: false }));
+    }
+  };
 
   const loadVms = useCallback(async () => {
     setLoading(true);
@@ -191,6 +220,7 @@ export const VmMonitor: React.FC = () => {
                       <div className="action-btns">
                         <button className="icon-btn primary" title="Refresh metrics" onClick={() => probe(v.name)}><RefreshCw size={14} className={busy ? 'loader' : ''} /></button>
                         <button className="icon-btn success" title="Discover containers & pods" onClick={() => discover(v.name)}><Boxes size={14} className={discoverBusy[v.name] ? 'loader' : ''} /></button>
+                        <button className="icon-btn warning" title="Diagnose cluster (read-only kubectl checks)" onClick={() => diagnose(v.name)}><Activity size={14} className={diagBusy[v.name] ? 'loader' : ''} /></button>
                         <button className="icon-btn secondary" title="Run remote command" onClick={() => { setExecFor(v.name); setExecOut(''); }}><Play size={14} /></button>
                         <button className="icon-btn secondary" title="Copy SSH command" onClick={() => copySsh(v.name)}>{copied === v.name ? <Check size={14} /> : <Copy size={14} />}</button>
                         <button className="icon-btn danger" title="Remove from inventory" onClick={() => removeVm(v.name)}><Trash2 size={14} /></button>
@@ -294,6 +324,79 @@ export const VmMonitor: React.FC = () => {
                       ))}</tbody>
                     </table></div>
                   </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Read-only cluster diagnosis report */}
+      {diagFor && (() => {
+        const d = diagnosis[diagFor];
+        const busy = diagBusy[diagFor];
+        return (
+          <div className="panel-card" style={{ borderLeft: '3px solid var(--status-warn, #E5A50A)' }}>
+            <div className="panel-card-title">
+              <h2><Activity size={18} /> Diagnosis · {diagFor}</h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button className="btn secondary" onClick={() => diagnose(diagFor)} disabled={busy} style={{ padding: '6px 12px' }}>
+                  <RefreshCw size={14} className={busy ? 'loader' : ''} /> Re-run
+                </button>
+                <button className="icon-btn" onClick={() => setDiagFor(null)}><X size={16} /></button>
+              </div>
+            </div>
+
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 0 }}>
+              <ShieldCheck size={11} style={{ verticalAlign: -1, marginRight: 4 }} />
+              Read-only: runs only <code>kubectl get / describe / logs / events</code> over SSH. Suggested fixes are reported for you to review — nothing is executed.
+            </p>
+
+            {busy && !d ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-secondary)', padding: 12 }}>
+                <span className="loader" /> Inspecting nodes, pods, logs and events over SSH…
+              </div>
+            ) : !d ? null : d.error ? (
+              <p style={{ color: 'var(--status-error)', fontSize: 13 }}>{d.error}</p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: (d.findings?.length || 0) === 0 ? 'var(--hpe-green)' : 'var(--text-primary)' }}>
+                  {d.summary}
+                </div>
+
+                {(d.findings || []).map((f, i) => (
+                  <div key={i} style={{ border: '1px solid var(--border-color)', borderLeft: `3px solid ${f.severity === 'critical' ? 'var(--status-error)' : 'var(--status-warn, #E5A50A)'}`, borderRadius: 8, padding: 12, background: 'var(--bg-tertiary)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                      <AlertTriangle size={14} style={{ color: f.severity === 'critical' ? 'var(--status-error)' : 'var(--status-warn, #E5A50A)' }} />
+                      <span className={`badge ${f.severity === 'critical' ? 'error' : 'warning'}`}>{f.reason}</span>
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{f.kind}</span>
+                      <strong style={{ fontSize: 13 }}>{f.namespace ? `${f.namespace} / ` : ''}{f.name}</strong>
+                    </div>
+                    <p style={{ fontSize: 13, margin: '4px 0 8px' }}>{f.detail}</p>
+                    {f.events && (
+                      <details style={{ marginBottom: 6 }}>
+                        <summary style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-secondary)' }}>Events (kubectl describe)</summary>
+                        <pre style={{ background: 'var(--bg-primary)', borderRadius: 6, padding: 10, fontSize: 11, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', maxHeight: 180, overflow: 'auto', margin: '6px 0 0' }}>{f.events}</pre>
+                      </details>
+                    )}
+                    {f.logExcerpt && (
+                      <details style={{ marginBottom: 6 }}>
+                        <summary style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-secondary)' }}>Log excerpt (last lines)</summary>
+                        <pre style={{ background: 'var(--bg-primary)', borderRadius: 6, padding: 10, fontSize: 11, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto', margin: '6px 0 0' }}>{f.logExcerpt}</pre>
+                      </details>
+                    )}
+                    <div style={{ fontSize: 12, fontWeight: 600, marginTop: 6 }}>Suggested fix (not executed):</div>
+                    <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                      {f.suggestedFixes.map((s, j) => <li key={j} style={{ fontSize: 12, fontFamily: s.includes('kubectl') || s.includes('systemctl') ? 'var(--font-mono)' : undefined, color: 'var(--text-secondary)' }}>{s}</li>)}
+                    </ul>
+                  </div>
+                ))}
+
+                {d.warningEvents && (
+                  <details>
+                    <summary style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-secondary)' }}>Recent cluster warning events</summary>
+                    <pre style={{ background: 'var(--bg-primary)', borderRadius: 6, padding: 10, fontSize: 11, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto', margin: '6px 0 0' }}>{d.warningEvents}</pre>
+                  </details>
                 )}
               </div>
             )}

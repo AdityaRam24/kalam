@@ -53,11 +53,11 @@ export function classifyModel(name: string, families: string[] = []): 'chat' | '
 
 // Query the Ollama native tags API. Returns null if the endpoint isn't Ollama /
 // isn't reachable, so callers can fall back to the OpenAI-compatible list.
-async function listOllamaTags(base: string, timeoutMs = 5000): Promise<DiscoveredModel[] | null> {
+async function listOllamaTags(base: string, authKey?: string, timeoutMs = 5000): Promise<DiscoveredModel[] | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const resp = await fetch(`${base}/api/tags`, { signal: controller.signal });
+    const resp = await fetch(`${base}/api/tags`, { signal: controller.signal, headers: authHeaders(authKey) });
     if (!resp.ok) return null;
     const data: any = await resp.json();
     if (!Array.isArray(data?.models)) return null;
@@ -83,12 +83,12 @@ async function listOllamaTags(base: string, timeoutMs = 5000): Promise<Discovere
 }
 
 // OpenAI-compatible /models fallback (LM Studio, vLLM, or Ollama's /v1).
-async function listOpenAIModels(localUrl: string, timeoutMs = 5000): Promise<DiscoveredModel[] | null> {
+async function listOpenAIModels(localUrl: string, authKey?: string, timeoutMs = 5000): Promise<DiscoveredModel[] | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const base = localUrl.replace(/\/+$/, '');
-    const resp = await fetch(`${base}/models`, { signal: controller.signal });
+    const resp = await fetch(`${base}/models`, { signal: controller.signal, headers: authHeaders(authKey) });
     if (!resp.ok) return null;
     const data: any = await resp.json();
     const rows = data?.data || data?.models || [];
@@ -113,17 +113,23 @@ async function listOpenAIModels(localUrl: string, timeoutMs = 5000): Promise<Dis
   }
 }
 
-export async function discoverModels(localUrl?: string): Promise<{
+// Bearer auth for hosted OpenAI-compatible endpoints (OpenAI, Groq, OpenRouter,
+// Together, vLLM with --api-key, HPE MLIS...). Local servers just ignore it.
+function authHeaders(authKey?: string): Record<string, string> {
+  return authKey ? { Authorization: `Bearer ${authKey}` } : {};
+}
+
+export async function discoverModels(localUrl?: string, authKey?: string): Promise<{
   endpointUp: boolean;
   source: 'ollama' | 'openai' | 'none';
   models: DiscoveredModel[];
 }> {
   const base = ollamaBase(localUrl);
   // Prefer the richer Ollama tags API (has sizes/params), then OpenAI /models.
-  const ollama = await listOllamaTags(base);
+  const ollama = await listOllamaTags(base, authKey);
   if (ollama) return { endpointUp: true, source: 'ollama', models: sortModels(ollama) };
 
-  const openai = await listOpenAIModels(localUrl || `${base}/v1`);
+  const openai = await listOpenAIModels(localUrl || `${base}/v1`, authKey);
   if (openai) return { endpointUp: true, source: 'openai', models: sortModels(openai) };
 
   return { endpointUp: false, source: 'none', models: [] };
@@ -139,8 +145,9 @@ function sortModels(models: DiscoveredModel[]): DiscoveredModel[] {
 
 llmRouter.get('/api/llm/models', async (req, res) => {
   const localUrl = (req.query.localUrl as string) || undefined;
+  const authKey = (req.query.authKey as string) || undefined;
   try {
-    const result = await discoverModels(localUrl);
+    const result = await discoverModels(localUrl, authKey);
     const chat = result.models.filter((m) => m.kind !== 'embed');
     const embed = result.models.filter((m) => m.kind === 'embed');
     res.json({
