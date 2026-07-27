@@ -1,16 +1,25 @@
 import React, { useEffect, useRef, useState } from 'react';
-import mermaid from 'mermaid';
 
-// Initialize mermaid
-mermaid.initialize({
-  startOnLoad: false,
-  theme: 'dark',
-  securityLevel: 'loose',
-  flowchart: {
-    useMaxWidth: true,
-    htmlLabels: true
+// Mermaid is ~400 kB — load it lazily the first time a diagram renders so it
+// stays out of the main bundle, and initialize it exactly once.
+let mermaidPromise: Promise<typeof import('mermaid').default> | null = null;
+function getMermaid() {
+  if (!mermaidPromise) {
+    mermaidPromise = import('mermaid').then((m) => {
+      m.default.initialize({
+        startOnLoad: false,
+        theme: 'dark',
+        securityLevel: 'loose',
+        flowchart: {
+          useMaxWidth: true,
+          htmlLabels: true
+        }
+      });
+      return m.default;
+    });
   }
-});
+  return mermaidPromise;
+}
 
 interface MermaidChartProps {
   chart: string;
@@ -40,6 +49,7 @@ export const MermaidChart: React.FC<MermaidChartProps> = ({ chart, onNodeHover }
         cleanChart = cleanChart.trim();
 
         // Render the diagram
+        const mermaid = await getMermaid();
         const { svg } = await mermaid.render(uniqueId, cleanChart);
         setSvgContent(svg);
       } catch (err: any) {

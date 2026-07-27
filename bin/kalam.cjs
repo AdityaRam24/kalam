@@ -498,12 +498,17 @@ ${colors.bold}Commands${colors.reset} ${colors.gray}(everything else is sent to 
   ${colors.green}/mode${colors.reset} <m>         Routing: ${colors.bold}auto${colors.reset} · ask · diagnose · devops
   ${colors.green}/train${colors.reset} [--offline] Build / refresh the HPE knowledge base
   ${colors.green}/kb${colors.reset}               Knowledge-base status
+  ${colors.green}/learn${colors.reset} <file>     Teach the KB a runbook / log / diagram / doc
+  ${colors.green}/learned${colors.reset}          List learned docs + auto-captured solved cases
+  ${colors.green}/vms${colors.reset}              VM inventory with live SSH status
+  ${colors.green}/vm${colors.reset} <sub> <name>  diagnose · discover · peers (SSH, read-only)
   ${colors.green}/status${colors.reset}           Local Docker & Kubernetes health
   ${colors.green}/run${colors.reset} <n>          Execute suggested action #n from the last reply
   ${colors.green}/key${colors.reset} <api-key>    Set your Gemini API key (and switch to Gemini)
   ${colors.green}/clear${colors.reset}            Clear the screen & conversation memory
   ${colors.green}/help${colors.reset}             Show this
   ${colors.green}/exit${colors.reset}             Quit
+  ${colors.green}!<command>${colors.reset}        Run a shell command on this machine (e.g. ${colors.bold}!kubectl get pods -A${colors.reset})
 ${colors.gray}Tips: prefix a line with ${colors.reset}${colors.bold}solve:${colors.reset}${colors.gray} to force error diagnosis. Paste a stack trace and I'll diagnose it.${colors.reset}
 `);
 }
@@ -527,9 +532,34 @@ async function startRepl(initialMode) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: `${colors.green}${colors.bold}kalam ›${colors.reset} ` });
   const reprompt = () => { console.log(); rl.prompt(); };
 
-  // First Ctrl+C cancels a streaming answer; when idle it exits as usual.
+  // Local shell escape: lines starting with "!" run on THIS machine with live
+  // output (like Claude Code's ! prefix). Ctrl+C kills the running command.
+  let activeShell = null;
+  const runShell = (cmd) => {
+    console.log(`${colors.gray}$ ${cmd}${colors.reset}`);
+    const child = spawn(cmd, { shell: true, cwd: process.cwd(), env: process.env });
+    activeShell = child;
+    child.stdout.on('data', (d) => process.stdout.write(d));
+    child.stderr.on('data', (d) => process.stderr.write(`${colors.red}${d}${colors.reset}`));
+    child.on('close', (code) => {
+      activeShell = null;
+      if (code !== 0 && code !== null) console.log(`${colors.yellow}↳ exit code ${code}${colors.reset}`);
+      reprompt();
+    });
+    child.on('error', (e) => {
+      activeShell = null;
+      console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+      reprompt();
+    });
+  };
+
+  // First Ctrl+C kills a running ! command or cancels a streaming answer;
+  // when idle it exits as usual.
   rl.on('SIGINT', () => {
-    if (cancelActiveStream()) {
+    if (activeShell) {
+      activeShell.kill('SIGTERM');
+      console.log(`\n${colors.yellow}⏹ Command killed.${colors.reset}`);
+    } else if (cancelActiveStream()) {
       console.log(`\n${colors.yellow}⏹ Answer cancelled.${colors.reset}`);
       reprompt();
     } else {
@@ -559,6 +589,13 @@ async function startRepl(initialMode) {
     }
 
     if (!raw) { rl.prompt(); return; }
+
+    // "!" shell escape — run the command locally, stream its output
+    if (raw.startsWith('!')) {
+      const cmd = raw.slice(1).trim();
+      if (!cmd) { console.log(`${colors.yellow}Usage: !<command>   e.g. !kubectl get pods -A${colors.reset}`); return reprompt(); }
+      return runShell(cmd);
+    }
 
     // Slash commands
     if (raw.startsWith('/')) {
@@ -606,6 +643,18 @@ async function startRepl(initialMode) {
         }
         case 'train': await trainKB(/--offline|-o/.test(arg)); return reprompt();
         case 'kb': await showKB(); return reprompt();
+        case 'learn': await learnFiles(arg ? arg.split(/\s+/) : []); return reprompt();
+        case 'learned': await showLearned(); return reprompt();
+        case 'vms': await listVmsCli(); return reprompt();
+        case 'vm': {
+          const [sub, vmName] = arg.split(/\s+/);
+          if (sub === 'diagnose' || sub === 'diag') await vmDiagnose(vmName);
+          else if (sub === 'discover') await vmDiscover(vmName);
+          else if (sub === 'peers') await vmPeers(vmName);
+          else if (sub === 'ssh') console.log(`${colors.yellow}Interactive SSH doesn't fit inside the REPL — run: ${colors.bold}kalam vm ssh ${vmName || '<name>'}${colors.reset}${colors.yellow} in its own terminal.${colors.reset}`);
+          else await listVmsCli();
+          return reprompt();
+        }
         case 'status': await showStatus(); return reprompt();
         case 'run': {
           const n = parseInt(arg, 10);
@@ -632,7 +681,11 @@ async function startRepl(initialMode) {
     reprompt();
   });
 
-  rl.on('close', () => process.exit(0));
+  rl.on('close', () => {
+    // Let a running ! command finish printing before the process exits.
+    if (activeShell) activeShell.on('close', () => process.exit(0));
+    else process.exit(0);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -787,6 +840,164 @@ async function fixContainer(target) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Knowledge-base learning: feed any file (runbook, log, diagram, postmortem)
+// into the assistant's memory. `kalam learn file1 file2` or pipe via stdin.
+// ---------------------------------------------------------------------------
+async function learnFiles(files) {
+  if (!(await ensureServer())) return;
+  const docs = [];
+  if (files.length) {
+    for (const f of files) {
+      try {
+        const text = fs.readFileSync(f, 'utf8');
+        docs.push({ title: path.basename(f), text });
+      } catch (e) {
+        console.log(`${colors.red}❌ Cannot read ${f}: ${e.message}${colors.reset}`);
+      }
+    }
+  } else {
+    const piped = await readStdin();
+    if (piped) docs.push({ title: `pasted-${new Date().toISOString().slice(0, 10)}`, text: piped });
+  }
+  if (!docs.length) {
+    console.log(`\n${colors.yellow}Usage: kalam learn <file...>   (or pipe text: cat runbook.md | kalam learn)${colors.reset}\n`);
+    return;
+  }
+  for (const d of docs) {
+    const spin = startSpinner(`Learning ${d.title}…`);
+    try {
+      const res = await postJSON('/api/pcai/learn', { title: d.title, text: d.text, ...aiSettings() }, 120000);
+      stopSpinner(spin);
+      console.log(`${colors.green}✅ Learned ${colors.bold}${d.title}${colors.reset}${colors.green} — ${res.chunksAdded} chunk(s), type: ${res.kind}${res.embedded ? ', vector-indexed' : ''}.${colors.reset}`);
+    } catch (e) {
+      stopSpinner(spin);
+      console.log(`${colors.red}❌ ${d.title}: ${e.message}${colors.reset}`);
+    }
+  }
+  console.log(`${colors.gray}The assistant will use this knowledge in every future answer. See 'kalam learned' for the list.${colors.reset}`);
+}
+
+async function showLearned() {
+  if (!(await ensureServer())) return;
+  try {
+    const res = await getJSON('/api/pcai/learned');
+    console.log(`\n${colors.bold}📚 Learned documents${colors.reset} ${colors.gray}(${res.count} — uploads + auto-captured solved cases)${colors.reset}`);
+    (res.docs || []).slice(0, 30).forEach((d) => {
+      console.log(`  ${colors.cyan}${d.kind.padEnd(8)}${colors.reset} ${d.title.slice(0, 60).padEnd(62)} ${colors.gray}${(d.addedAt || '').slice(0, 10)}${colors.reset}`);
+    });
+    if (!res.count) console.log(`  ${colors.gray}Nothing yet — try: kalam learn my-runbook.md${colors.reset}`);
+  } catch (e) {
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// VM / SSH commands (same inventory as the UI's VM Monitor)
+// ---------------------------------------------------------------------------
+async function listVmsCli() {
+  if (!(await ensureServer())) return;
+  const { vms } = await getJSON('/api/vms');
+  if (!vms || !vms.length) {
+    console.log(`\n${colors.gray}No VMs in the inventory. Add one in the UI (VM Monitor) or via the API.${colors.reset}\n`);
+    return;
+  }
+  console.log(`\n${colors.bold}🖥️  VM inventory${colors.reset}`);
+  const results = await Promise.all(vms.map((v) =>
+    postJSON('/api/vms/metrics', { name: v.name }, 30000).catch(() => ({ reachable: false, error: 'probe failed' }))
+  ));
+  vms.forEach((v, i) => {
+    const m = results[i];
+    const dot = m.reachable && !m.error ? `${colors.green}●${colors.reset}` : `${colors.red}●${colors.reset}`;
+    const via = v.via ? ` ${colors.gray}(via ${v.via})${colors.reset}` : '';
+    const info = m.error ? `${colors.red}${m.error}${colors.reset}` : `${colors.gray}load ${m.load || '—'} · mem ${m.mem || '—'} · up ${m.up || '—'}${colors.reset}`;
+    console.log(`  ${dot} ${colors.bold}${v.name.padEnd(16)}${colors.reset} ${colors.cyan}${v.user}@${v.host}:${v.port}${colors.reset}${via}  ${info}`);
+  });
+  console.log(`\n${colors.gray}Commands: kalam vm ssh <name> · kalam vm diagnose <name> · kalam vm discover <name> · kalam vm peers <name>${colors.reset}\n`);
+}
+
+async function vmSsh(name) {
+  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm ssh <name>${colors.reset}\n`); return; }
+  if (!(await ensureServer())) return;
+  try {
+    const { command } = await getJSON(`/api/vms/ssh-command/${encodeURIComponent(name)}`);
+    console.log(`${colors.gray}Connecting: ${command}${colors.reset}`);
+    const child = spawn(command, { stdio: 'inherit', shell: true });
+    child.on('exit', (code) => process.exit(code || 0));
+  } catch (e) {
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+async function vmDiagnose(name) {
+  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm diagnose <name>${colors.reset}\n`); return; }
+  if (!(await ensureServer())) return;
+  const spin = startSpinner(`Inspecting nodes, pods, logs and events on ${name} (read-only)…`);
+  try {
+    const d = await postJSON('/api/vms/diagnose', { name }, 180000);
+    stopSpinner(spin);
+    if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
+    console.log(`\n${colors.bold}🩺 Diagnosis · ${name}${colors.reset}  ${colors.gray}(read-only — nothing was executed)${colors.reset}`);
+    console.log((d.findings || []).length ? '' : `${colors.green}✅ ${d.summary}${colors.reset}`);
+    (d.findings || []).forEach((f, i) => {
+      const sev = f.severity === 'critical' ? `${colors.red}CRITICAL${colors.reset}` : `${colors.yellow}WARNING ${colors.reset}`;
+      console.log(`\n ${colors.bold}${i + 1}.${colors.reset} [${sev}] ${colors.bold}${f.reason}${colors.reset} — ${f.kind} ${f.namespace ? `${f.namespace}/` : ''}${f.name}`);
+      console.log(`    ${f.detail}`);
+      if (f.logExcerpt) {
+        console.log(`    ${colors.gray}Log tail:${colors.reset}`);
+        f.logExcerpt.split('\n').slice(-6).forEach((l) => console.log(`      ${colors.cyan}${l.slice(0, 160)}${colors.reset}`));
+      }
+      (f.suggestedFixes || []).forEach((s) => console.log(`    ${colors.green}fix →${colors.reset} ${s}`));
+    });
+    if (d.findings && d.findings.length) console.log(`\n${colors.gray}${d.summary}${colors.reset}`);
+    console.log();
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+async function vmDiscover(name) {
+  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm discover <name>${colors.reset}\n`); return; }
+  if (!(await ensureServer())) return;
+  const spin = startSpinner(`Enumerating workloads and services on ${name}…`);
+  try {
+    const d = await postJSON('/api/vms/discover', { name }, 120000);
+    stopSpinner(spin);
+    if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
+    console.log(`\n${colors.bold}📦 Workloads on ${name}${colors.reset}  ${colors.gray}runtimes: ${(d.engines || []).join(', ') || 'none'}${colors.reset}`);
+    (d.containers || []).forEach((c) => console.log(`  🐳 ${c.name.padEnd(28)} ${c.state === 'running' ? colors.green : colors.red}${c.state}${colors.reset} ${colors.gray}${c.image}${colors.reset}`));
+    (d.pods || []).forEach((p) => console.log(`  ☸️  ${(p.namespace + '/' + p.name).slice(0, 52).padEnd(54)} ${p.status === 'Running' ? colors.green : colors.yellow}${p.status}${colors.reset} ${colors.gray}${p.ready}${colors.reset}`));
+    (d.services || []).forEach((s) => console.log(`  ⚡ svc ${(s.namespace + '/' + s.name).slice(0, 48).padEnd(50)} ${colors.gray}${s.type} ${s.ports}${colors.reset}`));
+    if (d.systemServices && d.systemServices.length) {
+      console.log(`  ${colors.gray}systemd: ${d.systemServices.slice(0, 12).map((s) => s.unit).join(', ')}${d.systemServices.length > 12 ? '…' : ''}${colors.reset}`);
+    }
+    console.log();
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+async function vmPeers(name) {
+  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm peers <name>${colors.reset}\n`); return; }
+  if (!(await ensureServer())) return;
+  const spin = startSpinner(`Scanning for peer VMs visible from ${name}…`);
+  try {
+    const d = await postJSON('/api/vms/neighbors', { name }, 60000);
+    stopSpinner(spin);
+    if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
+    const peers = d.neighbors || [];
+    console.log(`\n${colors.bold}🔭 Peer VMs visible from ${name}${colors.reset} ${colors.gray}(${peers.length})${colors.reset}`);
+    peers.forEach((n) => console.log(`  ${colors.cyan}${n.ip.padEnd(16)}${colors.reset} ${(n.hostname || '—').padEnd(28)} ${colors.gray}${n.source}${colors.reset}`));
+    if (peers.length) console.log(`${colors.gray}Add them in the UI (VM Monitor → Find peer VMs) to SSH via ${name} as a jump host.${colors.reset}`);
+    console.log();
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
 function readStdin() {
   return new Promise((resolve) => {
     if (process.stdin.isTTY) { resolve(''); return; }
@@ -818,6 +1029,15 @@ ${colors.bold}MODELS & KB:${colors.reset}
   ${colors.green}model${colors.reset}                Pick the default model interactively.
   ${colors.green}train [--offline]${colors.reset}    Build/refresh the HPE knowledge base.
   ${colors.green}kb${colors.reset}                   Knowledge-base status.
+  ${colors.green}learn <file...>${colors.reset}      Teach the KB runbooks, logs, diagrams, postmortems.
+  ${colors.green}learned${colors.reset}              List learned docs + auto-captured solved cases.
+
+${colors.bold}VMs (SSH):${colors.reset}
+  ${colors.green}vms${colors.reset}                  Inventory with live status (shared with the UI).
+  ${colors.green}vm ssh <name>${colors.reset}        Open an interactive SSH session (hops via jump host).
+  ${colors.green}vm diagnose <name>${colors.reset}   Read-only kubectl diagnosis with suggested fixes.
+  ${colors.green}vm discover <name>${colors.reset}   Containers, pods, K8s + system services, ports.
+  ${colors.green}vm peers <name>${colors.reset}      Find other VMs visible from this host.
 
 ${colors.bold}LOCAL DEVOPS:${colors.reset}
   ${colors.green}status${colors.reset}               Docker & Kubernetes health.
@@ -889,6 +1109,20 @@ async function main() {
     }
     case 'train': await trainKB(rest.includes('--offline') || rest.includes('-o')); console.log(); break;
     case 'kb': await showKB(); console.log(); break;
+    case 'learn': await learnFiles(rest); break;
+    case 'learned': await showLearned(); console.log(); break;
+    case 'vms': await listVmsCli(); break;
+    case 'vm': {
+      const sub = (rest[0] || '').toLowerCase();
+      const vmName = rest[1];
+      if (sub === 'ssh') await vmSsh(vmName);
+      else if (sub === 'diagnose' || sub === 'diag') await vmDiagnose(vmName);
+      else if (sub === 'discover') await vmDiscover(vmName);
+      else if (sub === 'peers' || sub === 'neighbors') await vmPeers(vmName);
+      else if (sub === 'list' || sub === '') await listVmsCli();
+      else console.log(`\n${colors.yellow}Usage: kalam vm <list|ssh|diagnose|discover|peers> [name]${colors.reset}\n`);
+      break;
+    }
     case 'status': await showStatus(); console.log(); break;
     case 'list': case 'ps': await listResources(rest[0]); break;
     case 'scan': await scanContainer(rest[0]); break;

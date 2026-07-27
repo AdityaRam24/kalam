@@ -15,6 +15,7 @@ import ReactFlow, {
 } from 'reactflow';
 import type { NodeProps, Node, Edge, EdgeProps } from 'reactflow';
 import 'reactflow/dist/style.css';
+import dagre from '@dagrejs/dagre';
 import {
   Search,
   X,
@@ -62,6 +63,7 @@ interface K8sResources {
 interface TopologyGraphProps {
   containers: Container[];
   k8sResources: K8sResources;
+  onRefresh?: () => Promise<void> | void; // re-fetch local data (used by Live mode)
 }
 
 // Helper: formats creation timestamp into relative age
@@ -455,7 +457,7 @@ const nodeTypes = {
 };
 
 
-const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResources }) => {
+const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResources, onRefresh }) => {
   const { fitView } = useReactFlow();
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -465,6 +467,71 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
   const [selectedType, setSelectedType] = useState('All');
   const [heatmapMode, setHeatmapMode] = useState<'none' | 'restarts' | 'age'>('none');
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // ── Source selector: this machine, or any SSH-connected VM ──
+  const [source, setSource] = useState<string>('local');
+  const [vmNames, setVmNames] = useState<string[]>([]);
+  const [remote, setRemote] = useState<{ containers: Container[]; k8s: K8sResources } | null>(null);
+  const [remoteBusy, setRemoteBusy] = useState(false);
+  const [remoteErr, setRemoteErr] = useState('');
+
+  // ── Live mode + problems-only focus + layout engine ──
+  const [live, setLive] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [problemsOnly, setProblemsOnly] = useState(false);
+  const [layoutMode, setLayoutMode] = useState<'columns' | 'auto'>('columns');
+
+  useEffect(() => {
+    fetch('/api/vms').then(r => r.json()).then(d => setVmNames((d.vms || []).map((v: any) => v.name))).catch(() => {});
+  }, []);
+
+  // Map a VM's discover payload into the same shapes the local topology uses.
+  const fetchRemote = useCallback(async (vmName: string, silent = false) => {
+    if (!silent) { setRemoteBusy(true); setRemoteErr(''); }
+    try {
+      const res = await fetch('/api/vms/discover', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: vmName }),
+      });
+      const d = await res.json();
+      if (d.error) { setRemoteErr(d.error); setRemote({ containers: [], k8s: { pods: [], services: [], deployments: [], nodes: [] } }); return; }
+      const pods = (d.pods || []).map((p: any) => ({ ...p, ip: p.ip || 'None', containers: [], labels: {} }));
+      const nodeNames = Array.from(new Set(pods.map((p: any) => p.node).filter(Boolean)));
+      setRemote({
+        containers: d.containers || [],
+        k8s: {
+          pods,
+          services: (d.services || []).map((s: any) => ({ ...s, selector: 'None' })),
+          deployments: [],
+          nodes: nodeNames.map((n) => ({ name: n, status: 'Ready', role: 'node', ip: '' })),
+        },
+      });
+      setLastRefresh(new Date());
+    } catch (e: any) {
+      setRemoteErr(e.message);
+    } finally {
+      if (!silent) setRemoteBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (source !== 'local') fetchRemote(source);
+    else { setRemote(null); setRemoteErr(''); }
+  }, [source, fetchRemote]);
+
+  // Live mode: poll the active source every 8 seconds.
+  useEffect(() => {
+    if (!live) return;
+    const tick = async () => {
+      if (source === 'local') { await onRefresh?.(); setLastRefresh(new Date()); }
+      else await fetchRemote(source, true);
+    };
+    const id = setInterval(tick, 8000);
+    return () => clearInterval(id);
+  }, [live, source, onRefresh, fetchRemote]);
+
+  // Effective data feeding the graph (local props or remote VM snapshot).
+  const effContainers = source === 'local' ? containers : (remote?.containers || []);
+  const effK8s = source === 'local' ? k8sResources : (remote?.k8s || { pods: [], services: [], deployments: [], nodes: [] });
 
   // Selected Detail Drawer state
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -490,13 +557,13 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
   // Dynamically extract namespaces
   const namespaces = useMemo(() => {
-    const k8s = k8sResources;
+    const k8s = effK8s;
     return Array.from(new Set([
       ...k8s.pods.map(p => p.namespace),
       ...k8s.services.map(s => s.namespace),
       ...k8s.deployments.map(d => d.namespace)
     ])).sort();
-  }, [k8sResources]);
+  }, [effK8s]);
 
   // Construct raw nodes and edges based on filters (Namespace and Type only)
   const { nodes: rawNodes, edges: rawEdges } = useMemo(() => {
@@ -504,11 +571,11 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
     const nsEdges: Edge[] = [];
 
     const spacingY = 120; // vertical spacing between sibling cards within a stage column
-    const k8s = k8sResources;
+    const k8s = effK8s;
 
     // Filter Docker
     const showDocker = selectedType === 'All' || selectedType === 'Docker';
-    const filteredContainers = showDocker ? containers : [];
+    const filteredContainers = showDocker ? effContainers : [];
 
     // Filter K8s
     const showK8s = selectedType === 'All' || selectedType !== 'Docker';
@@ -808,11 +875,17 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       nsSvcs.forEach(s => {
         const svcId = `svc-${ns}-${s.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
         nsPods.forEach(p => {
+          // Real Kubernetes routing: a Service selects pods whose labels contain
+          // every selector key/value. Fall back to name matching only when the
+          // pod carries no labels (older backend payloads).
           let matched = false;
           if (s.selector && s.selector !== 'None') {
             try {
               const sel = JSON.parse(s.selector);
-              matched = Object.keys(sel).every((key: string) => p.name.includes(s.name) || p.name.includes(sel[key]));
+              const labels = p.labels || {};
+              matched = Object.keys(labels).length > 0
+                ? Object.keys(sel).every((key: string) => labels[key] === sel[key])
+                : Object.keys(sel).every((key: string) => p.name.includes(s.name) || p.name.includes(sel[key]));
             } catch {
               matched = p.name.includes(s.name);
             }
@@ -902,7 +975,53 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       nodes: nsNodes,
       edges: nsEdges
     };
-  }, [containers, k8sResources, selectedNamespace, selectedType]);
+  }, [effContainers, effK8s, selectedNamespace, selectedType]);
+
+  // ── Auto layout (dagre): a clean left-to-right flow computed from the real
+  // edges. Group boxes are hidden in this mode — the structure IS the layout.
+  const layoutedNodes = useMemo(() => {
+    if (layoutMode !== 'auto') return rawNodes;
+    const g = new dagre.graphlib.Graph();
+    g.setGraph({ rankdir: 'LR', nodesep: 26, ranksep: 130, marginx: 40, marginy: 40 });
+    g.setDefaultEdgeLabel(() => ({}));
+    const resource = rawNodes.filter(n => n.type === 'devopsNode');
+    resource.forEach(n => g.setNode(n.id, { width: n.data?.type === 'port' ? 90 : 190, height: n.data?.type === 'port' ? 44 : 74 }));
+    rawEdges.forEach(e => { if (g.hasNode(e.source) && g.hasNode(e.target)) g.setEdge(e.source, e.target); });
+    dagre.layout(g);
+    return resource.map(n => {
+      const pos = g.node(n.id);
+      return pos ? { ...n, position: { x: pos.x - pos.width / 2, y: pos.y - pos.height / 2 } } : n;
+    });
+  }, [layoutMode, rawNodes, rawEdges]);
+
+  // ── Problems-only focus: unhealthy resources plus everything they touch ──
+  const isProblemNode = useCallback((n: Node) => {
+    const d: any = n.data || {};
+    if (d.type === 'pod') return (d.status && d.status !== 'Running' && d.status !== 'Succeeded') || (d.restarts || 0) >= 3;
+    if (d.type === 'docker') return d.state && d.state !== 'running';
+    if (d.type === 'k8s-node') return d.status && d.status !== 'Ready';
+    if (d.type === 'deployment') {
+      const [r, t] = String(d.ready ?? '').split('/').map(Number);
+      return Number.isFinite(r) && Number.isFinite(t) && r < t;
+    }
+    return false;
+  }, []);
+
+  const problemVisibleIds = useMemo(() => {
+    if (!problemsOnly) return null; // null = show everything
+    const problems = new Set(layoutedNodes.filter(n => n.type === 'devopsNode' && isProblemNode(n)).map(n => n.id));
+    const visible = new Set(problems);
+    rawEdges.forEach(e => {
+      if (problems.has(e.source)) visible.add(e.target);
+      if (problems.has(e.target)) visible.add(e.source);
+    });
+    return visible;
+  }, [problemsOnly, layoutedNodes, rawEdges, isProblemNode]);
+
+  const problemCount = useMemo(
+    () => rawNodes.filter(n => n.type === 'devopsNode' && isProblemNode(n)).length,
+    [rawNodes, isProblemNode]
+  );
 
   // Find neighbors of the hovered node
   const neighboringNodeIds = useMemo(() => {
@@ -954,6 +1073,12 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
     }
   }, [searchMatchIds, fitView]);
 
+  // Re-fit the viewport whenever the graph's shape changes fundamentally.
+  useEffect(() => {
+    const t = setTimeout(() => fitView({ duration: 500, padding: 0.2 }), 80);
+    return () => clearTimeout(t);
+  }, [layoutMode, source, problemsOnly, fitView]);
+
   // Keyboard shortcuts: "/" focuses search, "Escape" clears search / closes drawer
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -979,7 +1104,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
   // Map raw nodes & inject states (search matching, dimming, hover states)
   const flowNodes = useMemo(() => {
-    return rawNodes.map(node => {
+    let base = layoutedNodes;
+    if (problemVisibleIds) base = base.filter(n => n.type !== 'groupNode' && problemVisibleIds.has(n.id));
+    return base.map(node => {
       if (node.type === 'groupNode') return node;
 
       const isHovered = hoveredNodeId === node.id;
@@ -1005,11 +1132,13 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         }
       };
     });
-  }, [rawNodes, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode]);
+  }, [layoutedNodes, problemVisibleIds, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode]);
 
   // Map raw edges & inject states (hover paths)
   const flowEdges = useMemo(() => {
-    return rawEdges.map(edge => {
+    let base = rawEdges;
+    if (problemVisibleIds) base = base.filter(e => problemVisibleIds.has(e.source) && problemVisibleIds.has(e.target));
+    return base.map(edge => {
       const isHovered = hoveredNodeId === edge.source || hoveredNodeId === edge.target;
       const isDimmed = !!hoveredNodeId && !isHovered;
       const isCrossPanel = edge.id.includes('pod-') && edge.id.includes('docker-') || edge.id.includes('k8snode-') && edge.id.includes('docker-');
@@ -1047,7 +1176,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         ...(labelStyle ? { labelStyle } : {})
       };
     });
-  }, [rawEdges, hoveredNodeId]);
+  }, [rawEdges, problemVisibleIds, hoveredNodeId]);
 
   // Bind node click to open details drawer
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -1070,14 +1199,14 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
     if (selectedNodeId.startsWith('docker-')) {
       const shortId = selectedNodeId.replace('docker-', '');
-      const container = containers.find(c => c.id.startsWith(shortId));
+      const container = effContainers.find(c => c.id.startsWith(shortId));
       if (container) return { type: 'docker', data: container };
     }
 
     if (selectedNodeId.startsWith('port-')) {
       const parts = selectedNodeId.split('-');
       const shortId = parts[2];
-      const container = containers.find(c => c.id.startsWith(shortId));
+      const container = effContainers.find(c => c.id.startsWith(shortId));
       return { type: 'port', data: { id: selectedNodeId, parentContainer: container } };
     }
 
@@ -1086,7 +1215,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       if (match) {
         const ns = match[1];
         const rawName = match[2];
-        const svc = k8sResources.services.find(s => s.namespace === ns && s.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
+        const svc = effK8s.services.find(s => s.namespace === ns && s.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
         if (svc) return { type: 'service', data: svc };
       }
     }
@@ -1096,7 +1225,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       if (match) {
         const ns = match[1];
         const rawName = match[2];
-        const dep = k8sResources.deployments.find(d => d.namespace === ns && d.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
+        const dep = effK8s.deployments.find(d => d.namespace === ns && d.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
         if (dep) return { type: 'deployment', data: dep };
       }
     }
@@ -1106,19 +1235,19 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       if (match) {
         const ns = match[1];
         const rawName = match[2];
-        const pod = k8sResources.pods.find(p => p.namespace === ns && p.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
+        const pod = effK8s.pods.find(p => p.namespace === ns && p.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
         if (pod) return { type: 'pod', data: pod };
       }
     }
 
     if (selectedNodeId.startsWith('k8snode-')) {
       const rawName = selectedNodeId.replace('k8snode-', '');
-      const node = k8sResources.nodes.find(n => n.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
+      const node = effK8s.nodes.find(n => n.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
       if (node) return { type: 'k8s-node', data: node };
     }
 
     return null;
-  }, [selectedNodeId, containers, k8sResources]);
+  }, [selectedNodeId, effContainers, effK8s]);
 
   // Drawer action helper functions
   const fetchLogs = async () => {
@@ -1222,8 +1351,59 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
     }
   }, [drawerTab]);
 
+  // Cluster health roll-up for the summary bar
+  const healthStats = useMemo(() => {
+    const pods = effK8s.pods || [];
+    const podProblems = pods.filter(p => (p.status !== 'Running' && p.status !== 'Succeeded') || (p.restarts || 0) >= 3).length;
+    const dockerRunning = effContainers.filter(c => c.state === 'running').length;
+    const nodesReady = (effK8s.nodes || []).filter(n => n.status === 'Ready').length;
+    return {
+      podProblems,
+      podsRunning: pods.length - podProblems,
+      pods: pods.length,
+      services: (effK8s.services || []).length,
+      deployments: (effK8s.deployments || []).length,
+      nodes: (effK8s.nodes || []).length,
+      nodesReady,
+      docker: effContainers.length,
+      dockerRunning,
+    };
+  }, [effContainers, effK8s]);
+
+  const StatChip = ({ color, label, value, warn }: { color: string; label: string; value: string; warn?: boolean }) => (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 8,
+      background: warn ? 'rgba(244, 63, 94, 0.12)' : 'rgba(2, 6, 23, 0.5)',
+      border: `1px solid ${warn ? 'rgba(244, 63, 94, 0.4)' : 'rgba(255,255,255,0.07)'}`,
+      fontSize: 11.5, fontFamily: 'Outfit, sans-serif', whiteSpace: 'nowrap'
+    }}>
+      <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 5px ${color}`, flexShrink: 0 }} />
+      <span style={{ color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', fontSize: 9.5 }}>{label}</span>
+      <span style={{ color: warn ? '#fda4af' : '#f1f5f9', fontWeight: 700 }}>{value}</span>
+    </div>
+  );
+
   return (
     <div style={{ position: 'relative', width: '100%' }}>
+      {/* ─── Cluster health summary + legend ─── */}
+      <div style={{
+        display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+        padding: '8px 16px', marginBottom: 8, borderRadius: 10,
+        background: 'rgba(15, 23, 42, 0.4)', border: '1px solid rgba(255,255,255,0.06)'
+      }}>
+        {healthStats.podProblems > 0 && (
+          <StatChip color="#f43f5e" label="Problems" value={`${healthStats.podProblems} pod${healthStats.podProblems === 1 ? '' : 's'}`} warn />
+        )}
+        {healthStats.nodes > 0 && <StatChip color="#94a3b8" label="Nodes" value={`${healthStats.nodesReady}/${healthStats.nodes} ready`} warn={healthStats.nodesReady < healthStats.nodes} />}
+        {healthStats.pods > 0 && <StatChip color="#34d399" label="Pods" value={`${healthStats.podsRunning}/${healthStats.pods} healthy`} />}
+        {healthStats.services > 0 && <StatChip color="#fbbf24" label="Services" value={String(healthStats.services)} />}
+        {healthStats.deployments > 0 && <StatChip color="#a78bfa" label="Deploys" value={String(healthStats.deployments)} />}
+        {healthStats.docker > 0 && <StatChip color="#38bdf8" label="Docker" value={`${healthStats.dockerRunning}/${healthStats.docker} up`} />}
+        {healthStats.pods === 0 && healthStats.docker === 0 && (
+          <span style={{ fontSize: 12, color: '#64748b', fontFamily: 'Outfit, sans-serif' }}>No workloads detected yet.</span>
+        )}
+      </div>
+
       {/* ─── Search & Interactive Filter Controls Header ─── */}
       <div
         style={{
@@ -1239,6 +1419,95 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           fontFamily: 'Outfit, sans-serif'
         }}
       >
+        {/* Source: local machine or an SSH-connected VM */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <Server size={12} style={{ color: source === 'local' ? '#94a3b8' : '#01a982' }} />
+          <select
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            title="Which machine's topology to display"
+            style={{
+              background: source === 'local' ? 'rgba(2, 6, 23, 0.6)' : 'rgba(1, 169, 130, 0.12)',
+              border: `1px solid ${source === 'local' ? 'rgba(255,255,255,0.08)' : 'rgba(1, 169, 130, 0.5)'}`,
+              borderRadius: '6px', color: '#f8fafc', padding: '6px 10px', fontSize: '12px', outline: 'none', cursor: 'pointer', fontWeight: 600
+            }}
+          >
+            <option value="local">This machine</option>
+            {vmNames.map(n => <option key={n} value={n}>VM: {n}</option>)}
+          </select>
+          {remoteBusy && <RefreshCw size={12} className="animate-spin" style={{ color: '#01a982' }} />}
+        </div>
+
+        {/* Live mode */}
+        <button
+          onClick={() => setLive(l => !l)}
+          title="Auto-refresh the map every 8 seconds"
+          style={{
+            background: live ? 'rgba(16, 185, 129, 0.15)' : 'rgba(2, 6, 23, 0.4)',
+            border: `1px solid ${live ? 'rgba(16, 185, 129, 0.5)' : 'rgba(255,255,255,0.08)'}`,
+            borderRadius: '6px', color: live ? '#34d399' : '#94a3b8',
+            padding: '6px 12px', fontSize: '11px', cursor: 'pointer', fontWeight: 700,
+            display: 'flex', alignItems: 'center', gap: '6px', letterSpacing: '0.04em'
+          }}
+        >
+          <span style={{
+            width: 7, height: 7, borderRadius: '50%',
+            background: live ? '#34d399' : '#475569',
+            boxShadow: live ? '0 0 6px #34d399' : 'none',
+            animation: live ? 'led-glow-halo 1.4s ease-in-out infinite' : 'none'
+          }} />
+          {live ? 'LIVE' : 'Paused'}
+          {live && lastRefresh && <span style={{ fontWeight: 400, color: '#64748b' }}>{lastRefresh.toLocaleTimeString()}</span>}
+        </button>
+
+        {/* Problems-only focus */}
+        <button
+          onClick={() => setProblemsOnly(p => !p)}
+          title="Show only failing resources and what they connect to"
+          style={{
+            background: problemsOnly ? 'rgba(244, 63, 94, 0.15)' : 'rgba(2, 6, 23, 0.4)',
+            border: `1px solid ${problemsOnly ? 'rgba(244, 63, 94, 0.5)' : 'rgba(255,255,255,0.08)'}`,
+            borderRadius: '6px', color: problemsOnly ? '#f43f5e' : '#94a3b8',
+            padding: '6px 12px', fontSize: '11px', cursor: 'pointer', fontWeight: 600,
+            display: 'flex', alignItems: 'center', gap: '5px'
+          }}
+        >
+          <AlertTriangle size={11} /> Problems
+          {problemCount > 0 && (
+            <span style={{
+              background: '#f43f5e', color: '#fff', borderRadius: '8px',
+              padding: '0 6px', fontSize: '10px', fontWeight: 800
+            }}>{problemCount}</span>
+          )}
+        </button>
+
+        {/* Layout engine */}
+        <div style={{ display: 'flex', alignItems: 'center', background: 'rgba(2, 6, 23, 0.4)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '6px', overflow: 'hidden' }}>
+          <button
+            onClick={() => setLayoutMode('columns')}
+            title="Grouped column layout (Docker / namespaces / nodes)"
+            style={{
+              background: layoutMode === 'columns' ? 'rgba(255,255,255,0.08)' : 'transparent',
+              color: layoutMode === 'columns' ? '#fff' : '#94a3b8',
+              border: 'none', padding: '6px 10px', fontSize: '11px', cursor: 'pointer', fontWeight: 500
+            }}
+          >
+            Columns
+          </button>
+          <button
+            onClick={() => setLayoutMode('auto')}
+            title="Automatic flow layout computed from the connections (dagre)"
+            style={{
+              background: layoutMode === 'auto' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+              color: layoutMode === 'auto' ? '#38bdf8' : '#94a3b8',
+              border: 'none', padding: '6px 10px', fontSize: '11px', cursor: 'pointer', fontWeight: 500,
+              display: 'flex', alignItems: 'center', gap: '4px'
+            }}
+          >
+            <Network size={11} /> Auto Flow
+          </button>
+        </div>
+
         {/* Search */}
         <div style={{ position: 'relative', display: 'flex', alignItems: 'center', flexGrow: 1, minWidth: '200px' }}>
           <Search size={14} style={{ position: 'absolute', left: '10px', color: '#64748b' }} />
@@ -1441,6 +1710,17 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         </button>
       </div>
 
+      {/* Remote source status */}
+      {source !== 'local' && remoteErr && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', marginBottom: 8,
+          background: 'rgba(244, 63, 94, 0.1)', border: '1px solid rgba(244, 63, 94, 0.4)',
+          borderRadius: 8, color: '#f43f5e', fontSize: 12, fontFamily: 'Outfit, sans-serif'
+        }}>
+          <AlertTriangle size={13} /> {source}: {remoteErr}
+        </div>
+      )}
+
       {/* ─── Graph Canvas Container ─── */}
       <div
         style={isFullscreen ? {
@@ -1604,7 +1884,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
                 Details
               </button>
 
-              {(selectedResource.type === 'docker' || selectedResource.type === 'pod') && (
+              {source === 'local' && (selectedResource.type === 'docker' || selectedResource.type === 'pod') && (
                 <button
                   onClick={() => setDrawerTab('logs')}
                   style={{
@@ -1622,7 +1902,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
                 </button>
               )}
 
-              {(selectedResource.type === 'docker' || selectedResource.type === 'pod' || selectedResource.type === 'deployment') && (
+              {source === 'local' && (selectedResource.type === 'docker' || selectedResource.type === 'pod' || selectedResource.type === 'deployment') && (
                 <button
                   onClick={() => setDrawerTab('actions')}
                   style={{
@@ -1640,7 +1920,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
                 </button>
               )}
 
-              {selectedResource.type === 'docker' && (
+              {source === 'local' && selectedResource.type === 'docker' && (
                 <button
                   onClick={() => setDrawerTab('security')}
                   style={{

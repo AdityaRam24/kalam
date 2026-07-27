@@ -7,7 +7,7 @@
 import { Router } from 'express';
 import { GoogleGenAI } from '@google/genai';
 import { resolveEmbedConfig, embedTexts, EmbedConfig } from './embed.js';
-import { loadKB, searchKB, SearchHit, KnowledgeBase } from './store.js';
+import { loadKB, saveKB, searchKB, SearchHit, KnowledgeBase, chunkText, tokenize, loadLearned, saveLearned, LearnedDoc } from './store.js';
 import { runIngest } from './ingest.js';
 
 export const pcaiRouter = Router();
@@ -73,6 +73,103 @@ pcaiRouter.post('/api/pcai/ingest', async (req, res) => {
   } finally {
     ingesting = false;
   }
+});
+
+// ---------------------------------------------------------------------------
+// Learning loop: absorb any document the user gives us (runbook, log dump,
+// activity diagram exported as text/mermaid, postmortem...) directly into the
+// live knowledge base, and persist it so retrains keep it. Solved diagnoses
+// are auto-captured through the same path (kind: 'case').
+// ---------------------------------------------------------------------------
+export function guessKind(title: string, text: string): string {
+  const hay = `${title}\n${text.slice(0, 2000)}`.toLowerCase();
+  if (/```mermaid|flowchart|sequencediagram|activity diagram|graph (td|lr)/.test(hay)) return 'diagram';
+  if (/runbook|standard operating|sop\b|procedure|step 1|remediation/.test(hay)) return 'runbook';
+  if (/traceback|exception|error|crashloop|oomkilled|\bwarn\b|\bfatal\b|stack trace/.test(hay)) return 'log';
+  return 'note';
+}
+
+export async function learnDocument(opts: {
+  title: string; text: string; kind?: string;
+  apiKey?: string; localUrl?: string;
+}): Promise<{ ok: boolean; chunksAdded: number; kind: string; embedded: boolean; error?: string }> {
+  const title = (opts.title || 'Untitled').slice(0, 160);
+  const text = (opts.text || '').trim();
+  if (text.length < 20) return { ok: false, chunksAdded: 0, kind: 'note', embedded: false, error: 'Document too short to learn from.' };
+
+  const kind = opts.kind || guessKind(title, text);
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'doc';
+  const url = `learned://${kind}/${slug}-${Date.now().toString(36)}`;
+
+  // Persist the raw doc so retrains re-include it.
+  const learned = await loadLearned();
+  learned.push({ title, url, text, kind, addedAt: new Date().toISOString() });
+  // Keep the store bounded: uploads are precious, auto-cases rotate at 200.
+  const cases = learned.filter((d) => d.kind === 'case');
+  if (cases.length > 200) {
+    const drop = new Set(cases.slice(0, cases.length - 200).map((d) => d.url));
+    await saveLearned(learned.filter((d) => !drop.has(d.url)));
+  } else {
+    await saveLearned(learned);
+  }
+
+  // Hot-append chunks to the live KB (create a lexical-only KB if none yet).
+  let kb = await loadKB();
+  if (!kb) {
+    const now = new Date().toISOString();
+    kb = { version: 1, createdAt: now, updatedAt: now, embedProvider: 'none', embedModel: 'lexical', chunks: [] };
+  }
+  const parts = chunkText(text);
+  const newChunks = parts.map((t, i) => ({
+    id: `learn-${Date.now().toString(36)}-${i}`,
+    title, url, text: t,
+    tokens: tokenize(`${title} ${t}`),
+  }));
+
+  // Embed with the same provider the KB uses, best effort.
+  let embedded = false;
+  if (kb.embedProvider !== 'none') {
+    const cfg: EmbedConfig = kb.embedProvider === 'gemini'
+      ? { provider: 'gemini', model: kb.embedModel, apiKey: opts.apiKey || process.env.GEMINI_API_KEY }
+      : { provider: 'local', model: kb.embedModel, localUrl: opts.localUrl };
+    try {
+      const vectors = await embedTexts(newChunks.map((c) => c.text), cfg);
+      if (vectors) { vectors.forEach((v, i) => ((newChunks[i] as any).embedding = v)); embedded = true; }
+    } catch { /* lexical still works */ }
+  }
+
+  kb.chunks.push(...(newChunks as any));
+  kb.updatedAt = new Date().toISOString();
+  await saveKB(kb);
+  return { ok: true, chunksAdded: newChunks.length, kind, embedded };
+}
+
+pcaiRouter.post('/api/pcai/learn', async (req, res) => {
+  const { title, text, kind, apiKey, localUrl } = req.body || {};
+  if (!text || !String(text).trim()) return res.status(400).json({ error: 'Provide the document text to learn.' });
+  try {
+    const result = await learnDocument({ title: title || 'Untitled', text: String(text), kind, apiKey, localUrl });
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: `Learning failed: ${e.message}` });
+  }
+});
+
+pcaiRouter.get('/api/pcai/learned', async (_req, res) => {
+  const docs = await loadLearned();
+  res.json({
+    count: docs.length,
+    docs: docs.map((d) => ({ title: d.title, url: d.url, kind: d.kind, addedAt: d.addedAt, chars: d.text.length })).reverse(),
+  });
+});
+
+pcaiRouter.delete('/api/pcai/learned', async (req, res) => {
+  const { url } = req.body || {};
+  const docs = await loadLearned();
+  const next = url ? docs.filter((d) => d.url !== url) : [];
+  await saveLearned(next);
+  res.json({ ok: true, removed: docs.length - next.length, note: 'Run /train to rebuild the KB without the removed docs.' });
 });
 
 // Embed the query using the same provider the KB was built with, so vectors
@@ -319,6 +416,21 @@ pcaiRouter.post('/api/pcai/chat/stream', async (req, res) => {
   // Emit a block of text as one delta (used for the doc fallback).
   const emitFallback = (reason: string) => sse({ type: 'delta', text: docFallback(hits, reason) });
 
+  // Self-learning loop: a completed diagnosis becomes a "solved case" the KB
+  // remembers, so the next similar error retrieves this resolution too.
+  let answerText = '';
+  const captureDelta = (t: string) => { answerText += t; sse({ type: 'delta', text: t }); };
+  const captureCase = () => {
+    if (mode !== 'diagnose' || answerText.trim().length < 300) return;
+    const firstLine = prompt.trim().split('\n')[0].slice(0, 120);
+    learnDocument({
+      title: `Solved case: ${firstLine}`,
+      kind: 'case',
+      text: `PROBLEM (as reported):\n${prompt.slice(0, 3000)}\n\nDIAGNOSIS & RESOLUTION:\n${answerText.slice(0, 6000)}`,
+      apiKey, localUrl,
+    }).catch(() => { /* learning is best-effort, never blocks the answer */ });
+  };
+
   try {
     if (provider === 'local') {
       const ok = await streamLocalChat({
@@ -328,9 +440,10 @@ pcaiRouter.post('/api/pcai/chat/stream', async (req, res) => {
         chatHistory,
         prompt,
         authKey,
-        onDelta: (t) => sse({ type: 'delta', text: t }),
+        onDelta: captureDelta,
       });
       if (!ok.success) emitFallback(ok.reason);
+      else captureCase();
       return done();
     }
 
@@ -343,9 +456,10 @@ pcaiRouter.post('/api/pcai/chat/stream', async (req, res) => {
     const ok = await streamGemini({
       apiKey: finalKey,
       contents: buildGeminiPrompt(systemInstruction, chatHistory, prompt),
-      onDelta: (t) => sse({ type: 'delta', text: t }),
+      onDelta: captureDelta,
     });
     if (!ok.success) emitFallback(ok.reason);
+    else captureCase();
     return done();
   } catch (e: any) {
     emitFallback(`Unexpected error (${e.message}).`);

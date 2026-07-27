@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck } from 'lucide-react';
+import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, Network } from 'lucide-react';
 
-interface VmEntry { name: string; host: string; user: string; port: number; keyPath?: string; }
+interface VmEntry { name: string; host: string; user: string; port: number; keyPath?: string; via?: string; }
 interface VmMetrics {
   name: string; host: string; port: number; reachable: boolean; error?: string;
   host_?: string; load?: string; ncpu?: string; mem?: string; disk?: string; gpu?: string; up?: string;
@@ -13,7 +13,33 @@ export const VmMonitor: React.FC = () => {
   const [probing, setProbing] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({ name: '', host: '', user: '', port: '22', keyPath: '' });
+  const [form, setForm] = useState({ name: '', host: '', user: '', port: '22', keyPath: '', via: '' });
+
+  // Peer-VM discovery (hosts visible FROM a connected VM: K8s nodes, /etc/hosts, ARP)
+  interface Neighbor { ip: string; hostname?: string; source: string; }
+  const [neighbors, setNeighbors] = useState<Neighbor[]>([]);
+  const [neighborsFor, setNeighborsFor] = useState<string | null>(null);
+  const [neighborsBusy, setNeighborsBusy] = useState(false);
+  const [neighborsErr, setNeighborsErr] = useState('');
+
+  const findNeighbors = async (name: string) => {
+    setNeighborsFor(name);
+    setNeighborsBusy(true);
+    setNeighbors([]);
+    setNeighborsErr('');
+    try {
+      const res = await fetch('/api/vms/neighbors', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      if (data.error) setNeighborsErr(data.error);
+      else setNeighbors(data.neighbors || []);
+    } catch (e: any) {
+      setNeighborsErr(e.message);
+    } finally {
+      setNeighborsBusy(false);
+    }
+  };
   const [formErr, setFormErr] = useState('');
   const [copied, setCopied] = useState('');
 
@@ -28,7 +54,10 @@ export const VmMonitor: React.FC = () => {
     reachable: boolean; error?: string; engines?: string[];
     containers?: Array<{ id: string; name: string; image: string; status: string; state: string; ports: string }>;
     pods?: Array<{ name: string; namespace: string; status: string; ready: string; node: string; restarts: number }>;
+    services?: Array<{ name: string; namespace: string; type: string; clusterIp: string; ports: string }>;
     crictl?: Array<{ id: string; name: string; state: string; image: string; pod: string }>;
+    systemServices?: Array<{ unit: string; sub: string; description: string }>;
+    listeningPorts?: Array<{ proto: string; local: string; process: string }>;
   }
   const [discovery, setDiscovery] = useState<Record<string, Discovery>>({});
   const [discoverBusy, setDiscoverBusy] = useState<Record<string, boolean>>({});
@@ -100,11 +129,11 @@ export const VmMonitor: React.FC = () => {
     try {
       const res = await fetch('/api/vms', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, port: parseInt(form.port, 10) || 22, keyPath: form.keyPath || undefined }),
+        body: JSON.stringify({ ...form, port: parseInt(form.port, 10) || 22, keyPath: form.keyPath || undefined, via: form.via || undefined }),
       });
       const data = await res.json();
       if (!res.ok) { setFormErr(data.error || 'Failed to add VM'); return; }
-      setForm({ name: '', host: '', user: '', port: '22', keyPath: '' });
+      setForm({ name: '', host: '', user: '', port: '22', keyPath: '', via: '' });
       setShowAdd(false);
       loadVms();
     } catch (e: any) { setFormErr(`Network error: ${e.message}`); }
@@ -188,6 +217,16 @@ export const VmMonitor: React.FC = () => {
               <label style={{ fontSize: 12 }}>Private Key Path (optional)</label>
               <input className="form-input" value={form.keyPath} onChange={(e) => setForm({ ...form, keyPath: e.target.value })} placeholder="~/.ssh/id_rsa — leave blank to use the SSH agent" />
             </div>
+            {vms.length > 0 && (
+              <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                <label style={{ fontSize: 12 }}>Connect via jump host (optional)</label>
+                <select className="form-input" value={form.via} onChange={(e) => setForm({ ...form, via: e.target.value })}>
+                  <option value="">Direct connection</option>
+                  {vms.map((v) => <option key={v.name} value={v.name}>{v.name} ({v.user}@{v.host})</option>)}
+                </select>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Use when this VM is only reachable from another VM (e.g. a VME host behind the DSC VM). SSH will hop through it automatically.</span>
+              </div>
+            )}
             {formErr && <div style={{ gridColumn: '1 / -1', color: 'var(--status-error)', fontSize: 12 }}>{formErr}</div>}
           </form>
         )}
@@ -210,7 +249,10 @@ export const VmMonitor: React.FC = () => {
                   <tr key={v.name}>
                     <td><span className={`status-dot-pill ${d.cls === 'online' ? 'online' : 'offline'}`} style={{ fontSize: 11 }}><span className="dot" style={d.cls === 'warn' ? { background: 'var(--status-warn, #E5A50A)' } : undefined}></span>{busy ? 'Probing' : d.label}</span></td>
                     <td><strong>{v.name}</strong></td>
-                    <td><span className="code-id">{v.user}@{v.host}:{v.port}</span></td>
+                    <td>
+                      <span className="code-id">{v.user}@{v.host}:{v.port}</span>
+                      {v.via && <span className="badge neutral" style={{ fontSize: 9, marginLeft: 6 }} title={`SSH hops through ${v.via}`}>via {v.via}</span>}
+                    </td>
                     <td>{m?.error ? '—' : <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{m?.load ?? '—'}{m?.ncpu ? ` / ${m.ncpu}` : ''}</span>}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{m?.mem ?? '—'}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{m?.disk ?? '—'}</td>
@@ -220,6 +262,7 @@ export const VmMonitor: React.FC = () => {
                       <div className="action-btns">
                         <button className="icon-btn primary" title="Refresh metrics" onClick={() => probe(v.name)}><RefreshCw size={14} className={busy ? 'loader' : ''} /></button>
                         <button className="icon-btn success" title="Discover containers & pods" onClick={() => discover(v.name)}><Boxes size={14} className={discoverBusy[v.name] ? 'loader' : ''} /></button>
+                        <button className="icon-btn secondary" title="Find peer VMs visible from this host" onClick={() => findNeighbors(v.name)}><Network size={14} className={neighborsBusy && neighborsFor === v.name ? 'loader' : ''} /></button>
                         <button className="icon-btn warning" title="Diagnose cluster (read-only kubectl checks)" onClick={() => diagnose(v.name)}><Activity size={14} className={diagBusy[v.name] ? 'loader' : ''} /></button>
                         <button className="icon-btn secondary" title="Run remote command" onClick={() => { setExecFor(v.name); setExecOut(''); }}><Play size={14} /></button>
                         <button className="icon-btn secondary" title="Copy SSH command" onClick={() => copySsh(v.name)}>{copied === v.name ? <Check size={14} /> : <Copy size={14} />}</button>
@@ -308,6 +351,61 @@ export const VmMonitor: React.FC = () => {
                   ) : <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>No pods via <code>kubectl</code> (not configured on this host, or none scheduled).</p>}
                 </div>
 
+                {/* Kubernetes services */}
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
+                    <Layers size={15} style={{ color: 'var(--hpe-green)' }} /> Kubernetes Services
+                    <span className="badge neutral" style={{ fontSize: 10 }}>{d.services?.length || 0}</span>
+                  </div>
+                  {d.services && d.services.length ? (
+                    <div className="table-wrapper"><table className="resource-table">
+                      <thead><tr><th>Service</th><th>Namespace</th><th>Type</th><th>Cluster IP</th><th>Ports</th></tr></thead>
+                      <tbody>{d.services.map((s) => (
+                        <tr key={`${s.namespace}/${s.name}`}><td><strong>{s.name}</strong></td><td>{s.namespace}</td>
+                          <td><span className="badge neutral" style={{ fontSize: 10 }}>{s.type}</span></td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.clusterIp}</td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.ports || '—'}</td></tr>
+                      ))}</tbody>
+                    </table></div>
+                  ) : <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>No Kubernetes services found (or kubectl not configured on this host).</p>}
+                </div>
+
+                {/* Running system services (systemd) */}
+                {d.systemServices && d.systemServices.length > 0 && (
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
+                      <Cpu size={15} style={{ color: 'var(--hpe-green)' }} /> Running System Services
+                      <span className="badge neutral" style={{ fontSize: 10 }}>{d.systemServices.length}</span>
+                    </div>
+                    <div className="table-wrapper" style={{ maxHeight: 260, overflow: 'auto' }}><table className="resource-table">
+                      <thead><tr><th>Service</th><th>State</th><th>Description</th></tr></thead>
+                      <tbody>{d.systemServices.map((s) => (
+                        <tr key={s.unit}><td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}><strong>{s.unit}</strong></td>
+                          <td><span className="badge running" style={{ fontSize: 10 }}>{s.sub}</span></td>
+                          <td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{s.description}</td></tr>
+                      ))}</tbody>
+                    </table></div>
+                  </div>
+                )}
+
+                {/* Listening ports */}
+                {d.listeningPorts && d.listeningPorts.length > 0 && (
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
+                      <Terminal size={15} style={{ color: 'var(--hpe-green)' }} /> Listening Ports
+                      <span className="badge neutral" style={{ fontSize: 10 }}>{d.listeningPorts.length}</span>
+                    </div>
+                    <div className="table-wrapper" style={{ maxHeight: 220, overflow: 'auto' }}><table className="resource-table">
+                      <thead><tr><th>Proto</th><th>Local Address</th><th>Process</th></tr></thead>
+                      <tbody>{d.listeningPorts.map((p, i) => (
+                        <tr key={i}><td>{p.proto}</td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{p.local}</td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{p.process || '—'}</td></tr>
+                      ))}</tbody>
+                    </table></div>
+                  </div>
+                )}
+
                 {/* containerd (crictl) fallback */}
                 {d.crictl && d.crictl.length > 0 && (
                   <div>
@@ -330,6 +428,64 @@ export const VmMonitor: React.FC = () => {
           </div>
         );
       })()}
+
+      {/* Peer VMs visible from a connected host */}
+      {neighborsFor && (
+        <div className="panel-card" style={{ borderLeft: '3px solid var(--hpe-green)' }}>
+          <div className="panel-card-title">
+            <h2><Network size={18} /> Peer VMs visible from {neighborsFor}</h2>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button className="btn secondary" onClick={() => findNeighbors(neighborsFor)} disabled={neighborsBusy} style={{ padding: '6px 12px' }}>
+                <RefreshCw size={14} className={neighborsBusy ? 'loader' : ''} /> Re-scan
+              </button>
+              <button className="icon-btn" onClick={() => setNeighborsFor(null)}><X size={16} /></button>
+            </div>
+          </div>
+          {neighborsBusy ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-secondary)', padding: 12 }}>
+              <span className="loader" /> Scanning cluster nodes, hosts file and network neighbors over SSH…
+            </div>
+          ) : neighborsErr ? (
+            <p style={{ color: 'var(--status-error)', fontSize: 13 }}>{neighborsErr}</p>
+          ) : neighbors.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>No new peer hosts found (everything visible is already in the inventory).</p>
+          ) : (
+            <>
+              <div className="table-wrapper"><table className="resource-table">
+                <thead><tr><th>IP</th><th>Hostname</th><th>Seen in</th><th>Action</th></tr></thead>
+                <tbody>{neighbors.map((n) => (
+                  <tr key={n.ip}>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{n.ip}</td>
+                    <td>{n.hostname || '—'}</td>
+                    <td><span className="badge neutral" style={{ fontSize: 10 }}>{n.source === 'k8s-node' ? 'K8s cluster' : n.source === 'hosts-file' ? '/etc/hosts' : 'ARP table'}</span></td>
+                    <td>
+                      <button className="btn secondary" style={{ padding: '4px 10px', fontSize: 12 }}
+                        onClick={() => {
+                          const src = vms.find((v) => v.name === neighborsFor);
+                          setForm({
+                            name: (n.hostname || `vm-${n.ip.replace(/\./g, '-')}`).split('.')[0],
+                            host: n.ip,
+                            user: src?.user || '',
+                            port: '22',
+                            keyPath: src?.keyPath || '',
+                            via: neighborsFor,
+                          });
+                          setShowAdd(true);
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}>
+                        <Plus size={12} /> Add via {neighborsFor}
+                      </button>
+                    </td>
+                  </tr>
+                ))}</tbody>
+              </table></div>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
+                "Add via" pre-fills the form with {neighborsFor} as the SSH jump host — adjust the user/key if the peer uses different credentials, then Save.
+              </p>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Read-only cluster diagnosis report */}
       {diagFor && (() => {

@@ -1213,7 +1213,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                       <span>Scanning cluster topology graph...</span>
                     </div>
                   ) : dockerContainers.length > 0 || k8sResources.pods.length > 0 ? (
-                    <TopologyGraph containers={dockerContainers} k8sResources={k8sResources} />
+                    <TopologyGraph containers={dockerContainers} k8sResources={k8sResources} onRefresh={fetchClusterState} />
                   ) : (
                     <div className="text-secondary" style={{ fontStyle: 'italic', padding: '32px', textAlign: 'center' }}>
                       No active containers or nodes detected to generate visual map.

@@ -66,6 +66,33 @@ export function chunkText(text: string, maxLen = 1200, overlap = 150): string[] 
   return chunks;
 }
 
+// ---------------------------------------------------------------------------
+// Learned documents: user uploads (runbooks, logs, activity diagrams as text)
+// and auto-captured solved cases. Kept in their own file so a full retrain
+// (which rebuilds kb.json from scratch) re-includes them instead of losing them.
+// ---------------------------------------------------------------------------
+export const LEARNED_PATH = path.join(__dirname, 'learned.json');
+
+export interface LearnedDoc {
+  title: string;
+  url: string;      // synthetic ref, e.g. learned://runbook-gpu-reset
+  text: string;
+  kind: string;     // runbook | log | diagram | case | note ...
+  addedAt: string;
+}
+
+export async function loadLearned(): Promise<LearnedDoc[]> {
+  try {
+    return JSON.parse(await fs.readFile(LEARNED_PATH, 'utf-8')) as LearnedDoc[];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveLearned(docs: LearnedDoc[]): Promise<void> {
+  await fs.writeFile(LEARNED_PATH, JSON.stringify(docs, null, 1), 'utf-8');
+}
+
 export async function loadKB(): Promise<KnowledgeBase | null> {
   try {
     const raw = await fs.readFile(KB_PATH, 'utf-8');

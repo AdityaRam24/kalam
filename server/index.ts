@@ -351,6 +351,7 @@ app.get('/api/k8s/resources', async (req, res) => {
           ip: status.podIP || 'None',
           node: spec.nodeName || 'None',
           restarts: containerStatuses.reduce((acc: number, c: any) => acc + (c.restartCount || 0), 0),
+          labels: metadata.labels || {},
           containers: (spec.containers || []).map((c: any) => {
             const statusMatch = containerStatuses.find((cs: any) => cs.name === c.name) || {};
             return {
@@ -957,8 +958,12 @@ if (fs.existsSync(distDir)) {
   });
 }
 
-const server = app.listen(PORT, () => {
-  console.log(`✅ Kalam Backend Server running on http://localhost:${PORT}`);
+// Bind to loopback by default: the API can run Docker/kubectl actions and SSH
+// commands, so it must not be exposed to the LAN unless explicitly requested
+// (set HOST=0.0.0.0 in .env to serve other machines).
+const HOST = process.env.HOST || '127.0.0.1';
+const server = app.listen(Number(PORT), HOST, () => {
+  console.log(`✅ Kalam Backend Server running on http://localhost:${PORT}${HOST !== '127.0.0.1' ? ` (bound to ${HOST} — reachable from the network!)` : ''}`);
 });
 
 // Clear, actionable message on the most common failure: the port is taken by a

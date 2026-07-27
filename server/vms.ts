@@ -33,6 +33,7 @@ export interface VmEntry {
   user: string;
   port: number;
   keyPath?: string;
+  via?: string; // name of another inventory VM to use as an SSH jump host
 }
 
 async function loadVms(): Promise<VmEntry[]> {
@@ -66,21 +67,46 @@ function tcpReachable(host: string, port: number, timeoutMs = 3000): Promise<boo
   });
 }
 
-function sshBaseArgs(vm: VmEntry, interactive = false): string[] {
+function sshBaseArgs(vm: VmEntry, interactive = false, jump?: VmEntry): string[] {
   const args = ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=8', '-p', String(vm.port)];
   if (!interactive) args.unshift('-o', 'BatchMode=yes'); // never hang on a password prompt for probes
   if (vm.keyPath) args.push('-i', vm.keyPath);
+  if (jump) {
+    // Hop through the jump VM (e.g. reach a VME host only visible from the DSC
+    // VM). ProxyCommand instead of -J so the jump hop can use its own key/port.
+    const proxy = ['ssh', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'BatchMode=yes', '-p', String(jump.port)];
+    if (jump.keyPath) proxy.push('-i', jump.keyPath);
+    proxy.push('-W', '%h:%p', `${jump.user}@${jump.host}`);
+    args.push('-o', `ProxyCommand=${proxy.join(' ')}`);
+  }
   args.push(`${vm.user}@${vm.host}`);
   return args;
 }
 
-// Run a remote command over ssh. Resolves with combined result — never rejects.
-function sshRun(vm: VmEntry, command: string, timeoutMs = 20000): Promise<{ stdout: string; stderr: string; ok: boolean }> {
+async function getJump(vm: VmEntry): Promise<VmEntry | undefined> {
+  if (!vm.via) return undefined;
+  return (await loadVms()).find((v) => v.name === vm.via && v.name !== vm.name);
+}
+
+// Run a remote command over ssh (hopping through vm.via if set).
+// Resolves with combined result — never rejects.
+async function sshRun(vm: VmEntry, command: string, timeoutMs = 20000): Promise<{ stdout: string; stderr: string; ok: boolean }> {
+  const jump = await getJump(vm);
   return new Promise((resolve) => {
-    execFile('ssh', [...sshBaseArgs(vm), command], { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 4 }, (err, stdout, stderr) => {
+    execFile('ssh', [...sshBaseArgs(vm, false, jump), command], { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 4 }, (err, stdout, stderr) => {
       resolve({ stdout: stdout || '', stderr: stderr || (err ? err.message : ''), ok: !err });
     });
   });
+}
+
+// A jumped VM can't be TCP-probed from here — treat "jump host reachable" as
+// the liveness signal instead.
+async function vmReachable(vm: VmEntry): Promise<boolean> {
+  if (vm.via) {
+    const jump = await getJump(vm);
+    return jump ? tcpReachable(jump.host, jump.port) : false;
+  }
+  return tcpReachable(vm.host, vm.port);
 }
 
 // One shell snippet returning parseable KEY:value lines.
@@ -98,7 +124,7 @@ vmsRouter.get('/api/vms', async (_req, res) => {
 });
 
 vmsRouter.post('/api/vms', async (req, res) => {
-  const { name, host, user, port = 22, keyPath } = req.body || {};
+  const { name, host, user, port = 22, keyPath, via } = req.body || {};
   if (!name || !NAME_RE.test(name)) return res.status(400).json({ error: 'Invalid VM name (letters, numbers, . _ - only).' });
   if (!host || !HOST_RE.test(host)) return res.status(400).json({ error: 'Invalid host/IP.' });
   if (!user || !NAME_RE.test(user)) return res.status(400).json({ error: 'Invalid SSH user.' });
@@ -107,8 +133,10 @@ vmsRouter.post('/api/vms', async (req, res) => {
 
   const vms = await loadVms();
   if (vms.some((v) => v.name === name)) return res.status(409).json({ error: `A VM named "${name}" already exists.` });
+  if (via && !vms.some((v) => v.name === via)) return res.status(400).json({ error: `Jump host "${via}" is not in the inventory.` });
   const entry: VmEntry = { name, host, user, port: p };
   if (keyPath && typeof keyPath === 'string') entry.keyPath = keyPath.trim();
+  if (via && typeof via === 'string') entry.via = via;
   vms.push(entry);
   await saveVms(vms);
   res.json({ ok: true, vm: entry });
@@ -128,10 +156,10 @@ vmsRouter.post('/api/vms/metrics', async (req, res) => {
   const vm = (await loadVms()).find((v) => v.name === name);
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
 
-  const reachable = await tcpReachable(vm.host, vm.port);
-  const out: any = { name: vm.name, host: vm.host, port: vm.port, reachable };
+  const reachable = await vmReachable(vm);
+  const out: any = { name: vm.name, host: vm.host, port: vm.port, reachable, via: vm.via };
   if (!reachable) {
-    out.error = 'SSH port unreachable';
+    out.error = vm.via ? `Jump host "${vm.via}" unreachable` : 'SSH port unreachable';
     return res.json(out);
   }
   const { stdout, stderr, ok } = await sshRun(vm, METRIC_CMD);
@@ -159,8 +187,67 @@ vmsRouter.post('/api/vms/exec', async (req, res) => {
 vmsRouter.get('/api/vms/ssh-command/:name', async (req, res) => {
   const vm = (await loadVms()).find((v) => v.name === req.params.name);
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
-  const cmd = ['ssh', ...sshBaseArgs(vm, true)].join(' ');
-  res.json({ command: cmd });
+  const jump = await getJump(vm);
+  const args = sshBaseArgs(vm, true, jump).map((a) => (a.startsWith('ProxyCommand=') ? `"${a}"` : a));
+  res.json({ command: ['ssh', ...args].join(' ') });
+});
+
+// ---------------------------------------------------------------------------
+// Peer VM discovery: from a connected VM, find other hosts it can see (K8s
+// cluster nodes, /etc/hosts entries, ARP neighbors) so they can be added to
+// the inventory — using this VM as the SSH jump host when needed.
+// ---------------------------------------------------------------------------
+const NEIGHBOR_CMD = [
+  'echo @@SELF@@',
+  "(hostname; hostname -I 2>/dev/null || true)",
+  'echo @@KNODES@@',
+  "(kubectl get nodes -o wide --no-headers 2>/dev/null || true)",
+  'echo @@HOSTS@@',
+  "(grep -vE '^\\s*(#|$)' /etc/hosts 2>/dev/null | grep -vE '(^127\\.|^::1|^255\\.|^ff0|localhost)' || true)",
+  'echo @@NEIGH@@',
+  "(ip neigh show 2>/dev/null | grep -vE '(FAILED|INCOMPLETE)' || arp -an 2>/dev/null || true)",
+  'echo @@END@@',
+].join('; ');
+
+vmsRouter.post('/api/vms/neighbors', async (req, res) => {
+  const { name } = req.body || {};
+  const vms = await loadVms();
+  const vm = vms.find((v) => v.name === name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+  if (!(await vmReachable(vm))) return res.json({ reachable: false, error: 'SSH unreachable' });
+
+  const { stdout, stderr, ok } = await sshRun(vm, NEIGHBOR_CMD, 30000);
+  if (!ok && !stdout.trim()) {
+    return res.json({ reachable: true, error: (stderr.split('\n')[0] || 'SSH failed').slice(0, 200) });
+  }
+
+  const ownIps = new Set(section(stdout, 'SELF').split(/\s+/).filter((s) => /^\d+\.\d+\.\d+\.\d+$/.test(s)));
+  const known = new Set(vms.map((v) => v.host));
+  const found = new Map<string, { ip: string; hostname?: string; source: string }>();
+  const add = (ip: string, hostname: string | undefined, source: string) => {
+    if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip) || ownIps.has(ip) || known.has(ip)) return;
+    const prev = found.get(ip);
+    // Prefer entries that come with a hostname (K8s nodes / hosts file).
+    if (!prev || (!prev.hostname && hostname)) found.set(ip, { ip, hostname, source });
+  };
+
+  // Kubernetes cluster nodes: NAME STATUS ROLES AGE VERSION INTERNAL-IP ...
+  for (const line of section(stdout, 'KNODES').split('\n')) {
+    const c = line.trim().split(/\s+/);
+    if (c.length >= 6 && /^\d+\.\d+\.\d+\.\d+$/.test(c[5])) add(c[5], c[0], 'k8s-node');
+  }
+  // /etc/hosts: IP hostname [aliases...]
+  for (const line of section(stdout, 'HOSTS').split('\n')) {
+    const c = line.trim().split(/\s+/);
+    if (c.length >= 2) add(c[0], c[1], 'hosts-file');
+  }
+  // ARP / ip neigh: "10.0.0.7 dev eth0 lladdr ... REACHABLE" or "? (10.0.0.7) at ..."
+  for (const line of section(stdout, 'NEIGH').split('\n')) {
+    const m = line.match(/(\d+\.\d+\.\d+\.\d+)/);
+    if (m) add(m[1], undefined, 'arp');
+  }
+
+  res.json({ reachable: true, via: vm.name, neighbors: Array.from(found.values()) });
 });
 
 // ---------------------------------------------------------------------------
@@ -199,7 +286,7 @@ interface Finding {
 }
 
 // Known failure patterns → likely cause + suggested (not executed) fixes.
-function diagnoseReason(reason: string, extra: { exitCode?: number; restarts?: number } = {}): { detail: string; fixes: string[]; severity: Finding['severity'] } {
+export function diagnoseReason(reason: string, extra: { exitCode?: number; restarts?: number } = {}): { detail: string; fixes: string[]; severity: Finding['severity'] } {
   switch (reason) {
     case 'CrashLoopBackOff':
       return {
@@ -279,8 +366,8 @@ vmsRouter.post('/api/vms/diagnose', async (req, res) => {
   const vm = (await loadVms()).find((v) => v.name === name);
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
 
-  if (!(await tcpReachable(vm.host, vm.port))) {
-    return res.json({ reachable: false, error: 'SSH port unreachable' });
+  if (!(await vmReachable(vm))) {
+    return res.json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'SSH port unreachable' });
   }
 
   const { stdout, stderr, ok } = await sshRun(vm, DIAG_CMD, 45000);
@@ -405,12 +492,18 @@ const DISCOVER_CMD = [
   "(docker ps -a --format '{{json .}}' 2>/dev/null || true)",
   "echo @@KPODS@@",
   "(kubectl get pods -A -o json 2>/dev/null || true)",
+  "echo @@KSVCS@@",
+  "(kubectl get svc -A -o json 2>/dev/null || true)",
   "echo @@CRICTL@@",
   "(sudo -n crictl ps -o json 2>/dev/null || crictl ps -o json 2>/dev/null || true)",
+  "echo @@SYSTEMD@@",
+  "(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | head -50 || true)",
+  "echo @@PORTS@@",
+  "(ss -tulnp 2>/dev/null | tail -n +2 | head -50 || netstat -tulnp 2>/dev/null | tail -n +3 | head -50 || true)",
   "echo @@END@@",
 ].join('; ');
 
-function section(text: string, tag: string): string {
+export function section(text: string, tag: string): string {
   const start = text.indexOf(`@@${tag}@@`);
   if (start < 0) return '';
   const from = start + tag.length + 4;
@@ -423,8 +516,8 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
   const vm = (await loadVms()).find((v) => v.name === name);
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
 
-  if (!(await tcpReachable(vm.host, vm.port))) {
-    return res.status(200).json({ reachable: false, error: 'SSH port unreachable' });
+  if (!(await vmReachable(vm))) {
+    return res.status(200).json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'SSH port unreachable' });
   }
 
   const { stdout, stderr, ok } = await sshRun(vm, DISCOVER_CMD, 30000);
@@ -483,5 +576,41 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
     }
   } catch { /* ignore parse errors */ }
 
-  res.json({ reachable: true, engines, containers, pods, crictl });
+  // Kubernetes services (kubectl get svc -A -o json).
+  const services: any[] = [];
+  try {
+    const sraw = section(stdout, 'KSVCS');
+    if (sraw.startsWith('{')) {
+      for (const s of JSON.parse(sraw).items || []) {
+        services.push({
+          name: s.metadata?.name,
+          namespace: s.metadata?.namespace || 'default',
+          type: s.spec?.type || 'ClusterIP',
+          clusterIp: s.spec?.clusterIP || '—',
+          ports: (s.spec?.ports || []).map((p: any) => `${p.port}${p.nodePort ? `:${p.nodePort}` : ''}/${p.protocol || 'TCP'}`).join(', '),
+        });
+      }
+    }
+  } catch { /* ignore parse errors */ }
+
+  // Running systemd services (name + description).
+  const systemServices: any[] = [];
+  for (const line of section(stdout, 'SYSTEMD').split('\n')) {
+    const m = line.trim().match(/^(\S+\.service)\s+\S+\s+\S+\s+(\S+)\s*(.*)$/);
+    if (m) systemServices.push({ unit: m[1].replace(/\.service$/, ''), sub: m[2], description: m[3] || '' });
+  }
+
+  // Listening ports (ss/netstat): proto, local address, owning process if visible.
+  const listeningPorts: any[] = [];
+  for (const line of section(stdout, 'PORTS').split('\n')) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 5) continue;
+    const proto = cols[0].toLowerCase();
+    if (!/^(tcp|udp)/.test(proto)) continue;
+    const local = cols[4].includes(':') ? cols[4] : cols[3];
+    const procMatch = line.match(/users:\(\("([^"]+)"/) || line.match(/\d+\/([\w.-]+)\s*$/);
+    listeningPorts.push({ proto, local, process: procMatch ? procMatch[1] : '' });
+  }
+
+  res.json({ reachable: true, engines, containers, pods, services, crictl, systemServices, listeningPorts });
 });

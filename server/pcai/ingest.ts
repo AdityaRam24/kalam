@@ -5,7 +5,7 @@
 import { crawl } from './crawler.js';
 import { CRAWL_TARGETS, SEED_KNOWLEDGE } from './sources.js';
 import { embedTexts, EmbedConfig } from './embed.js';
-import { Chunk, chunkText, KnowledgeBase, saveKB, tokenize } from './store.js';
+import { Chunk, chunkText, KnowledgeBase, loadLearned, saveKB, tokenize } from './store.js';
 
 export interface IngestOptions {
   embed: EmbedConfig;
@@ -47,6 +47,13 @@ export async function runIngest(opts: IngestOptions): Promise<IngestResult> {
     }
   } else {
     progress('Crawl disabled — using curated seed knowledge only.');
+  }
+
+  // Learned documents (user uploads + solved cases) survive every retrain.
+  const learned = await loadLearned();
+  if (learned.length) {
+    for (const d of learned) docs.push({ title: d.title, url: d.url, text: d.text });
+    progress(`Included ${learned.length} learned document(s) (uploads + solved cases).`);
   }
 
   // 2) Chunk everything.

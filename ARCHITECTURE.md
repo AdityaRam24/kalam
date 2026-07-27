@@ -1,8 +1,14 @@
 # Kalam — Architecture & Activity Flow
 
 Kalam is a single-pane operations console for HPE Private Cloud AI (PCAI) environments:
-it monitors VMs over SSH, inspects Docker/Kubernetes workloads, diagnoses cluster
-problems read-only, and answers PCAI questions through a RAG-grounded AI assistant.
+it monitors VMs over SSH (including jump-host hops to VMs behind other VMs), inspects
+Docker/Kubernetes workloads and services, diagnoses cluster problems read-only,
+renders a live multi-host topology map, and answers PCAI questions through a
+RAG-grounded AI assistant that keeps learning from your uploads and solved cases.
+
+Security note: the API can run Docker/kubectl actions and SSH commands, so the
+server binds to `127.0.0.1` only. Set `HOST=0.0.0.0` in `.env` to expose it on
+the network deliberately.
 
 ---
 
@@ -17,7 +23,7 @@ flowchart LR
 
     subgraph N["Node.js backend"]
         API["Express server (index.ts, port 3001)"]
-        RAG["PCAI RAG engine"]
+        RAG["PCAI RAG engine + learning loop (kb.json, learned.json)"]
         VMS["VM / SSH module (vms.ts)"]
         LLM["LLM router (llm.ts, pcai/router.ts)"]
     end
@@ -70,10 +76,20 @@ sequenceDiagram
     V-->>S: KEY:value lines
     S-->>U: reachable, load, mem, disk, gpu, uptime
     U->>S: POST /api/vms/discover
-    S->>V: ssh docker ps + kubectl get pods + crictl ps
+    S->>V: ssh docker ps + kubectl pods/services + crictl + systemctl + ss
     V-->>S: sectioned output
-    S-->>U: containers + pods + runtimes tables
+    S-->>U: containers, pods, K8s services, systemd services, listening ports
 ```
+
+### 2.1b Peer VMs & SSH jump hosts
+
+From any connected VM (e.g. a DSC VM), "Find peer VMs" discovers other hosts it can
+see — Kubernetes cluster nodes (`kubectl get nodes -o wide`), `/etc/hosts` entries,
+and ARP neighbors — and offers to add them with the source VM as an **SSH jump
+host**. A VM with `via` set is reached through `ProxyCommand` (the hop honors the
+jump VM's own port and key), so a VME host that is only visible from the DSC VM
+still gets full metrics, discovery, and diagnosis. Reachability for jumped VMs is
+probed via the jump host, since the local machine cannot see them directly.
 
 ### 2.2 Read-only cluster diagnosis (Diagnose button)
 
@@ -141,15 +157,55 @@ The chat provider is pluggable at three levels (Settings → AI Engine):
 All non-Gemini traffic uses the standard OpenAI `chat/completions` protocol with
 streaming, so a new provider needs zero code changes.
 
+### 2.5 The learning loop (self-improving knowledge base)
+
+```mermaid
+flowchart LR
+    UP["User uploads: runbooks, logs, activity diagrams, postmortems"] --> LEARN["POST /api/pcai/learn"]
+    DIAG["Completed error diagnosis"] -->|"auto-captured as a Solved case"| LEARN
+    LEARN --> CLASSIFY["classify kind: runbook / log / diagram / case / note"]
+    CLASSIFY --> STORE["learned.json (survives retrains)"]
+    CLASSIFY --> HOT["chunk + embed + hot-append to live KB"]
+    STORE -->|"every retrain re-includes"| KB["kb.json"]
+    HOT --> KB
+    KB --> ANSWER["future answers retrieve uploads + past solutions"]
+```
+
+- Any text document fed via `kalam learn <file>` (or the API) is classified,
+  chunked, embedded, and immediately usable in answers.
+- Every completed diagnosis is saved back as a "Solved case" (problem +
+  resolution), so the next similar error retrieves the previous fix. Cases rotate
+  at 200; manual uploads are never rotated out.
+- Learned docs live in `server/pcai/learned.json`, separate from `kb.json`, so a
+  full retrain rebuilds the KB **with** them instead of losing them.
+
+### 2.6 Topology map
+
+The Topology view (`src/components/TopologyGraph.tsx`, React Flow) renders ports →
+containers and services → deployments → pods → nodes with live status LEDs,
+namespace grouping, search, heatmaps, and a details drawer (logs / actions /
+CVE scan for local resources).
+
+- **Source selector** — view this machine's topology or any SSH-connected VM's
+  (fetched via `/api/vms/discover`, jump hosts included).
+- **Live mode** — re-polls the active source every 8 s; LEDs and edges update in
+  place.
+- **Problems-only focus** — hides healthy resources; shows failures plus
+  everything they connect to (with a live problem count badge).
+- **Layouts** — grouped columns, or "Auto Flow" computed from the real edges with
+  `@dagrejs/dagre`.
+- **Accurate routing edges** — Service→Pod edges match real Kubernetes labels
+  against the service selector (name matching only as a fallback).
+
 ---
 
 ## 3. Why this tech stack
 
 **TypeScript end-to-end (React + Node/Express), not Python/Flask:**
 
-- **The product is UI-heavy.** The core value is the interactive single pane: React
-  Flow / Cytoscape / Mermaid graph views, live-streaming chat, dashboards. That
-  ecosystem is JavaScript-native; a Python backend would still need this exact
+- **The product is UI-heavy.** The core value is the interactive single pane: the
+  React Flow topology map, Mermaid diagram views, live-streaming chat, dashboards.
+  That ecosystem is JavaScript-native; a Python backend would still need this exact
   frontend, adding a second language for no gain.
 - **Node has the same OS powers as Python.** `child_process` (exec/execFile/spawn)
   covers everything `subprocess` does: running `kubectl`, `docker`, and `ssh`. All
@@ -175,8 +231,12 @@ streaming, so a new provider needs zero code changes.
 | Express 5 | minimal, battle-tested HTTP layer; routers per domain (pcai, llm, vms) |
 | system `ssh` via `execFile` | zero native deps, uses the user's keys/agent, args never shell-interpolated |
 | SSE (not WebSockets) | one-directional streams (chat tokens, pull progress) — simpler, proxy-friendly |
-| JSON file persistence (`vms.json`, KB store) | no database to install for a portable single-node tool |
+| JSON file persistence (`vms.json`, `kb.json`, `learned.json`) | no database to install for a portable single-node tool |
 | OpenAI-compatible protocol for all non-Gemini models | one client implementation covers every local and hosted provider |
+| `@dagrejs/dagre` for auto-layout | maintained fork of dagre, ships its own TypeScript types |
+| Lazy-loaded Mermaid | ~400 kB stays out of the main bundle until a diagram actually renders |
+| Loopback-only bind (`127.0.0.1`, `HOST` override) | the command-running API is never LAN-exposed by accident |
+| vitest (`npm test`) | unit tests for the diagnosis rules, SSH output parsing, KB chunking/retrieval, doc classification |
 
 ---
 
@@ -199,7 +259,7 @@ identically.
 
 ```mermaid
 flowchart LR
-    T["Terminal: kalam ask / solve / chat / train / status"] --> CLI["bin/kalam.cjs"]
+    T["Terminal: kalam ask / solve / learn / vms / vm diagnose / train"] --> CLI["bin/kalam.cjs"]
     CLI -->|"backend up?"| API["Express server :3001"]
     CLI -.->|"if down: spawn node + tsx directly, poll every 250ms"| API
     API --> ANSWER["SSE stream rendered live with ANSI markdown"]
@@ -216,9 +276,18 @@ Key behaviors:
   (auto-detects ask vs. diagnose vs. DevOps from the message), and conversation
   memory. Prose streams token-by-token; headings, bullets, and code blocks are
   colored as lines complete.
+- **`!` shell escape** — any REPL line starting with `!` runs as a real shell
+  command on the local machine with live streamed output (`!kubectl get pods -A`,
+  `!docker ps`). Ctrl+C kills the command, not the REPL.
 - **Ctrl+C cancels, not kills** — during a streaming answer the first Ctrl+C aborts
   just that answer and returns to the prompt; when idle it exits.
 - **One-shot + pipes** — `kalam ask "..."`, `kubectl logs pod | kalam solve`,
   `kalam list docker|k8s`, `kalam scan/fix <container>`.
+- **Knowledge commands** — `kalam learn <file...>` (or piped stdin) feeds runbooks,
+  logs, and diagrams into the KB; `kalam learned` lists uploads and auto-captured
+  solved cases.
+- **VM commands** — `kalam vms` (inventory + live status), `kalam vm ssh <name>`
+  (interactive session, hops via jump host), `kalam vm diagnose <name>` (read-only
+  findings with suggested fixes), `kalam vm discover <name>`, `kalam vm peers <name>`.
 - **Settings persistence** — provider/model/mode choices are saved to `~/.kalam.json`
   and merged with `.env` on startup, so the model you pick sticks across sessions.
