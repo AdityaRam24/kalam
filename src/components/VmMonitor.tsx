@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, Network } from 'lucide-react';
+import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, Network, Brain, History, Info } from 'lucide-react';
 
 interface VmEntry { name: string; host: string; user: string; port: number; keyPath?: string; via?: string; }
 interface VmMetrics {
@@ -75,6 +75,45 @@ export const VmMonitor: React.FC = () => {
   const [diagnosis, setDiagnosis] = useState<Record<string, Diagnosis>>({});
   const [diagBusy, setDiagBusy] = useState<Record<string, boolean>>({});
   const [diagFor, setDiagFor] = useState<string | null>(null);
+
+  // "Node brain": what this node is, why each component runs on it, what changed
+  interface BrainComponent {
+    id: string; title: string; category: string; what: string; why: string; impact: string;
+    unhealthy: number;
+    workloads: Array<{ name: string; namespace?: string; status?: string; restarts?: number; image?: string; age?: string }>;
+  }
+  interface NodeBrain {
+    reachable: boolean; error?: string; kubectlAvailable?: boolean; summary?: string;
+    identity?: {
+      hostname: string; ips: string[]; nodeName: string | null; role: string; os: string; kernel: string;
+      uptime: string; bootedAt: string; joinedAge: string; kubelet: string; runtime: string;
+      cpu: string; memory: string; gpus: number; ready: boolean | null; schedulable: boolean | null;
+      taints: string[]; notableLabels: string[];
+    };
+    components?: BrainComponent[];
+    otherWorkloads?: BrainComponent['workloads'];
+    changes?: Array<{ at?: string; age: string; kind: string; text: string }>;
+    warningEvents?: string;
+  }
+  const [brains, setBrains] = useState<Record<string, NodeBrain>>({});
+  const [brainBusy, setBrainBusy] = useState<Record<string, boolean>>({});
+  const [brainFor, setBrainFor] = useState<string | null>(null);
+
+  const explain = async (name: string) => {
+    setBrainBusy((b) => ({ ...b, [name]: true }));
+    setBrainFor(name);
+    try {
+      const res = await fetch('/api/vms/explain', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      setBrains((b) => ({ ...b, [name]: data }));
+    } catch (e: any) {
+      setBrains((b) => ({ ...b, [name]: { reachable: false, error: e.message } }));
+    } finally {
+      setBrainBusy((b) => ({ ...b, [name]: false }));
+    }
+  };
 
   const diagnose = async (name: string) => {
     setDiagBusy((b) => ({ ...b, [name]: true }));
@@ -262,6 +301,7 @@ export const VmMonitor: React.FC = () => {
                       <div className="action-btns">
                         <button className="icon-btn primary" title="Refresh metrics" onClick={() => probe(v.name)}><RefreshCw size={14} className={busy ? 'loader' : ''} /></button>
                         <button className="icon-btn success" title="Discover containers & pods" onClick={() => discover(v.name)}><Boxes size={14} className={discoverBusy[v.name] ? 'loader' : ''} /></button>
+                        <button className="icon-btn primary" title="Explain this node — what it is, why each component runs here, what changed" onClick={() => explain(v.name)}><Brain size={14} className={brainBusy[v.name] ? 'loader' : ''} /></button>
                         <button className="icon-btn secondary" title="Find peer VMs visible from this host" onClick={() => findNeighbors(v.name)}><Network size={14} className={neighborsBusy && neighborsFor === v.name ? 'loader' : ''} /></button>
                         <button className="icon-btn warning" title="Diagnose cluster (read-only kubectl checks)" onClick={() => diagnose(v.name)}><Activity size={14} className={diagBusy[v.name] ? 'loader' : ''} /></button>
                         <button className="icon-btn secondary" title="Run remote command" onClick={() => { setExecFor(v.name); setExecOut(''); }}><Play size={14} /></button>
@@ -280,6 +320,175 @@ export const VmMonitor: React.FC = () => {
           Metrics are gathered over SSH (system <code>ssh</code>). “Copy SSH command” puts a ready-to-paste connection string on your clipboard for a native terminal.
         </p>
       </div>
+
+      {/* Node brain: what this node is, why its components run, what changed */}
+      {brainFor && (() => {
+        const b = brains[brainFor];
+        const busy = brainBusy[brainFor];
+        const id = b?.identity;
+        const kindLabel: Record<string, string> = {
+          reboot: 'Reboot', service: 'Service restart', 'pod-new': 'New pod', 'pod-restart': 'Pod restart', package: 'Package', event: 'Event',
+        };
+        const fact = (label: string, value: React.ReactNode) => (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--text-muted)' }}>{label}</span>
+            <span style={{ fontSize: 13, fontFamily: 'var(--font-mono)' }}>{value}</span>
+          </div>
+        );
+        // Keep the catalog's category order stable in the UI.
+        const categories = Array.from(new Set((b?.components || []).map((c) => c.category)));
+        return (
+          <div className="panel-card" style={{ borderLeft: '3px solid var(--hpe-green)' }}>
+            <div className="panel-card-title">
+              <h2><Brain size={18} /> Node Brain · {brainFor}</h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button className="btn secondary" onClick={() => explain(brainFor)} disabled={busy} style={{ padding: '6px 12px' }}>
+                  <RefreshCw size={14} className={busy ? 'loader' : ''} /> Re-analyze
+                </button>
+                <button className="icon-btn" onClick={() => setBrainFor(null)}><X size={16} /></button>
+              </div>
+            </div>
+
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 0 }}>
+              <ShieldCheck size={11} style={{ verticalAlign: -1, marginRight: 4 }} />
+              Read-only: identity, workload and change data gathered over SSH with <code>kubectl get</code> and host inspection. Nothing is modified.
+            </p>
+
+            {busy && !b ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-secondary)', padding: 12 }}>
+                <span className="loader" /> Working out what this node is and why each component runs on it…
+              </div>
+            ) : !b ? null : b.error ? (
+              <p style={{ color: 'var(--status-error)', fontSize: 13 }}>{b.error}</p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                <div style={{ fontSize: 13, lineHeight: 1.6, padding: 12, background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 8 }}>
+                  {b.summary}
+                </div>
+
+                {/* Identity */}
+                {id && (
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 13, marginBottom: 10 }}>
+                      <Server size={15} style={{ color: 'var(--hpe-green)' }} /> Identity
+                      <span className="badge neutral" style={{ fontSize: 10 }}>{id.role}</span>
+                      {id.ready === false && <span className="badge error" style={{ fontSize: 10 }}>NotReady</span>}
+                      {id.schedulable === false && <span className="badge warning" style={{ fontSize: 10 }}>cordoned</span>}
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+                      {fact('Node name', id.nodeName || id.hostname)}
+                      {fact('IP', id.ips[0] || '—')}
+                      {fact('CPU / Memory', `${id.cpu || '?'} / ${id.memory}`)}
+                      {fact('GPUs', id.gpus ? String(id.gpus) : 'none')}
+                      {fact('OS / Kernel', `${id.os} · ${id.kernel}`)}
+                      {fact('kubelet / runtime', `${id.kubelet || '—'} · ${id.runtime || '—'}`)}
+                      {fact('Uptime', id.uptime || '—')}
+                      {fact('In cluster since', id.joinedAge || '—')}
+                    </div>
+                    {(id.taints.length > 0 || id.notableLabels.length > 0) && (
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+                        {id.taints.map((t) => <span key={t} className="badge warning" style={{ fontSize: 10 }} title="Taint — only pods with a matching toleration schedule here">taint {t}</span>)}
+                        {id.notableLabels.map((l) => <span key={l} className="badge neutral" style={{ fontSize: 10 }}>{l}</span>)}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* What runs here and why */}
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 13, marginBottom: 10 }}>
+                    <Layers size={15} style={{ color: 'var(--hpe-green)' }} /> What runs here — and why
+                    <span className="badge neutral" style={{ fontSize: 10 }}>{b.components?.length || 0} components</span>
+                  </div>
+                  {!b.components?.length ? (
+                    <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>No recognized platform components found on this node.</p>
+                  ) : categories.map((cat) => (
+                    <div key={cat} style={{ marginBottom: 14 }}>
+                      <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: 'var(--text-muted)', marginBottom: 6 }}>{cat}</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {b.components!.filter((c) => c.category === cat).map((c) => (
+                          <details key={c.id} style={{ border: '1px solid var(--border-color)', borderLeft: `3px solid ${c.unhealthy ? 'var(--status-error)' : 'var(--hpe-green)'}`, borderRadius: 8, background: 'var(--bg-tertiary)', padding: '10px 12px' }}>
+                            <summary style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13, fontWeight: 600 }}>
+                              {c.title}
+                              <span className={`badge ${c.unhealthy ? 'error' : 'running'}`} style={{ fontSize: 10 }}>
+                                {c.unhealthy ? `${c.unhealthy} unhealthy` : `${c.workloads.length} healthy`}
+                              </span>
+                              <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }}>{c.workloads.map((w) => w.name).slice(0, 2).join(', ')}{c.workloads.length > 2 ? ` +${c.workloads.length - 2}` : ''}</span>
+                            </summary>
+                            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, lineHeight: 1.6 }}>
+                              <div><strong style={{ color: 'var(--hpe-green)' }}>What it is:</strong> {c.what}</div>
+                              <div><strong style={{ color: 'var(--hpe-green)' }}>Why it runs on this node:</strong> {c.why}</div>
+                              <div><strong style={{ color: 'var(--status-warn, #E5A50A)' }}>If it stops:</strong> {c.impact}</div>
+                              <div className="table-wrapper"><table className="resource-table">
+                                <thead><tr><th>Workload</th><th>Namespace</th><th>Status</th><th>Restarts</th><th>Age</th><th>Image</th></tr></thead>
+                                <tbody>{c.workloads.map((w, i) => (
+                                  <tr key={`${w.namespace}/${w.name}/${i}`}>
+                                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{w.name}</td>
+                                    <td style={{ fontSize: 12 }}>{w.namespace || '—'}</td>
+                                    <td><span className={`badge ${w.status === 'Running' || w.status === 'running (systemd)' ? 'running' : w.status === 'Pending' ? 'warning' : 'error'}`} style={{ fontSize: 10 }}>{w.status}</span></td>
+                                    <td>{w.restarts ?? '—'}</td>
+                                    <td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{w.age || '—'}</td>
+                                    <td><span className="code-tag" style={{ fontSize: 10 }}>{w.image || '—'}</span></td>
+                                  </tr>
+                                ))}</tbody>
+                              </table></div>
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {b.otherWorkloads && b.otherWorkloads.length > 0 && (
+                    <details style={{ marginTop: 4 }}>
+                      <summary style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-secondary)' }}>
+                        <Info size={11} style={{ verticalAlign: -1, marginRight: 4 }} />
+                        {b.otherWorkloads.length} other workload(s) not in the component catalog (application pods)
+                      </summary>
+                      <div className="table-wrapper" style={{ marginTop: 8, maxHeight: 240, overflow: 'auto' }}><table className="resource-table">
+                        <thead><tr><th>Pod</th><th>Namespace</th><th>Status</th><th>Restarts</th><th>Age</th><th>Image</th></tr></thead>
+                        <tbody>{b.otherWorkloads.map((w, i) => (
+                          <tr key={i}><td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{w.name}</td><td style={{ fontSize: 12 }}>{w.namespace}</td>
+                            <td><span className={`badge ${w.status === 'Running' ? 'running' : 'error'}`} style={{ fontSize: 10 }}>{w.status}</span></td>
+                            <td>{w.restarts ?? '—'}</td><td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{w.age || '—'}</td>
+                            <td><span className="code-tag" style={{ fontSize: 10 }}>{w.image || '—'}</span></td></tr>
+                        ))}</tbody>
+                      </table></div>
+                    </details>
+                  )}
+                </div>
+
+                {/* Recent changes */}
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 13, marginBottom: 10 }}>
+                    <History size={15} style={{ color: 'var(--hpe-green)' }} /> Recent changes
+                    <span className="badge neutral" style={{ fontSize: 10 }}>{b.changes?.length || 0}</span>
+                  </div>
+                  {!b.changes?.length ? (
+                    <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>Nothing changed recently: no reboots, service restarts, new pods or package installs detected.</p>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {b.changes.map((c, i) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 10, fontSize: 12.5, padding: '6px 10px', background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 6 }}>
+                          <span className="badge neutral" style={{ fontSize: 9, flexShrink: 0 }}>{kindLabel[c.kind] || c.kind}</span>
+                          <span style={{ flex: 1 }}>{c.text}</span>
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }} title={c.at || ''}>{c.age}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {b.warningEvents && (
+                  <details>
+                    <summary style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-secondary)' }}>Recent cluster events</summary>
+                    <pre style={{ background: 'var(--bg-primary)', borderRadius: 6, padding: 10, fontSize: 11, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto', margin: '6px 0 0' }}>{b.warningEvents}</pre>
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Discovered workloads on the VM */}
       {discoverFor && (() => {

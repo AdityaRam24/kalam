@@ -81,6 +81,33 @@ sequenceDiagram
     S-->>U: containers, pods, K8s services, systemd services, listening ports
 ```
 
+### 2.1a Node Brain — explaining a discovered node
+
+Discovery lists *what* runs on a node; **Node Brain** (`POST /api/vms/explain`)
+explains *what it means*. One read-only SSH round trip gathers host facts
+(`hostname`/`uname`/`uptime -s`/`os-release`), `kubectl get nodes|pods|events`,
+running systemd units, service start timestamps, and the package log. The server
+then:
+
+1. **Identity** — matches the SSH host to its cluster node (by short hostname,
+   `Hostname` address, or InternalIP), and reports role (control-plane vs worker),
+   CPU/RAM/GPU capacity, kubelet + runtime versions, taints, and notable labels.
+2. **What runs here and why** — every pod on that node (plus recognized systemd
+   units) is matched against the component catalog in
+   `server/pcai/components.ts`, which answers three questions per component:
+   *what it is*, *why it runs on this node*, and *what breaks if it stops*.
+   E.g. `spire-agent` → workload attestation must happen on the workload's own
+   machine; `kyverno` → admission webhook whose `failurePolicy` decides whether
+   an outage blocks all deploys or silently skips policy. Matching is lexical
+   (pod name + owner + image + namespace), so it needs no LLM and works offline.
+   Unmatched pods are listed separately as application workloads.
+3. **Recent changes** — a merged timeline of host reboot, kubelet/containerd
+   restarts, pods scheduled or containers restarted in the last 7 days (with
+   image and exit reason), and host package installs/upgrades.
+
+Nothing is modified: the endpoint runs only `kubectl get`, `systemctl show`, and
+read-only host commands.
+
 ### 2.1b Peer VMs & SSH jump hosts
 
 From any connected VM (e.g. a DSC VM), "Find peer VMs" discovers other hosts it can

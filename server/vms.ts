@@ -11,8 +11,10 @@
 //   POST   /api/vms/metrics         -> { name } live load/cpu/mem/disk/uptime
 //   POST   /api/vms/exec            -> { name, command } run a remote command
 //   GET    /api/vms/ssh-command/:name -> the ssh command string (to copy/paste)
+//   POST   /api/vms/explain           -> { name } "what is this node" brain report
 
 import { Router } from 'express';
+import { identifyComponent, type ComponentInfo } from './pcai/components.js';
 import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
 import net from 'net';
@@ -613,4 +615,273 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
   }
 
   res.json({ reachable: true, engines, containers, pods, services, crictl, systemServices, listeningPorts });
+});
+
+// ---------------------------------------------------------------------------
+// "Node brain": explain a discovered node to a human.
+//
+// POST /api/vms/explain { name } — read-only. Answers three questions:
+//   1. What IS this node? (role, hardware, cluster membership)
+//   2. What is running on it and WHY? (each workload matched against the
+//      component catalog: what it is, why it must run here, what breaks if it
+//      stops) — e.g. "spire-agent runs on every node because a workload can
+//      only be attested by something on its own machine".
+//   3. What changed recently? (reboots, service restarts, pods created or
+//      restarted in the last week, host package installs, warning events)
+// ---------------------------------------------------------------------------
+
+const EXPLAIN_CMD = [
+  'echo @@SELF@@',
+  '(echo HOST:$(hostname); ' +
+    'echo IPS:$(hostname -I 2>/dev/null); ' +
+    'echo KERNEL:$(uname -r); ' +
+    'echo OS:$(. /etc/os-release 2>/dev/null; echo $PRETTY_NAME); ' +
+    'echo BOOT:$(uptime -s 2>/dev/null); ' +
+    'echo UP:$(uptime -p 2>/dev/null))',
+  'echo @@NODES@@',
+  '(kubectl get nodes -o json 2>/dev/null || true)',
+  'echo @@PODS@@',
+  '(kubectl get pods -A -o json 2>/dev/null || true)',
+  'echo @@EVENTS@@',
+  '(kubectl get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true)',
+  'echo @@UNITS@@',
+  "(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}' | head -60 || true)",
+  'echo @@SVCTIME@@',
+  '(for u in kubelet containerd docker crio spire-agent; do t=$(systemctl show $u -p ActiveEnterTimestamp --value 2>/dev/null); ' +
+    '[ -n "$t" ] && echo "$u|$t"; done || true)',
+  'echo @@PKG@@',
+  "((grep -E ' (install|upgrade) ' /var/log/dpkg.log 2>/dev/null | tail -10) || true; (rpm -qa --last 2>/dev/null | head -10) || true)",
+  'echo @@END@@',
+].join('; ');
+
+export interface NodeComponent extends ComponentInfo {
+  workloads: Array<{ name: string; namespace?: string; status?: string; restarts?: number; image?: string; age?: string }>;
+  unhealthy: number;
+}
+
+export interface NodeChange {
+  at?: string;   // ISO timestamp when known
+  age: string;   // human "3d ago"
+  kind: 'reboot' | 'service' | 'pod-new' | 'pod-restart' | 'package' | 'event';
+  text: string;
+}
+
+// "2026-07-20T10:00:00Z" -> "8d ago". Returns '' for unparseable input.
+export function humanAge(iso?: string, now: number = Date.now()): string {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (isNaN(t)) return '';
+  const s = Math.max(0, Math.round((now - t) / 1000));
+  if (s < 90) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+// Which inventory VM is which cluster node? SSH gives us a hostname and IPs;
+// the node's Kubernetes name is often neither, so match on both.
+export function matchNode(nodes: any[], hostname: string, ips: string[]): any | undefined {
+  const host = (hostname || '').toLowerCase();
+  const short = host.split('.')[0];
+  return nodes.find((n) => {
+    const nm = String(n.metadata?.name || '').toLowerCase();
+    if (nm === host || nm.split('.')[0] === short) return true;
+    return (n.status?.addresses || []).some((a: any) =>
+      (a.type === 'InternalIP' && ips.includes(a.address)) ||
+      (a.type === 'Hostname' && String(a.address).toLowerCase().split('.')[0] === short));
+  });
+}
+
+function kv(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split('\n')) {
+    const i = line.indexOf(':');
+    if (i > 0) out[line.slice(0, i).trim().toUpperCase()] = line.slice(i + 1).trim();
+  }
+  return out;
+}
+
+// Bytes-ish Kubernetes quantity ("128974848Ki") -> "123 GiB".
+function humanMem(q?: string): string {
+  if (!q) return '—';
+  const m = q.match(/^(\d+)(Ki|Mi|Gi|Ti)?$/);
+  if (!m) return q;
+  const mult: Record<string, number> = { Ki: 1024, Mi: 1024 ** 2, Gi: 1024 ** 3, Ti: 1024 ** 4 };
+  const bytes = parseInt(m[1], 10) * (m[2] ? mult[m[2]] : 1);
+  const gib = bytes / 1024 ** 3;
+  return gib >= 1 ? `${gib.toFixed(gib < 10 ? 1 : 0)} GiB` : `${(bytes / 1024 ** 2).toFixed(0)} MiB`;
+}
+
+vmsRouter.post('/api/vms/explain', async (req, res) => {
+  const { name } = req.body || {};
+  const vm = (await loadVms()).find((v) => v.name === name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+
+  if (!(await vmReachable(vm))) {
+    return res.json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'SSH port unreachable' });
+  }
+
+  const { stdout, stderr, ok } = await sshRun(vm, EXPLAIN_CMD, 45000);
+  if (!ok && !stdout.trim()) {
+    return res.json({ reachable: true, error: (stderr.split('\n')[0] || 'SSH failed').slice(0, 200) });
+  }
+
+  const now = Date.now();
+  const self = kv(section(stdout, 'SELF'));
+  const hostname = self.HOST || vm.host;
+  const ips = (self.IPS || '').split(/\s+/).filter((s) => /^\d+\.\d+\.\d+\.\d+$/.test(s));
+
+  // ---- 1. What is this node? ----------------------------------------------
+  let nodes: any[] = [];
+  try {
+    const raw = section(stdout, 'NODES');
+    if (raw.startsWith('{')) nodes = JSON.parse(raw).items || [];
+  } catch { /* kubectl output unusable — host-only report below */ }
+  const kubectlAvailable = nodes.length > 0;
+  const node = kubectlAvailable ? matchNode(nodes, hostname, ips) : undefined;
+
+  const labels: Record<string, string> = node?.metadata?.labels || {};
+  const isControlPlane = 'node-role.kubernetes.io/control-plane' in labels || 'node-role.kubernetes.io/master' in labels;
+  const gpuCount = parseInt(node?.status?.capacity?.['nvidia.com/gpu'] || '0', 10) || 0;
+  const readyCond = (node?.status?.conditions || []).find((c: any) => c.type === 'Ready');
+  const taints = (node?.spec?.taints || []).map((t: any) => `${t.key}${t.value ? '=' + t.value : ''}:${t.effect}`);
+
+  const identity = {
+    hostname,
+    ips,
+    nodeName: node?.metadata?.name || null,
+    role: !kubectlAvailable ? 'unknown (kubectl not available here)' : !node ? 'not a member of the cluster this host can see' : isControlPlane ? 'control-plane node' : 'worker node',
+    os: self.OS || '—',
+    kernel: self.KERNEL || '—',
+    uptime: self.UP || '—',
+    bootedAt: self.BOOT || '',
+    joinedCluster: node?.metadata?.creationTimestamp || '',
+    joinedAge: humanAge(node?.metadata?.creationTimestamp, now),
+    kubelet: node?.status?.nodeInfo?.kubeletVersion || '',
+    runtime: node?.status?.nodeInfo?.containerRuntimeVersion || '',
+    cpu: node?.status?.capacity?.cpu || '',
+    memory: humanMem(node?.status?.capacity?.memory),
+    gpus: gpuCount,
+    ready: readyCond ? readyCond.status === 'True' : null,
+    schedulable: node ? !node.spec?.unschedulable : null,
+    taints,
+    notableLabels: Object.entries(labels)
+      .filter(([k]) => /gpu|accelerator|instance-type|zone|region|node-role|storage|worker|nvidia/i.test(k))
+      .slice(0, 12)
+      .map(([k, v]) => (v ? `${k}=${v}` : k)),
+  };
+
+  // ---- 2. What runs here, and why? ----------------------------------------
+  let allPods: any[] = [];
+  try {
+    const raw = section(stdout, 'PODS');
+    if (raw.startsWith('{')) allPods = JSON.parse(raw).items || [];
+  } catch { /* ignore */ }
+  // Only this node's pods. Without a node match, fall back to the whole cluster
+  // view so the report is still useful (flagged via identity.role).
+  const myPods = node ? allPods.filter((p) => p.spec?.nodeName === node.metadata?.name) : [];
+
+  const byComponent = new Map<string, NodeComponent>();
+  const addWorkload = (info: ComponentInfo, w: NodeComponent['workloads'][number], healthy: boolean) => {
+    let entry = byComponent.get(info.id);
+    if (!entry) { entry = { ...info, workloads: [], unhealthy: 0 }; byComponent.set(info.id, entry); }
+    entry.workloads.push(w);
+    if (!healthy) entry.unhealthy++;
+  };
+
+  const otherWorkloads: NodeComponent['workloads'][number][] = [];
+  for (const p of myPods) {
+    const ns = p.metadata?.namespace || 'default';
+    const podName = p.metadata?.name || '?';
+    const images: string[] = (p.spec?.containers || []).map((c: any) => c.image).filter(Boolean);
+    const owner = (p.metadata?.ownerReferences || [])[0]?.name || '';
+    const cs = p.status?.containerStatuses || [];
+    const restarts = cs.reduce((a: number, c: any) => a + (c.restartCount || 0), 0);
+    const phase = p.status?.phase || 'Unknown';
+    const healthy = phase === 'Running' || phase === 'Succeeded';
+    const w = { name: podName, namespace: ns, status: phase, restarts, image: images[0], age: humanAge(p.metadata?.creationTimestamp, now) };
+
+    const info = identifyComponent(`${podName} ${owner} ${images.join(' ')} ${ns}`);
+    if (info) addWorkload(info, w, healthy);
+    else otherWorkloads.push(w);
+  }
+
+  // Host-level services matter too — kubelet/containerd/spire-agent may run
+  // under systemd rather than as pods.
+  for (const unit of section(stdout, 'UNITS').split('\n').map((s) => s.trim()).filter(Boolean)) {
+    const info = identifyComponent(unit);
+    if (!info) continue;
+    const already = byComponent.get(info.id);
+    if (already && already.workloads.some((w) => w.name === unit)) continue;
+    addWorkload(info, { name: unit, status: 'running (systemd)' }, true);
+  }
+
+  const components = Array.from(byComponent.values()).sort((a, b) =>
+    (b.unhealthy - a.unhealthy) || a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
+
+  // ---- 3. What changed recently? ------------------------------------------
+  const changes: NodeChange[] = [];
+  if (self.BOOT) {
+    // `uptime -s` prints local time without a zone; treat it as-is.
+    const iso = self.BOOT.replace(' ', 'T');
+    changes.push({ at: iso, age: humanAge(iso, now) || self.BOOT, kind: 'reboot', text: `Host booted (${self.UP || 'uptime unknown'})` });
+  }
+  for (const line of section(stdout, 'SVCTIME').split('\n')) {
+    const [unit, ts] = line.split('|');
+    if (!unit || !ts) continue;
+    // systemd prints "Mon 2026-07-20 10:00:00 UTC" — drop the weekday so Date can parse it.
+    const parsed = Date.parse(ts.trim().replace(/^[A-Za-z]{3}\s+/, ''));
+    if (isNaN(parsed)) continue;
+    const iso = new Date(parsed).toISOString();
+    changes.push({ at: iso, age: humanAge(iso, now), kind: 'service', text: `systemd service ${unit.trim()} (re)started` });
+  }
+  const WEEK = 7 * 24 * 3600 * 1000;
+  for (const p of myPods) {
+    const created = p.metadata?.creationTimestamp;
+    const ns = p.metadata?.namespace || 'default';
+    const pn = p.metadata?.name || '?';
+    if (created && now - Date.parse(created) < WEEK) {
+      const img = (p.spec?.containers || [])[0]?.image || '';
+      changes.push({ at: created, age: humanAge(created, now), kind: 'pod-new', text: `Pod ${ns}/${pn} scheduled here${img ? ` (image ${img})` : ''}` });
+    }
+    for (const c of p.status?.containerStatuses || []) {
+      const fin = c.lastState?.terminated?.finishedAt;
+      if (fin && now - Date.parse(fin) < WEEK) {
+        changes.push({
+          at: fin, age: humanAge(fin, now), kind: 'pod-restart',
+          text: `Container ${ns}/${pn}/${c.name} restarted — last exit ${c.lastState.terminated.reason || 'unknown'}${c.lastState.terminated.exitCode != null ? ` (code ${c.lastState.terminated.exitCode})` : ''}, ${c.restartCount || 0} restarts total`,
+        });
+      }
+    }
+  }
+  for (const line of section(stdout, 'PKG').split('\n').map((s) => s.trim()).filter(Boolean)) {
+    changes.push({ age: '', kind: 'package', text: line.slice(0, 200) });
+  }
+  changes.sort((a, b) => (Date.parse(b.at || '') || 0) - (Date.parse(a.at || '') || 0));
+
+  // ---- Narrative summary ---------------------------------------------------
+  const podCount = myPods.length;
+  const unhealthyPods = myPods.filter((p) => !['Running', 'Succeeded'].includes(p.status?.phase)).length;
+  const summary = !kubectlAvailable
+    ? `${hostname} is reachable over SSH but kubectl is not available here, so this report covers the host only (OS, kernel, systemd services and recent host changes).`
+    : !node
+      ? `${hostname} could not be matched to a node in the cluster kubectl talks to — it may be outside that cluster. Host details and any recognized systemd services are still reported.`
+      : `${identity.nodeName} is a ${isControlPlane ? 'control-plane' : 'worker'} node with ${identity.cpu || '?'} CPUs, ${identity.memory} RAM${gpuCount ? ` and ${gpuCount} GPU(s)` : ' and no GPUs'}, running ${identity.os}. ` +
+        `It joined the cluster ${identity.joinedAge || 'at an unknown time'} and is currently ${identity.ready ? 'Ready' : 'NOT Ready'}${identity.schedulable === false ? ' and cordoned (unschedulable)' : ''}. ` +
+        `${podCount} pod(s) run here across ${components.length} recognized platform component(s)${otherWorkloads.length ? ` plus ${otherWorkloads.length} application workload(s)` : ''}` +
+        `${unhealthyPods ? `; ${unhealthyPods} pod(s) are not Running` : '; all pods are Running'}.`;
+
+  res.json({
+    reachable: true,
+    reportOnly: true,
+    kubectlAvailable,
+    identity,
+    summary,
+    components,
+    otherWorkloads,
+    changes: changes.slice(0, 30),
+    warningEvents: section(stdout, 'EVENTS') || undefined,
+  });
 });
