@@ -36,6 +36,7 @@ import PcaiAssistant from './components/PcaiAssistant';
 import ModelPicker from './components/ModelPicker';
 import PcaiStackView from './components/PcaiStackView';
 import VmMonitor from './components/VmMonitor';
+import KubectlCheatSheet from './components/KubectlCheatSheet';
 
 interface Container {
   id: string;
@@ -120,7 +121,7 @@ interface ChatMessage {
 
 export function App() {
   // Tabs & Config
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'chat' | 'security' | 'agents' | 'pcai'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet'>('dashboard');
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [provider, setProvider] = useState<'gemini' | 'local' | 'custom'>(() => (localStorage.getItem('kalam_llm_provider') as 'gemini' | 'local' | 'custom') || 'gemini');
@@ -951,6 +952,14 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               <span className="nav-item-text">Virtual Machines</span>
               <span className="nav-item-badge">SSH</span>
             </button>
+            <button
+              className={`nav-item ${activeTab === 'cheatsheet' ? 'active' : ''}`}
+              onClick={() => setActiveTab('cheatsheet')}
+            >
+              <span className="nav-item-icon"><Terminal size={18} /></span>
+              <span className="nav-item-text">Kubectl Cheat Sheet</span>
+              <span className="nav-item-badge">CLI</span>
+            </button>
           </div>
 
           <div className="nav-group">
@@ -1042,6 +1051,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 {activeTab === 'security' && 'Container Security & CVE Patching'}
                 {activeTab === 'agents' && 'Multi-Agent Swarm Visualizer'}
                 {activeTab === 'pcai' && 'HPE Private Cloud AI Assistant'}
+                {activeTab === 'cheatsheet' && 'Kubectl Reference Guide & Tools'}
               </h2>
             </div>
 
@@ -1892,6 +1902,11 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               </div>
             )}
           </div>
+        )}
+
+        {/* KUBECTL CHEATSHEET TAB */}
+        {activeTab === 'cheatsheet' && (
+          <KubectlCheatSheet />
         )}
       </div>
     </div>

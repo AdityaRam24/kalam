@@ -25,6 +25,7 @@ flowchart LR
         API["Express server (index.ts, port 3001)"]
         RAG["PCAI RAG engine + learning loop (kb.json, learned.json)"]
         VMS["VM / SSH module (vms.ts)"]
+        GRAPH["Dependency graph engine (graph/: model, build, analyze)"]
         LLM["LLM router (llm.ts, pcai/router.ts)"]
     end
 
@@ -44,6 +45,8 @@ flowchart LR
     CLI -->|"same /api (auto-starts server)"| API
     API --> RAG
     API --> VMS
+    API --> GRAPH
+    VMS --> GRAPH
     API --> LLM
     API -->|child_process| DOCKER
     API -->|child_process| KUBECTL
@@ -162,6 +165,89 @@ Failure patterns → diagnosis mapping (in `server/vms.ts`):
 | Evicted | node disk/memory pressure | free disk, delete evicted record |
 | Node NotReady | kubelet/containerd down, pressure | `systemctl status kubelet`, journal |
 
+### 2.2a The dependency graph — telling causes apart from casualties
+
+Diagnosis on its own produces a *list*: fourteen red pods, each with its own
+suggested fix. But in a real outage thirteen of them are usually downstream of
+one failure. `server/graph/` is the model that knows the difference.
+
+**One contract governs the whole model** (`graph/model.ts`):
+
+```
+from --kind--> to      means      "to depends on from"
+```
+
+so failure flows *forward* along every arrow. Everything else follows from it:
+a blast radius is the set reachable forward from a node, and a root cause is a
+failure with no failed ancestor.
+
+```mermaid
+flowchart LR
+    VM["vm dsc-vm"] -->|hosts| KN["k8sNode worker-1"]
+    KN -->|hosts| SA["pod spire-agent-x9k2 ❌"]
+    KN -->|hosts| P1["pod query-engine-1 ❌"]
+    KN -->|hosts| P2["pod query-engine-2 ❌"]
+    SA -->|requires| P1
+    SA -->|requires| P2
+    PVC["pvc data-db-0"] -->|mounts| P1
+    P1 -->|member| SVC["service query-engine"]
+    P2 -->|member| SVC
+    P1 -->|member| DEP["Deployment query-engine"]
+```
+
+| Edge | Meaning |
+|---|---|
+| `hosts` | machine hosts workload: `vm → k8sNode → pod` (also `vm → container/unit`) |
+| `via` | SSH jump path: the jump host is the only route to the VM |
+| `member` | pod backs an aggregate: `pod → service` (real selector match), `pod → workload` |
+| `mounts` | `pvc → pod` — an unbound claim keeps the pod in ContainerCreating |
+| `binds` | a process owns a listening port |
+| `requires` | **platform dependency, derived from the component catalog** |
+
+`requires` is where the existing knowledge finally does work. `components.ts`
+already stated in prose that a dead SPIRE agent means "newly scheduled pods on
+this node never get an identity". `graph/deps.ts` turns that sentence into
+edges, in three tiers that also keep the graph acyclic by construction:
+
+- **cluster** (`etcd`, `kube-apiserver`, `coredns`, `spire-server`, `cert-manager`) — everything in the cluster depends on it.
+- **node** (`kubelet`, `containerd`, `kube-proxy`, CNIs, `spire-agent`, `spiffe-csi`, CSI drivers, `nvidia-device-plugin`) — every workload *on the same node* depends on it.
+- **workload** — ordinary application pods: they depend, nothing depends on them.
+
+Edges only run from a lower tier to a higher one, so a cluster-wide failure
+correctly outranks (and absorbs) a node-local one. A test asserts every id in
+these tables still resolves to itself in the catalog, so the two cannot drift.
+
+**Three questions the graph answers** (`graph/analyze.ts`):
+
+| Function | Question | How |
+|---|---|---|
+| `analyzeCauses` | "Which of these 14 red things do I fix?" | a broken node with no broken *ancestor* is a root cause; everything else is attributed to its nearest broken ancestor and ranked by how much breakage it explains |
+| `blastRadius` | "What do I take down if I restart this?" | forward BFS with hop distance, split into *already broken* (damage done) and *at risk* (damage stopping it would do) |
+| `dependencyPath` | "Why does that affect this?" | shortest forward path, each edge carrying the sentence explaining why it exists |
+
+Aggregates have no health of their own: a Service or Deployment is exactly as
+healthy as the pods behind it — all members broken is `failed`, some is
+`degraded`.
+
+```
+POST /api/graph/build   { name }           -> graph + stats + ranked causes
+POST /api/graph/causes  { name }           -> causes vs collateral
+POST /api/graph/blast   { name, id }       -> what breaks if `id` stops
+POST /api/graph/path    { name, from, to } -> why `from` affects `to`
+GET  /api/graph/:name                      -> the cached graph
+```
+
+One read-only SSH round trip (`kubectl get nodes|pods|svc|pvc`, `docker ps`,
+`systemctl list-units`, `ss -tuln`) builds it; the result is cached per VM so
+blast-radius and path queries are free. `server/graph/build.ts` is pure — no
+SSH, no fs, no Express — so the entire edge model is tested from fixtures.
+
+**Where it shows up:** `/api/vms/diagnose` now builds the graph from the same
+snapshot it diagnoses, so every finding carries `rootCause`, `explains`, or
+`causedBy`, and findings are ordered causes-first. The UI adds a "Start here"
+panel and dims collateral findings; the CLI gains `kalam vm graph <name>` and
+`kalam vm impact <name> <id>`.
+
 ### 2.3 PCAI Assistant (RAG chat)
 
 ```mermaid
@@ -274,7 +360,9 @@ CVE scan for local resources).
 | `@dagrejs/dagre` for auto-layout | maintained fork of dagre, ships its own TypeScript types |
 | Lazy-loaded Mermaid | ~400 kB stays out of the main bundle until a diagram actually renders |
 | Loopback-only bind (`127.0.0.1`, `HOST` override) | the command-running API is never LAN-exposed by accident |
-| vitest (`npm test`) | unit tests for the diagnosis rules, SSH output parsing, KB chunking/retrieval, doc classification |
+| vitest (`npm test`) | unit tests for the diagnosis rules, SSH output parsing, KB chunking/retrieval, doc classification, and the whole graph edge model + causal analysis |
+| pure graph core (no I/O in `graph/model.ts`, `build.ts`, `analyze.ts`) | the dependency model is testable from fixtures instead of needing a live cluster |
+| `tsconfig.server.json` (`npm run typecheck:server`) | `tsc -b` only covered `src/`; the server is now strict-typechecked in `npm run build` too |
 
 ---
 
@@ -326,6 +414,8 @@ Key behaviors:
   solved cases.
 - **VM commands** — `kalam vms` (inventory + live status), `kalam vm ssh <name>`
   (interactive session, hops via jump host), `kalam vm diagnose <name>` (read-only
-  findings with suggested fixes), `kalam vm discover <name>`, `kalam vm peers <name>`.
+  findings with suggested fixes), `kalam vm discover <name>`, `kalam vm peers <name>`,
+  `kalam vm graph <name>` (dependency graph + ranked root causes),
+  `kalam vm impact <name> <id>` (blast radius of one resource).
 - **Settings persistence** — provider/model/mode choices are saved to `~/.kalam.json`
   and merged with `.env` on startup, so the model you pick sticks across sessions.

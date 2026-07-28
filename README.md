@@ -10,6 +10,8 @@ Kalam is an **Agentic DevOps Dashboard & Chatbot** that captures locally running
 * **🐳 Docker Collection Manager**: View properties of all containers, execute standard commands (start, stop, restart, delete), and stream live stdout/stderr logs.
 * **🛡️ Container Vulnerability Scanner & Hardener**: Scans container images for CVE vulnerabilities and offers a one-click automated patch/upgrade to minimal Alpine/slim base images.
 * **☸️ Kubernetes Explorer**: Sectioned view of nodes, deployments, services, and pods. Restarts rollouts, deletes pods, and scales deployment replica counts.
+* **📖 Kubectl Reference Guide & Tools**: A searchable catalog of ~90 commands where every entry is labelled by what it can do to your cluster (read-only / changes state / destructive), fills in its own `<placeholders>`, and — when it is read-only — runs against a connected VM with the output inline. Plus a validating command builder, eight diagnostic runbooks, and a practice quiz.
+* **🕸️ Dependency Graph & Root-Cause Analysis**: Builds a typed graph of what depends on what (VMs → nodes → pods → services/PVCs, plus platform dependencies like SPIRE, CNI and CSI drivers) from one read-only SSH pass. Turns fourteen red pods into one cause with thirteen casualties, and answers "what breaks if I stop this?" before you stop it.
 * **💬 Agentic Chat Console**: Injects active cluster details into the prompt context of Google Gemini (`gemini-3-flash-preview`) or Local LLMs (Ollama, LM Studio), draws customized mermaid charts dynamically, and recommends action triggers that execute upon user approval.
 
 ---
@@ -144,6 +146,15 @@ Run a single task without entering the REPL:
 **Models**
 * `kalam models` — list installed Ollama / local models.
 * `kalam model` — pick the default local model interactively.
+
+**Remote VMs (SSH, read-only)**
+* `kalam vms` — inventory with live status.
+* `kalam vm ssh <name>` — interactive session (hops through a jump host if configured).
+* `kalam vm diagnose <name>` — read-only kubectl diagnosis; findings are ordered causes-first, with collateral marked as "downstream of …".
+* `kalam vm discover <name>` — containers, pods, K8s + system services, listening ports.
+* `kalam vm graph <name>` — build the dependency graph and rank the root causes.
+* `kalam vm impact <name> <id>` — blast radius: what is already broken downstream of a resource, and what is healthy but at risk.
+* `kalam vm peers <name>` — find other VMs visible from this host.
 
 **Local DevOps**
 * `kalam status` — check local Docker and Kubernetes daemons.

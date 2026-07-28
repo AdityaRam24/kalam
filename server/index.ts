@@ -10,6 +10,7 @@ import { GoogleGenAI } from '@google/genai';
 import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
 import { llmRouter } from './llm.js';
 import { vmsRouter } from './vms.js';
+import { graphRouter } from './graph/router.js';
 
 dotenv.config();
 
@@ -26,6 +27,8 @@ app.use(pcaiRouter);
 app.use(llmRouter);
 // Virtual Machine monitoring + SSH (manual inventory).
 app.use(vmsRouter);
+// Infrastructure dependency graph: root-cause ranking + blast radius.
+app.use(graphRouter);
 
 // Helper for safe command execution
 async function runCmd(cmd: string): Promise<{ stdout: string; stderr: string; success: boolean }> {

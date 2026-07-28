@@ -68,10 +68,18 @@ export const VmMonitor: React.FC = () => {
   interface DiagFinding {
     severity: 'critical' | 'warning' | 'info'; kind: string; namespace?: string; name: string;
     reason: string; detail: string; logExcerpt?: string; events?: string; suggestedFixes: string[];
+    // From the dependency graph: is this the cause, or somebody else's casualty?
+    graphId?: string; rootCause?: boolean; explains?: number; causedBy?: string;
+  }
+  interface DiagRootCause {
+    id: string; name: string; kind: string; namespace?: string; reason?: string;
+    explains: string[]; atRisk: number; confidence: 'high' | 'medium' | 'low';
+    explanation: string; component?: { id: string; title: string; impact: string };
   }
   interface Diagnosis {
     reachable: boolean; kubectlAvailable?: boolean; error?: string; summary?: string;
     findings?: DiagFinding[]; warningEvents?: string;
+    causes?: { rootCauses: DiagRootCause[]; brokenCount: number; summary: string };
   }
   const [diagnosis, setDiagnosis] = useState<Record<string, Diagnosis>>({});
   const [diagBusy, setDiagBusy] = useState<Record<string, boolean>>({});
@@ -763,14 +771,48 @@ export const VmMonitor: React.FC = () => {
                   {d.summary}
                 </div>
 
+                {/* Start here: what the dependency graph thinks is the actual cause. */}
+                {(d.causes?.rootCauses.length || 0) > 0 && (d.findings?.length || 0) > 1 && (
+                  <div style={{ border: '1px solid var(--border-color)', borderLeft: '3px solid var(--hpe-green)', borderRadius: 8, padding: 12, background: 'var(--bg-tertiary)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Start here — root cause analysis</div>
+                    <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 8px' }}>{d.causes!.summary}</p>
+                    {d.causes!.rootCauses.slice(0, 3).map((c) => (
+                      <div key={c.id} style={{ marginBottom: 8 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span className={`badge ${c.confidence === 'high' ? 'error' : 'warning'}`}>{c.confidence} confidence</span>
+                          <strong style={{ fontSize: 13 }}>{c.component?.title || `${c.namespace ? `${c.namespace} / ` : ''}${c.name}`}</strong>
+                          {c.explains.length > 0 && (
+                            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>explains {c.explains.length} downstream failure(s)</span>
+                          )}
+                          {c.atRisk > 0 && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>· {c.atRisk} healthy at risk</span>}
+                        </div>
+                        <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '4px 0 0' }}>{c.explanation}</p>
+                        {c.component?.impact && (
+                          <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 0' }}>Impact if it stays down: {c.component.impact}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 {(d.findings || []).map((f, i) => (
-                  <div key={i} style={{ border: '1px solid var(--border-color)', borderLeft: `3px solid ${f.severity === 'critical' ? 'var(--status-error)' : 'var(--status-warn, #E5A50A)'}`, borderRadius: 8, padding: 12, background: 'var(--bg-tertiary)' }}>
+                  <div key={i} style={{ border: '1px solid var(--border-color)', borderLeft: `3px solid ${f.severity === 'critical' ? 'var(--status-error)' : 'var(--status-warn, #E5A50A)'}`, borderRadius: 8, padding: 12, background: 'var(--bg-tertiary)', opacity: f.causedBy ? 0.75 : 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
                       <AlertTriangle size={14} style={{ color: f.severity === 'critical' ? 'var(--status-error)' : 'var(--status-warn, #E5A50A)' }} />
                       <span className={`badge ${f.severity === 'critical' ? 'error' : 'warning'}`}>{f.reason}</span>
                       <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{f.kind}</span>
                       <strong style={{ fontSize: 13 }}>{f.namespace ? `${f.namespace} / ` : ''}{f.name}</strong>
+                      {f.rootCause && (
+                        <span className="badge" style={{ background: 'var(--hpe-green)', color: '#fff' }}>
+                          root cause{f.explains ? ` · explains ${f.explains}` : ''}
+                        </span>
+                      )}
                     </div>
+                    {f.causedBy && (
+                      <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+                        Downstream of {f.causedBy} — likely clears when that is fixed.
+                      </p>
+                    )}
                     <p style={{ fontSize: 13, margin: '4px 0 8px' }}>{f.detail}</p>
                     {f.events && (
                       <details style={{ marginBottom: 6 }}>

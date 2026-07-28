@@ -15,6 +15,9 @@
 
 import { Router } from 'express';
 import { identifyComponent, type ComponentInfo } from './pcai/components.js';
+import { analyzeCauses, graphStats } from './graph/analyze.js';
+import { buildInfraGraph } from './graph/build.js';
+import { nodeId as gid } from './graph/model.js';
 import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
 import net from 'net';
@@ -38,7 +41,7 @@ export interface VmEntry {
   via?: string; // name of another inventory VM to use as an SSH jump host
 }
 
-async function loadVms(): Promise<VmEntry[]> {
+export async function loadVms(): Promise<VmEntry[]> {
   try {
     return JSON.parse(await fs.readFile(VMS_PATH, 'utf-8')) as VmEntry[];
   } catch {
@@ -92,7 +95,7 @@ async function getJump(vm: VmEntry): Promise<VmEntry | undefined> {
 
 // Run a remote command over ssh (hopping through vm.via if set).
 // Resolves with combined result — never rejects.
-async function sshRun(vm: VmEntry, command: string, timeoutMs = 20000): Promise<{ stdout: string; stderr: string; ok: boolean }> {
+export async function sshRun(vm: VmEntry, command: string, timeoutMs = 20000): Promise<{ stdout: string; stderr: string; ok: boolean }> {
   const jump = await getJump(vm);
   return new Promise((resolve) => {
     execFile('ssh', [...sshBaseArgs(vm, false, jump), command], { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 4 }, (err, stdout, stderr) => {
@@ -103,7 +106,7 @@ async function sshRun(vm: VmEntry, command: string, timeoutMs = 20000): Promise<
 
 // A jumped VM can't be TCP-probed from here — treat "jump host reachable" as
 // the liveness signal instead.
-async function vmReachable(vm: VmEntry): Promise<boolean> {
+export async function vmReachable(vm: VmEntry): Promise<boolean> {
   if (vm.via) {
     const jump = await getJump(vm);
     return jump ? tcpReachable(jump.host, jump.port) : false;
@@ -270,6 +273,12 @@ const DIAG_CMD = [
   '(kubectl get nodes -o json 2>/dev/null || true)',
   'echo @@PODS@@',
   '(kubectl get pods -A -o json 2>/dev/null || true)',
+  // Services and claims are not diagnosed directly — they give the dependency
+  // graph the edges it needs to tell a cause apart from its casualties.
+  'echo @@SVCS@@',
+  '(kubectl get svc -A -o json 2>/dev/null || true)',
+  'echo @@PVCS@@',
+  '(kubectl get pvc -A -o json 2>/dev/null || true)',
   'echo @@EVENTS@@',
   "(kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp 2>/dev/null | tail -25 || true)",
   'echo @@END@@',
@@ -285,6 +294,11 @@ interface Finding {
   logExcerpt?: string;     // tail of the failing container's logs
   events?: string;         // relevant describe/event lines
   suggestedFixes: string[]; // commands/actions to REPORT ONLY — never run
+  // ---- Filled in from the dependency graph (see server/graph) -------------
+  graphId?: string;        // this resource's node id in the infrastructure graph
+  rootCause?: boolean;     // nothing this depends on is also broken
+  explains?: number;       // how many other findings this one accounts for
+  causedBy?: string;       // the root-cause resource this is collateral of
 }
 
 // Known failure patterns → likely cause + suggested (not executed) fixes.
@@ -384,16 +398,29 @@ vmsRouter.post('/api/vms/diagnose', async (req, res) => {
 
   const findings: Finding[] = [];
 
+  // Parse each cluster section once: the rule engine reads them below, and the
+  // dependency graph is built from the same snapshot so the two always agree.
+  const parseSection = (tag: string): any => {
+    const raw = section(stdout, tag);
+    if (!raw.startsWith('{')) return undefined;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+  };
+  const nodesJson = parseSection('NODES');
+  const podsJson = parseSection('PODS');
+
   // ---- Nodes -------------------------------------------------------------
   try {
-    const nraw = section(stdout, 'NODES');
-    if (nraw.startsWith('{')) {
-      for (const n of JSON.parse(nraw).items || []) {
+    if (nodesJson) {
+      for (const n of nodesJson.items || []) {
         const conds = n.status?.conditions || [];
         const ready = conds.find((c: any) => c.type === 'Ready');
         if (ready && ready.status !== 'True') {
           const d = diagnoseReason('NotReady');
-          findings.push({ severity: d.severity, kind: 'Node', name: n.metadata?.name || '?', reason: 'NotReady', detail: d.detail, events: ready.message || '', suggestedFixes: d.fixes });
+          findings.push({ severity: d.severity, kind: 'Node', name: n.metadata?.name || '?', reason: 'NotReady', detail: d.detail, events: ready.message || '', suggestedFixes: d.fixes, graphId: gid('k8sNode', n.metadata?.name || '?') });
         }
         for (const c of conds) {
           if (['MemoryPressure', 'DiskPressure', 'PIDPressure'].includes(c.type) && c.status === 'True') {
@@ -401,6 +428,7 @@ vmsRouter.post('/api/vms/diagnose', async (req, res) => {
               severity: 'warning', kind: 'Node', name: n.metadata?.name || '?', reason: c.type,
               detail: `Node reports ${c.type}: ${c.message || ''}`.trim(),
               suggestedFixes: [c.type === 'DiskPressure' ? 'Free disk space on the node (prune unused images/logs).' : 'Reduce workload on this node or add capacity.'],
+              graphId: gid('k8sNode', n.metadata?.name || '?'),
             });
           }
         }
@@ -412,9 +440,8 @@ vmsRouter.post('/api/vms/diagnose', async (req, res) => {
   interface ProblemPod { ns: string; pod: string; container?: string; reason: string; restarts: number; exitCode?: number; }
   const problems: ProblemPod[] = [];
   try {
-    const praw = section(stdout, 'PODS');
-    if (praw.startsWith('{')) {
-      for (const p of JSON.parse(praw).items || []) {
+    if (podsJson) {
+      for (const p of podsJson.items || []) {
         const ns = p.metadata?.namespace || 'default';
         const pod = p.metadata?.name || '?';
         const phase = p.status?.phase || 'Unknown';
@@ -462,14 +489,49 @@ vmsRouter.post('/api/vms/diagnose', async (req, res) => {
         events: section(ev.stdout, `EV${i}`).slice(0, 2000) || undefined,
         logExcerpt: section(ev.stdout, `LOG${i}`).slice(0, 3000) || undefined,
         suggestedFixes: d.fixes,
+        graphId: gid('pod', t.pod, t.ns),
       });
     });
   }
   // Any problems beyond the evidence limit still get a finding (without logs).
   for (const t of problems.slice(5)) {
     const d = diagnoseReason(t.reason, { restarts: t.restarts, exitCode: t.exitCode });
-    findings.push({ severity: d.severity, kind: 'Pod', namespace: t.ns, name: t.pod, reason: t.reason, detail: d.detail, suggestedFixes: d.fixes });
+    findings.push({ severity: d.severity, kind: 'Pod', namespace: t.ns, name: t.pod, reason: t.reason, detail: d.detail, suggestedFixes: d.fixes, graphId: gid('pod', t.pod, t.ns) });
   }
+
+  // ---- Phase 3: separate causes from casualties over the dependency graph --
+  // Without this, fourteen red pods look like fourteen problems. The graph knows
+  // that thirteen of them are downstream of one failure.
+  const graph = buildInfraGraph({
+    source: vm.name,
+    k8sNodes: nodesJson,
+    pods: podsJson,
+    services: parseSection('SVCS'),
+    pvcs: parseSection('PVCS'),
+  });
+  const causes = analyzeCauses(graph);
+  const rootIds = new Set(causes.rootCauses.map((c) => c.id));
+  const explainedBy = new Map(causes.rootCauses.map((c) => [c.id, c]));
+
+  for (const f of findings) {
+    const id = f.graphId;
+    if (!id) continue;
+    const cause = explainedBy.get(id);
+    if (cause) {
+      f.rootCause = true;
+      f.explains = cause.explains.length;
+      continue;
+    }
+    const culpritId = causes.collateral[id];
+    if (culpritId) {
+      const culprit = graph.nodes.find((n) => n.id === culpritId);
+      f.rootCause = false;
+      f.causedBy = culprit ? `${culprit.kind} ${culprit.name}${culprit.reason ? ` (${culprit.reason})` : ''}` : undefined;
+    }
+  }
+  // Show causes before their casualties, then keep severity order within each.
+  const rank = (f: Finding) => (f.rootCause ? 0 : f.causedBy ? 2 : 1);
+  findings.sort((a, b) => rank(a) - rank(b) || (b.explains || 0) - (a.explains || 0));
 
   const critical = findings.filter((f) => f.severity === 'critical').length;
   res.json({
@@ -478,8 +540,10 @@ vmsRouter.post('/api/vms/diagnose', async (req, res) => {
     reportOnly: true, // this endpoint never mutates anything
     summary: findings.length === 0
       ? 'No problems detected: all nodes Ready and all pods healthy.'
-      : `${findings.length} issue(s) found (${critical} critical). Suggested fixes are reported only — nothing was executed.`,
+      : `${findings.length} issue(s) found (${critical} critical). ${causes.summary} Suggested fixes are reported only — nothing was executed.`,
     findings,
+    causes,
+    graphStats: graphStats(graph),
     warningEvents: section(stdout, 'EVENTS') || undefined,
   });
 });

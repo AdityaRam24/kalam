@@ -501,7 +501,7 @@ ${colors.bold}Commands${colors.reset} ${colors.gray}(everything else is sent to 
   ${colors.green}/learn${colors.reset} <file>     Teach the KB a runbook / log / diagram / doc
   ${colors.green}/learned${colors.reset}          List learned docs + auto-captured solved cases
   ${colors.green}/vms${colors.reset}              VM inventory with live SSH status
-  ${colors.green}/vm${colors.reset} <sub> <name>  diagnose · discover · peers (SSH, read-only)
+  ${colors.green}/vm${colors.reset} <sub> <name>  diagnose · discover · peers · graph · impact (read-only)
   ${colors.green}/status${colors.reset}           Local Docker & Kubernetes health
   ${colors.green}/run${colors.reset} <n>          Execute suggested action #n from the last reply
   ${colors.green}/key${colors.reset} <api-key>    Set your Gemini API key (and switch to Gemini)
@@ -647,10 +647,12 @@ async function startRepl(initialMode) {
         case 'learned': await showLearned(); return reprompt();
         case 'vms': await listVmsCli(); return reprompt();
         case 'vm': {
-          const [sub, vmName] = arg.split(/\s+/);
+          const [sub, vmName, ...subRest] = arg.split(/\s+/);
           if (sub === 'diagnose' || sub === 'diag') await vmDiagnose(vmName);
           else if (sub === 'discover') await vmDiscover(vmName);
           else if (sub === 'peers') await vmPeers(vmName);
+          else if (sub === 'graph') await vmGraph(vmName);
+          else if (sub === 'impact' || sub === 'blast') await vmImpact(vmName, subRest[0]);
           else if (sub === 'ssh') console.log(`${colors.yellow}Interactive SSH doesn't fit inside the REPL — run: ${colors.bold}kalam vm ssh ${vmName || '<name>'}${colors.reset}${colors.yellow} in its own terminal.${colors.reset}`);
           else await listVmsCli();
           return reprompt();
@@ -939,9 +941,24 @@ async function vmDiagnose(name) {
     if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
     console.log(`\n${colors.bold}🩺 Diagnosis · ${name}${colors.reset}  ${colors.gray}(read-only — nothing was executed)${colors.reset}`);
     console.log((d.findings || []).length ? '' : `${colors.green}✅ ${d.summary}${colors.reset}`);
+
+    // Root-cause analysis over the dependency graph: which of these to fix first.
+    const causes = (d.causes && d.causes.rootCauses) || [];
+    if (causes.length && (d.findings || []).length > 1) {
+      console.log(`${colors.bold}🎯 Start here${colors.reset} ${colors.gray}${d.causes.summary}${colors.reset}`);
+      causes.slice(0, 3).forEach((c) => {
+        const label = (c.component && c.component.title) || `${c.namespace ? `${c.namespace}/` : ''}${c.name}`;
+        const scope = c.explains.length ? `explains ${c.explains.length} downstream failure(s)` : `${c.atRisk} healthy dependent(s) at risk`;
+        console.log(`   ${colors.green}▸${colors.reset} ${colors.bold}${label}${colors.reset} ${colors.gray}[${c.confidence} confidence] — ${scope}${colors.reset}`);
+      });
+    }
+
     (d.findings || []).forEach((f, i) => {
       const sev = f.severity === 'critical' ? `${colors.red}CRITICAL${colors.reset}` : `${colors.yellow}WARNING ${colors.reset}`;
-      console.log(`\n ${colors.bold}${i + 1}.${colors.reset} [${sev}] ${colors.bold}${f.reason}${colors.reset} — ${f.kind} ${f.namespace ? `${f.namespace}/` : ''}${f.name}`);
+      const tag = f.rootCause
+        ? ` ${colors.green}[root cause${f.explains ? ` · explains ${f.explains}` : ''}]${colors.reset}`
+        : f.causedBy ? ` ${colors.gray}[downstream of ${f.causedBy}]${colors.reset}` : '';
+      console.log(`\n ${colors.bold}${i + 1}.${colors.reset} [${sev}] ${colors.bold}${f.reason}${colors.reset} — ${f.kind} ${f.namespace ? `${f.namespace}/` : ''}${f.name}${tag}`);
       console.log(`    ${f.detail}`);
       if (f.logExcerpt) {
         console.log(`    ${colors.gray}Log tail:${colors.reset}`);
@@ -971,6 +988,73 @@ async function vmDiscover(name) {
     (d.services || []).forEach((s) => console.log(`  ⚡ svc ${(s.namespace + '/' + s.name).slice(0, 48).padEnd(50)} ${colors.gray}${s.type} ${s.ports}${colors.reset}`));
     if (d.systemServices && d.systemServices.length) {
       console.log(`  ${colors.gray}systemd: ${d.systemServices.slice(0, 12).map((s) => s.unit).join(', ')}${d.systemServices.length > 12 ? '…' : ''}${colors.reset}`);
+    }
+    console.log();
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+// Build the dependency graph for a host and show what it found — including the
+// ranked root causes, which is the whole point of having a graph.
+async function vmGraph(name) {
+  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm graph <name>${colors.reset}\n`); return; }
+  if (!(await ensureServer())) return;
+  const spin = startSpinner(`Building the dependency graph for ${name} (read-only)…`);
+  try {
+    const d = await postJSON('/api/graph/build', { name }, 120000);
+    stopSpinner(spin);
+    if (!d.ok) { console.log(`${colors.red}❌ ${d.error || 'Graph build failed'}${colors.reset}`); return; }
+
+    const s = d.stats;
+    const kinds = Object.entries(s.byKind).sort((a, b) => b[1] - a[1]).map(([k, c]) => `${c} ${k}`).join(', ');
+    console.log(`\n${colors.bold}🕸️  Dependency graph · ${name}${colors.reset}  ${colors.gray}${s.nodes} nodes / ${s.edges} edges${colors.reset}`);
+    console.log(`   ${colors.gray}${kinds}${colors.reset}`);
+    const health = Object.entries(s.byHealth).map(([h, c]) =>
+      `${h === 'failed' ? colors.red : h === 'degraded' ? colors.yellow : h === 'healthy' ? colors.green : colors.gray}${c} ${h}${colors.reset}`
+    ).join(colors.gray + ' · ' + colors.reset);
+    console.log(`   ${health}`);
+
+    const causes = (d.causes && d.causes.rootCauses) || [];
+    console.log(`\n${colors.bold}Root causes${colors.reset} ${colors.gray}${d.causes.summary}${colors.reset}`);
+    if (!causes.length) console.log(`   ${colors.green}Nothing unhealthy.${colors.reset}`);
+    causes.forEach((c, i) => {
+      const label = (c.component && c.component.title) || `${c.namespace ? `${c.namespace}/` : ''}${c.name}`;
+      console.log(`\n ${colors.bold}${i + 1}.${colors.reset} ${colors.bold}${label}${colors.reset} ${colors.gray}[${c.confidence}] ${c.reason || c.health}${colors.reset}`);
+      console.log(`    ${c.explanation}`);
+      console.log(`    ${colors.gray}id: ${c.id}${colors.reset}`);
+    });
+    console.log(`\n${colors.gray}Next: kalam vm impact ${name} <id>  — what breaks if that stops.${colors.reset}\n`);
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+// "What breaks if I restart this?" — the blast radius of one graph node.
+async function vmImpact(name, id) {
+  if (!name || !id) { console.log(`\n${colors.yellow}Usage: kalam vm impact <name> <node-id>${colors.reset}\n${colors.gray}Get ids from: kalam vm graph <name>${colors.reset}\n`); return; }
+  if (!(await ensureServer())) return;
+  const spin = startSpinner(`Tracing what depends on ${id}…`);
+  try {
+    const d = await postJSON('/api/graph/blast', { name, id }, 120000);
+    stopSpinner(spin);
+    if (!d.ok) { console.log(`${colors.red}❌ ${d.error || 'Blast radius failed'}${colors.reset}`); return; }
+
+    console.log(`\n${colors.bold}💥 Blast radius · ${d.origin.name}${colors.reset} ${colors.gray}(${d.origin.kind}, ${d.origin.health})${colors.reset}`);
+    console.log(`   ${d.summary}`);
+    if (d.componentImpact) console.log(`   ${colors.gray}${d.componentImpact}${colors.reset}`);
+
+    if (d.alreadyBroken.length) {
+      console.log(`\n${colors.red}Already unhealthy downstream (${d.alreadyBroken.length}):${colors.reset}`);
+      d.alreadyBroken.slice(0, 20).forEach((n) =>
+        console.log(`   ${colors.red}✗${colors.reset} ${(n.namespace ? `${n.namespace}/` : '') + n.name} ${colors.gray}${n.kind} · ${n.reason || n.health} · ${n.distance} hop(s)${colors.reset}`));
+    }
+    if (d.atRisk.length) {
+      console.log(`\n${colors.yellow}Healthy but at risk (${d.atRisk.length}):${colors.reset}`);
+      d.atRisk.slice(0, 20).forEach((n) =>
+        console.log(`   ${colors.yellow}!${colors.reset} ${(n.namespace ? `${n.namespace}/` : '') + n.name} ${colors.gray}${n.kind} · ${n.distance} hop(s)${colors.reset}`));
     }
     console.log();
   } catch (e) {
@@ -1038,6 +1122,8 @@ ${colors.bold}VMs (SSH):${colors.reset}
   ${colors.green}vm diagnose <name>${colors.reset}   Read-only kubectl diagnosis with suggested fixes.
   ${colors.green}vm discover <name>${colors.reset}   Containers, pods, K8s + system services, ports.
   ${colors.green}vm peers <name>${colors.reset}      Find other VMs visible from this host.
+  ${colors.green}vm graph <name>${colors.reset}      Dependency graph + ranked root causes (read-only).
+  ${colors.green}vm impact <name> <id>${colors.reset} Blast radius: what breaks if that resource stops.
 
 ${colors.bold}LOCAL DEVOPS:${colors.reset}
   ${colors.green}status${colors.reset}               Docker & Kubernetes health.
@@ -1119,8 +1205,10 @@ async function main() {
       else if (sub === 'diagnose' || sub === 'diag') await vmDiagnose(vmName);
       else if (sub === 'discover') await vmDiscover(vmName);
       else if (sub === 'peers' || sub === 'neighbors') await vmPeers(vmName);
+      else if (sub === 'graph') await vmGraph(vmName);
+      else if (sub === 'impact' || sub === 'blast') await vmImpact(vmName, rest[2]);
       else if (sub === 'list' || sub === '') await listVmsCli();
-      else console.log(`\n${colors.yellow}Usage: kalam vm <list|ssh|diagnose|discover|peers> [name]${colors.reset}\n`);
+      else console.log(`\n${colors.yellow}Usage: kalam vm <list|ssh|diagnose|discover|peers|graph|impact> [name]${colors.reset}\n`);
       break;
     }
     case 'status': await showStatus(); console.log(); break;
