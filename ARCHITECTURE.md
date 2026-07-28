@@ -108,6 +108,17 @@ then:
 Nothing is modified: the endpoint runs only `kubectl get`, `systemctl show`, and
 read-only host commands.
 
+### 2.1c VM topology
+
+`src/components/VmTopology.tsx` draws the same inventory as a ReactFlow graph
+(dagre, left-to-right): **Kalam → jump hosts → VMs → component categories**. A VM
+with `via` set is rendered as a child of its jump host, so the real SSH path is
+visible; edges animate green when the host is reachable and go dashed grey when
+it is not. Each VM card carries live metrics and, once the Node Brain scan has
+run, expands into one card per component category (colored per category, red when
+something in it is unhealthy). It is presentational — VmMonitor owns the
+inventory, metrics and brain state and passes them down.
+
 ### 2.1b Peer VMs & SSH jump hosts
 
 From any connected VM (e.g. a DSC VM), "Find peer VMs" discovers other hosts it can

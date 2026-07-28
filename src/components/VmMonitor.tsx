@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, Network, Brain, History, Info } from 'lucide-react';
+import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, Network, Brain, History, Info, Share2 } from 'lucide-react';
+import VmTopology from './VmTopology';
 
 interface VmEntry { name: string; host: string; user: string; port: number; keyPath?: string; via?: string; }
 interface VmMetrics {
@@ -99,6 +100,11 @@ export const VmMonitor: React.FC = () => {
   const [brainBusy, setBrainBusy] = useState<Record<string, boolean>>({});
   const [brainFor, setBrainFor] = useState<string | null>(null);
 
+  // Topology view of the inventory (SSH paths + analyzed components)
+  const [showTopology, setShowTopology] = useState(true);
+  const [topoExpanded, setTopoExpanded] = useState<Record<string, boolean>>({});
+  const toggleTopoExpand = useCallback((name: string) => setTopoExpanded((e) => ({ ...e, [name]: !e[name] })), []);
+
   const explain = async (name: string) => {
     setBrainBusy((b) => ({ ...b, [name]: true }));
     setBrainFor(name);
@@ -108,6 +114,7 @@ export const VmMonitor: React.FC = () => {
       });
       const data = await res.json();
       setBrains((b) => ({ ...b, [name]: data }));
+      if (data.components?.length) setTopoExpanded((e) => ({ ...e, [name]: true }));
     } catch (e: any) {
       setBrains((b) => ({ ...b, [name]: { reachable: false, error: e.message } }));
     } finally {
@@ -319,6 +326,33 @@ export const VmMonitor: React.FC = () => {
           <Terminal size={11} style={{ verticalAlign: -1, marginRight: 4 }} />
           Metrics are gathered over SSH (system <code>ssh</code>). “Copy SSH command” puts a ready-to-paste connection string on your clipboard for a native terminal.
         </p>
+      </div>
+
+      {/* Topology: inventory + SSH paths, expandable into analyzed components */}
+      <div className="panel-card">
+        <div className="panel-card-title">
+          <h2><Share2 size={18} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> VM Topology</h2>
+          <button className="btn secondary" onClick={() => setShowTopology((s) => !s)} style={{ padding: '6px 12px' }}>
+            {showTopology ? 'Hide' : 'Show'}
+          </button>
+        </div>
+        {showTopology && (
+          <>
+            <VmTopology
+              vms={vms}
+              metrics={metrics}
+              brains={brains}
+              expanded={topoExpanded}
+              onToggleExpand={toggleTopoExpand}
+              onExplain={explain}
+              busy={brainBusy}
+            />
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, marginBottom: 0 }}>
+              Solid animated links are reachable SSH paths; a VM drawn under another is reached through it as a jump host.
+              “Analyze node” runs the read-only Node Brain scan and expands that host into its platform components by category.
+            </p>
+          </>
+        )}
       </div>
 
       {/* Node brain: what this node is, why its components run, what changed */}
