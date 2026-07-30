@@ -20,7 +20,7 @@ Kalam is an **Agentic DevOps Dashboard & Chatbot** that captures locally running
 
 Please refer to the [REQUIREMENTS.md](file:///c:/Users/Steve/Desktop/kalam/REQUIREMENTS.md) file for complete prerequisite details.
 
-* **Node.js**: `v18.x` or higher
+* **Node.js**: `v20.x` or higher (Vite 8 / TypeScript 6)
 * **Docker Desktop**: Active/Running daemon
 * **Kubernetes (kubectl)**: Connected local cluster context
 * **Google Gemini API Key** or **Local LLM Server (Ollama)**
@@ -28,6 +28,19 @@ Please refer to the [REQUIREMENTS.md](file:///c:/Users/Steve/Desktop/kalam/REQUI
 ---
 
 ## 🚀 How to Setup & Run
+
+### On Linux / macOS — use the scripts in [`scripts/`](scripts/README.md)
+
+```bash
+chmod +x scripts/*.sh    # once, if the exec bit didn't survive the clone
+./scripts/setup.sh       # prerequisites + .env + npm install + frontend build
+./scripts/start.sh       # run it → http://127.0.0.1:3001  (single port)
+./scripts/dev.sh         # or hot-reload mode → http://127.0.0.1:5173
+./scripts/doctor.sh      # diagnose connection errors (e.g. ECONNREFUSED :5173)
+./scripts/stop.sh        # free the ports
+```
+
+On Windows, the equivalents are `setup.bat`, `start.bat` and `install-cli.bat`.
 
 ### 1. Install Project Dependencies
 Run npm install in the project root:

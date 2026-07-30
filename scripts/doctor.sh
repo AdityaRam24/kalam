@@ -127,7 +127,9 @@ if have curl; then
 else
     info "curl not installed — skipped."
 fi
-if grep -qE '^[[:space:]]*127\.0\.0\.1[[:space:]]+.*\blocalhost\b' /etc/hosts 2>/dev/null; then
+if [ ! -f /etc/hosts ]; then
+    info "/etc/hosts not readable here — skipped (not a Linux host?)."
+elif grep -qE '^[[:space:]]*127\.0\.0\.1[[:space:]]+.*\blocalhost\b' /etc/hosts 2>/dev/null; then
     ok "/etc/hosts maps localhost → 127.0.0.1"
 else
     note_problem "localhost is not mapped to 127.0.0.1 in /etc/hosts." \

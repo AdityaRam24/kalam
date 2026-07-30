@@ -10,17 +10,19 @@ set -euo pipefail
 cd "$ROOT_DIR"
 
 load_config
-PORTS=()
+# Space-separated rather than an array: `${#arr[@]}` on an empty array trips
+# `set -u` on bash < 4.4, which some older distros still ship.
+PORTS=''
 while [ $# -gt 0 ]; do
     case "$1" in
-        --port)    PORTS+=("${2:?--port needs a value}"); shift ;;
+        --port)    PORTS="${PORTS} ${2:?--port needs a value}"; shift ;;
         -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        [0-9]*)    PORTS+=("$1") ;;
+        [0-9]*)    PORTS="${PORTS} $1" ;;
         *)         die "Unknown option: $1 (try --help)" ;;
     esac
     shift
 done
-[ "${#PORTS[@]}" -gt 0 ] || PORTS=("$PORT" "$CLIENT_PORT")
+[ -n "${PORTS// /}" ] || PORTS="${PORT} ${CLIENT_PORT}"
 
 banner "STOP"
 if ! have lsof && ! have ss && ! have fuser; then
@@ -28,7 +30,7 @@ if ! have lsof && ! have ss && ! have fuser; then
 fi
 
 stopped=0
-for p in "${PORTS[@]}"; do
+for p in $PORTS; do
     if port_busy "$p"; then
         free_port "$p"
         if port_busy "$p"; then
