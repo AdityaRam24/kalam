@@ -1,1 +1,100 @@
-[]
+[
+ {
+  "title": "pcai architecture notes",
+  "url": "datagen://pcai-dataset/chunk/81569ecfba9f3392",
+  "text": "HPE Private Cloud AI — Architecture Notes › Control plane and data plane\n\nPCAI separates a control plane (cluster lifecycle, identity, tenancy) from the\nAI service plane (MLIS for inference, MLDM for data pipelines, MLDE for\ndistributed training). The control plane runs on the management nodes; the\nservice plane is scheduled across the GPU worker pool.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "pcai architecture notes",
+  "url": "datagen://pcai-dataset/chunk/03a2a7a01214fc7c",
+  "text": "HPE Private Cloud AI — Architecture Notes › Identity and access\n\nAuthentication is brokered through Keycloak. Each AI service trusts Keycloak as\nits OIDC provider rather than holding its own user database. Role bindings are\nmapped from Keycloak groups to Kubernetes RBAC at namespace granularity, so a\nteam that can deploy an MLIS endpoint cannot necessarily read another team's\nlakehouse bucket.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "pcai architecture notes",
+  "url": "datagen://pcai-dataset/chunk/64ff3e46f5b6f743",
+  "text": "HPE Private Cloud AI — Architecture Notes › Storage\n\nThe lakehouse presents an S3-compatible object interface. Model artifacts,\ndatasets and pipeline outputs all land there. Endpoints receive scoped\ncredentials as Kubernetes secrets; those credentials expire, which is the most\ncommon reason a previously working endpoint starts failing to start.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "pcai architecture notes",
+  "url": "datagen://pcai-dataset/chunk/f311f9fb238a70ec",
+  "text": "HPE Private Cloud AI — Architecture Notes › Networking and ingress\n\nExternal traffic terminates at the ingress controller, which holds the platform\nTLS certificate. Endpoints are exposed as subpaths or subdomains depending on\nthe install profile. In an air-gapped install, no component may reach the public\ninternet, so container images and model artifacts must be pre-staged into the\ninternal registry and the lakehouse before deployment.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "pcai architecture notes",
+  "url": "datagen://pcai-dataset/chunk/0ff5756a19e32cfe",
+  "text": "HPE Private Cloud AI — Architecture Notes › Sizing\n\nGPU worker sizing is driven by concurrent inference endpoints rather than by\ntotal model count: an idle endpoint still holds its GPU allocation until it is\nscaled to zero. Plan for headroom equal to at least one full node so that a\nrolling upgrade can drain a node without evicting production endpoints.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "pcai architecture notes",
+  "url": "datagen://pcai-dataset/chunk/30453c0c491dae89",
+  "text": "HPE Private Cloud AI — Architecture Notes › Upgrades and backup\n\nUpgrades are staged control plane first, then service plane. Back up the\nKeycloak realm and the platform configuration before an upgrade; model\nartifacts in the lakehouse are not part of the platform backup and are assumed\nto be reproducible from their source pipelines.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "mlis endpoint unavailable",
+  "url": "datagen://pcai-dataset/chunk/c6854ea250a973b3",
+  "text": "Runbook: mlis endpoint unavailable › Symptom / when this applies\n\nA deployed MLIS endpoint returns `503 Service Unavailable` for every request.\n`kubectl get pods -n mlis` shows the serving pod in `CrashLoopBackOff`, or\n`Running` but never `1/1 Ready`. Callers see:\n\nupstream connect error or disconnect/reset before headers. reset reason: connection failure",
+  "kind": "runbook",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "mlis endpoint unavailable",
+  "url": "datagen://pcai-dataset/chunk/18940e59a12432da",
+  "text": "Runbook: mlis endpoint unavailable › Verification\n\n- `kubectl get pods -n mlis -l app=$ENDPOINT` shows `1/1 Running`\n- `curl -s -o /dev/null -w '%{http_code}' https://$ENDPOINT/v1/models` returns `200`\n- A test inference returns a payload within the endpoint's latency SLO",
+  "kind": "runbook",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "How do I free a GPU allocation on PCAI?",
+  "url": "datagen://pcai-dataset/chunk/09f1566f61b2a617",
+  "text": "Q: How do I free a GPU allocation on PCAI?\n\nA: Scale the idle endpoint to zero replicas with kubectl -n mlis scale deploy <endpoint> --replicas=0. The GPU is released immediately and the endpoint can be scaled back up later.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "Case: MLIS endpoint returned 503 for 20 minutes after the platform …",
+  "url": "datagen://pcai-dataset/chunk/ed16f54a3b8cdd96",
+  "text": "Q: I am seeing this problem:\nMLIS endpoint returned 503 for 20 minutes after the platform upgrade\n\nWhat is the cause and how do I fix it?\n\nA: The lakehouse bucket credentials in the endpoint secret expired during the upgrade. Delete the secret with kubectl -n mlis delete secret $ENDPOINT-s3 and re-create it from the MLIS UI under Endpoint > Storage > Reconnect. The pod restarts and pulls the artifact successfully.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "GPU scheduling notes",
+  "url": "datagen://pcai-dataset/chunk/0a0e962a055a9a71",
+  "text": "GPU scheduling on PCAI\n\nAn MLIS endpoint holds its GPU allocation for as long as it has at least one replica, even when it is serving no traffic at all. Idle endpoints are therefore the most common cause of \"no GPU capacity\" errors when a new endpoint is deployed. Scale idle endpoints to zero rather than deleting them: the model artifact stays in the lakehouse and the endpoint can be restored in seconds.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "PgBouncer pooling modes",
+  "url": "datagen://pcai-dataset/chunk/e30622d17243eed1",
+  "text": "Connection pooling in PgBouncer runs in three modes: session, transaction and statement. Transaction mode is the usual choice for web applications because it returns the server connection to the pool at commit, letting a small pool serve many clients. Statement mode forbids multi-statement transactions entirely.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "What does the web UI bind to?",
+  "url": "datagen://pcai-dataset/chunk/203d8a8bfb0b447f",
+  "text": "Q: What does the web UI bind to?\n\nA: It binds to 127.0.0.1 only, so it is not reachable from the network.",
+  "kind": "note",
+  "addedAt": "2026-07-30T20:58:48Z"
+ },
+ {
+  "title": "Case: I am seeing this problem:\nMLIS endpoint returned 503 for 20 minutes after the pl",
+  "url": "datagen://pcai-dataset/case/df6903ded5d79df8",
+  "text": "Problem: I am seeing this problem:\nMLIS endpoint returned 503 for 20 minutes after the platform upgrade\n\nWhat is the cause and how do I fix it?\n\nResolution: The lakehouse bucket credentials in the endpoint secret expired during the upgrade. Delete the secret with kubectl -n mlis delete secret $ENDPOINT-s3 and re-create it from the MLIS UI under Endpoint > Storage > Reconnect. The pod restarts and pulls the artifact successfully.\n\nSource: Case: MLIS endpoint returned 503 for 20 minutes after the platform … <human://troubleshooting/i-am-seeing-this-problem-mlis-endpoint-returned--63b8cf68>",
+  "kind": "case",
+  "addedAt": "2026-07-30T20:58:48Z"
+ }
+]
