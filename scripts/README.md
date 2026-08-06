@@ -34,6 +34,11 @@ All scripts read `.env`, and a shell variable always overrides it:
 | `HOST` | `127.0.0.1` | Backend bind address |
 | `CLIENT_PORT` | `5173` | Vite dev-server port |
 | `CLIENT_HOST` | same as `HOST` | Vite bind address |
+| `CLIENT_ALLOWED_HOSTS` | `.pcaicoe.com,.ext.hpe.com` | Hostnames the dev server accepts; a leading dot matches all subdomains, `true` allows any |
+| `ALLOWED_HOSTS` | falls back to `CLIENT_ALLOWED_HOSTS` | Browser origins the **backend** accepts (CORS). Loopback is always allowed |
+| `CLIENT_PUBLIC_HOST` | empty | Ingress hostname the browser uses — set it to route HMR back through the ingress |
+| `CLIENT_HMR_PROTOCOL` | `wss` | HMR socket scheme; use `ws` for a plain-HTTP ingress. Only read when `CLIENT_PUBLIC_HOST` is set |
+| `CLIENT_HMR_PORT` | `443` | Port the browser dials for HMR. Only read when `CLIENT_PUBLIC_HOST` is set |
 | `GEMINI_API_KEY` | empty | Enables the Gemini agent (local LLMs work without it) |
 
 ```bash

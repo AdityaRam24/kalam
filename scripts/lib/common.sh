@@ -46,7 +46,11 @@ load_config() {
     CLIENT_PORT="${CLIENT_PORT:-$(env_value CLIENT_PORT)}"; CLIENT_PORT="${CLIENT_PORT:-5173}"
     # The Vite dev server binds wherever the backend binds unless told otherwise.
     CLIENT_HOST="${CLIENT_HOST:-$(env_value CLIENT_HOST)}"; CLIENT_HOST="${CLIENT_HOST:-$HOST}"
-    export PORT HOST CLIENT_PORT CLIENT_HOST
+    # Ingress settings. Empty is the normal local case; vite.config.ts and the
+    # backend supply their own defaults, so do not invent any here.
+    CLIENT_ALLOWED_HOSTS="${CLIENT_ALLOWED_HOSTS:-$(env_value CLIENT_ALLOWED_HOSTS)}"
+    CLIENT_PUBLIC_HOST="${CLIENT_PUBLIC_HOST:-$(env_value CLIENT_PUBLIC_HOST)}"
+    export PORT HOST CLIENT_PORT CLIENT_HOST CLIENT_ALLOWED_HOSTS CLIENT_PUBLIC_HOST
 }
 
 # A host you can actually *connect* to. 0.0.0.0 is a bind address, not a
@@ -161,6 +165,12 @@ HOST=127.0.0.1
 
 # Vite dev-server port (dev mode only).
 CLIENT_PORT=5173
+
+# Serving Kalam through a cluster ingress? Uncomment and set these.
+# CLIENT_HOST/HOST must be 0.0.0.0 or the ingress cannot reach the process, and
+# the hostname must be allowlisted or Vite answers "Blocked request".
+# CLIENT_ALLOWED_HOSTS=.pcaicoe.com,.ext.hpe.com
+# CLIENT_PUBLIC_HOST=kalam.example.pcaicoe.com
 
 # Add your Google Gemini API Key here to enable the conversational DevOps Agent
 GEMINI_API_KEY=

@@ -11,6 +11,7 @@ import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
 import { llmRouter } from './llm.js';
 import { vmsRouter } from './vms.js';
 import { graphRouter } from './graph/router.js';
+import { parseAllowedHosts, corsOriginCheck } from './cors.js';
 
 dotenv.config();
 
@@ -18,7 +19,15 @@ const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+// Restrict who may drive this API from a browser — see server/cors.ts for why
+// that matters here. ALLOWED_HOSTS=true restores the previous "allow any".
+const allowedOrigins = parseAllowedHosts(
+  process.env.ALLOWED_HOSTS || process.env.CLIENT_ALLOWED_HOSTS
+);
+
+app.use(cors({
+  origin: (origin, callback) => callback(null, corsOriginCheck(origin, allowedOrigins)),
+}));
 app.use(express.json({ limit: '2mb' })); // allow pasting large logs/stack traces
 
 // HPE Private Cloud AI assistant (RAG knowledge base + grounded chat).
