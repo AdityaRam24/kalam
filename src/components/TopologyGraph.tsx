@@ -66,6 +66,11 @@ interface TopologyGraphProps {
   onRefresh?: () => Promise<void> | void; // re-fetch local data (used by Live mode)
 }
 
+// Canvas node ids. Built in exactly one place so that "which card is this?"
+// stays a lookup instead of a string-parsing guess (namespaces contain dashes).
+const cleanId = (s: string) => (s || '').replace(/[^a-zA-Z0-9]/g, '_');
+const nsNodeId = (prefix: 'pod' | 'svc' | 'deploy', ns: string, name: string) => `${prefix}-${ns}-${cleanId(name)}`;
+
 // Helper: formats creation timestamp into relative age
 function formatAge(creationTime: string | number | undefined): string {
   if (!creationTime) return 'Unknown age';
@@ -535,7 +540,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
   // Selected Detail Drawer state
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [drawerTab, setDrawerTab] = useState<'details' | 'logs' | 'actions' | 'security'>('details');
+  const [drawerTab, setDrawerTab] = useState<'details' | 'related' | 'yaml' | 'events' | 'logs' | 'actions' | 'security'>('details');
+
+  // Deep inspect: the full object (YAML + describe + events) and everything the
+  // backend worked out that it is connected to.
+  const [inspect, setInspect] = useState<any | null>(null);
+  const [inspectLoading, setInspectLoading] = useState(false);
+  const [inspectError, setInspectError] = useState('');
+  const [manifestView, setManifestView] = useState<'yaml' | 'describe'>('yaml');
+  const [copied, setCopied] = useState(false);
 
   // Logs state
   const [logs, setLogs] = useState('');
@@ -740,7 +753,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       const k8sNodesStartY = k8sYOffsetVal + (totalK8sHeight - (k8sNodeCount - 1) * spacingY) / 2 + 30;
 
       filteredNodes.forEach((n, idx) => {
-        const nodeId = `k8snode-${n.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const nodeId = `k8snode-${cleanId(n.name)}`;
 
         nsNodes.push({
           id: nodeId,
@@ -770,7 +783,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       // Services (X = 540)
       const svcStartY = rowYStart + (rowHeight - (nsSvcs.length - 1) * spacingY) / 2;
       nsSvcs.forEach((s, sIdx) => {
-        const svcId = `svc-${ns}-${s.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const svcId = nsNodeId('svc', ns, s.name);
         const cleanPorts = s.ports && s.ports !== 'None' ? s.ports : 'None';
         const portsTrunc = cleanPorts.length > 18 ? cleanPorts.slice(0, 16) + '…' : cleanPorts;
 
@@ -792,7 +805,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       // Deployments (X = 750)
       const depStartY = rowYStart + (rowHeight - (nsDeps.length - 1) * spacingY) / 2;
       nsDeps.forEach((d, dIdx) => {
-        const depId = `deploy-${ns}-${d.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const depId = nsNodeId('deploy', ns, d.name);
 
         nsNodes.push({
           id: depId,
@@ -812,7 +825,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       // Pods (X = 960)
       const podStartY = rowYStart + (rowHeight - (nsPods.length - 1) * spacingY) / 2;
       nsPods.forEach((p, pIdx) => {
-        const podId = `pod-${ns}-${p.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const podId = nsNodeId('pod', ns, p.name);
         const containerInfo = (p.containers || []).map((c: any) => `${c.name}: ${c.image}`).join('\n');
 
         nsNodes.push({
@@ -834,7 +847,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         // Connection: Deployment → Pod
         nsDeps.forEach(d => {
           if (p.name.startsWith(d.name)) {
-            const depId = `deploy-${ns}-${d.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            const depId = nsNodeId('deploy', ns, d.name);
             nsEdges.push({
               id: `edge-${depId}-${podId}`,
               source: depId,
@@ -854,7 +867,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
         // Connection: Pod → Node
         if (p.node && p.node !== 'None') {
-          const hostNodeId = `k8snode-${p.node.replace(/[^a-zA-Z0-9]/g, '_')}`;
+          const hostNodeId = `k8snode-${cleanId(p.node)}`;
           nsEdges.push({
             id: `edge-${podId}-${hostNodeId}`,
             source: podId,
@@ -873,7 +886,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
       // Route Service → Pod
       nsSvcs.forEach(s => {
-        const svcId = `svc-${ns}-${s.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const svcId = nsNodeId('svc', ns, s.name);
         nsPods.forEach(p => {
           // Real Kubernetes routing: a Service selects pods whose labels contain
           // every selector key/value. Fall back to name matching only when the
@@ -893,7 +906,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
             matched = p.name.includes(s.name);
           }
           if (matched) {
-            const podId = `pod-${ns}-${p.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            const podId = nsNodeId('pod', ns, p.name);
             nsEdges.push({
               id: `edge-${svcId}-${podId}`,
               source: svcId,
@@ -916,7 +929,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
     // Cross-Panel Backing Process & Node Mapping
     if (filteredContainers.length > 0 && filteredPods.length > 0) {
       filteredPods.forEach(p => {
-        const podId = `pod-${p.namespace}-${p.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const podId = nsNodeId('pod', p.namespace, p.name);
         filteredContainers.forEach(c => {
           if (c.name.startsWith('k8s_')) {
             const parts = c.name.split('_');
@@ -948,7 +961,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
     if (filteredContainers.length > 0 && filteredNodes.length > 0) {
       filteredNodes.forEach(n => {
-        const nodeId = `k8snode-${n.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const nodeId = `k8snode-${cleanId(n.name)}`;
         filteredContainers.forEach(c => {
           if (c.name === n.name || c.name.includes(n.name) || n.name.includes(c.name)) {
             const dockerNodeId = `docker-${c.id.slice(0, 12)}`;
@@ -1193,7 +1206,12 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
     }
   }, []);
 
-  // Map the selectedNodeId to its corresponding rich raw resource
+  // Map the selectedNodeId to its corresponding rich raw resource.
+  //
+  // Ids are matched by REGENERATING them from each resource rather than by
+  // parsing them apart: a namespace like "kube-system" contains the same "-"
+  // the id uses as a separator, so splitting on it silently failed to find the
+  // resource (and the drawer never opened for those objects).
   const selectedResource = useMemo(() => {
     if (!selectedNodeId) return null;
 
@@ -1210,44 +1228,91 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       return { type: 'port', data: { id: selectedNodeId, parentContainer: container } };
     }
 
-    if (selectedNodeId.startsWith('svc-')) {
-      const match = selectedNodeId.match(/^svc-([^-]+)-(.*)$/);
-      if (match) {
-        const ns = match[1];
-        const rawName = match[2];
-        const svc = effK8s.services.find(s => s.namespace === ns && s.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
-        if (svc) return { type: 'service', data: svc };
-      }
-    }
+    const svc = effK8s.services.find(s => nsNodeId('svc', s.namespace, s.name) === selectedNodeId);
+    if (svc) return { type: 'service', data: svc };
 
-    if (selectedNodeId.startsWith('deploy-')) {
-      const match = selectedNodeId.match(/^deploy-([^-]+)-(.*)$/);
-      if (match) {
-        const ns = match[1];
-        const rawName = match[2];
-        const dep = effK8s.deployments.find(d => d.namespace === ns && d.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
-        if (dep) return { type: 'deployment', data: dep };
-      }
-    }
+    const dep = effK8s.deployments.find(d => nsNodeId('deploy', d.namespace, d.name) === selectedNodeId);
+    if (dep) return { type: 'deployment', data: dep };
 
-    if (selectedNodeId.startsWith('pod-')) {
-      const match = selectedNodeId.match(/^pod-([^-]+)-(.*)$/);
-      if (match) {
-        const ns = match[1];
-        const rawName = match[2];
-        const pod = effK8s.pods.find(p => p.namespace === ns && p.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
-        if (pod) return { type: 'pod', data: pod };
-      }
-    }
+    const pod = effK8s.pods.find(p => nsNodeId('pod', p.namespace, p.name) === selectedNodeId);
+    if (pod) return { type: 'pod', data: pod };
 
-    if (selectedNodeId.startsWith('k8snode-')) {
-      const rawName = selectedNodeId.replace('k8snode-', '');
-      const node = effK8s.nodes.find(n => n.name.replace(/[^a-zA-Z0-9]/g, '_') === rawName);
-      if (node) return { type: 'k8s-node', data: node };
-    }
+    const node = effK8s.nodes.find(n => `k8snode-${cleanId(n.name)}` === selectedNodeId);
+    if (node) return { type: 'k8s-node', data: node };
 
     return null;
   }, [selectedNodeId, effContainers, effK8s]);
+
+  // What (if anything) this selection can be deep-inspected as.
+  const inspectTarget = useMemo(() => {
+    if (!selectedResource) return null;
+    const d: any = selectedResource.data;
+    switch (selectedResource.type) {
+      case 'docker': return { label: 'JSON', path: `/api/docker/inspect/${d.id}` };
+      case 'pod': return { label: 'YAML', path: `/api/k8s/inspect/pod/${d.namespace}/${d.name}` };
+      case 'service': return { label: 'YAML', path: `/api/k8s/inspect/service/${d.namespace}/${d.name}` };
+      case 'deployment': return { label: 'YAML', path: `/api/k8s/inspect/deployment/${d.namespace}/${d.name}` };
+      case 'k8s-node': return { label: 'YAML', path: `/api/k8s/inspect/node/${d.name}` };
+      default: return null;
+    }
+  }, [selectedResource]);
+
+  // Pull the full object as soon as a card is selected — the drawer's Details,
+  // Related, Manifest and Events tabs all read from this one payload.
+  useEffect(() => {
+    if (!inspectTarget) { setInspect(null); setInspectError(''); return; }
+    let cancelled = false;
+    setInspect(null);
+    setInspectError('');
+    setInspectLoading(true);
+    setManifestView('yaml');
+    const q = source === 'local' ? '' : `?vm=${encodeURIComponent(source)}`;
+    fetch(inspectTarget.path + q)
+      .then(r => r.json())
+      .then(d => {
+        if (cancelled) return;
+        if (d.error) setInspectError(d.error);
+        else setInspect(d);
+      })
+      .catch(e => { if (!cancelled) setInspectError(e.message || 'Inspect failed.'); })
+      .finally(() => { if (!cancelled) setInspectLoading(false); });
+    return () => { cancelled = true; };
+  }, [inspectTarget, source]);
+
+  // Jump from a related object straight to its card on the canvas.
+  const focusRelated = useCallback((item: any) => {
+    let id = '';
+    if (item.focus === 'pod' && item.namespace) id = nsNodeId('pod', item.namespace, item.name);
+    else if (item.focus === 'service' && item.namespace) id = nsNodeId('svc', item.namespace, item.name);
+    else if (item.focus === 'deployment' && item.namespace) id = nsNodeId('deploy', item.namespace, item.name);
+    else if (item.focus === 'k8s-node') id = `k8snode-${cleanId(item.name)}`;
+    if (!id || !rawNodes.some(n => n.id === id)) return false;
+    setSelectedNodeId(id);
+    setDrawerTab('details');
+    fitView({ nodes: [{ id }], duration: 500, padding: 1.2, maxZoom: 1 });
+    return true;
+  }, [rawNodes, fitView]);
+
+  const relationGroups: Array<{ title: string; items: any[] }> = inspect?.groups || [];
+  const relatedCount = relationGroups.reduce((n, g) => n + g.items.length, 0);
+  const warningEventCount = (inspect?.events || []).filter((e: any) => e.type && e.type !== 'Normal').length;
+
+  const copyManifest = useCallback((text: string) => {
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
+  }, []);
+
+  const downloadManifest = useCallback((text: string, filename: string) => {
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, []);
 
   // Drawer action helper functions
   const fetchLogs = async () => {
@@ -1369,6 +1434,30 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       dockerRunning,
     };
   }, [effContainers, effK8s]);
+
+  // Container list for the details pane: the live object's view when the deep
+  // inspect succeeded, otherwise the thinner list-endpoint shape.
+  const detailContainers: any[] = inspect?.containers?.length
+    ? inspect.containers
+    : ((selectedResource?.data as any)?.containers || []);
+
+  const manifestText: string = (manifestView === 'describe' ? inspect?.describe : inspect?.yaml) || '';
+
+  const SectionTitle = ({ children }: { children: React.ReactNode }) => (
+    <span style={{ fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+      {children}
+    </span>
+  );
+
+  const MiniTag = ({ color, children }: { color: string; children: React.ReactNode }) => (
+    <span style={{
+      fontSize: '9px', fontWeight: 600, color,
+      background: `${color}18`, border: `1px solid ${color}40`,
+      borderRadius: '5px', padding: '1px 5px', wordBreak: 'break-all'
+    }}>
+      {children}
+    </span>
+  );
 
   const StatChip = ({ color, label, value, warn }: { color: string; label: string; value: string; warn?: boolean }) => (
     <div style={{
@@ -1830,7 +1919,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
               position: 'absolute',
               top: 0,
               right: 0,
-              width: '380px',
+              width: '440px',
+              maxWidth: '85%',
               height: '100%',
               background: 'rgba(9, 15, 30, 0.95)',
               backdropFilter: 'blur(16px)',
@@ -1866,77 +1956,45 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
               />
             </div>
 
-            {/* Tab navigation */}
-            <div style={{ display: 'flex', gap: '2px', borderBottom: '1px solid rgba(255,255,255,0.06)', marginBottom: '14px' }}>
-              <button
-                onClick={() => setDrawerTab('details')}
-                style={{
-                  background: 'transparent',
-                  color: drawerTab === 'details' ? '#38bdf8' : '#94a3b8',
-                  border: 'none',
-                  borderBottom: drawerTab === 'details' ? '2px solid #38bdf8' : 'none',
-                  padding: '6px 12px',
-                  fontSize: '12px',
-                  cursor: 'pointer',
-                  fontWeight: 500
-                }}
-              >
-                Details
-              </button>
-
-              {source === 'local' && (selectedResource.type === 'docker' || selectedResource.type === 'pod') && (
+            {/* Tab navigation — Related/Manifest/Events come from the deep
+                inspect call, so they work for remote VM sources too. */}
+            <div style={{ display: 'flex', gap: '2px', flexWrap: 'wrap', borderBottom: '1px solid rgba(255,255,255,0.06)', marginBottom: '14px' }}>
+              {([
+                { key: 'details', label: 'Details', show: true, badge: 0 },
+                { key: 'related', label: 'Related', show: relationGroups.length > 0 || inspectLoading, badge: relatedCount },
+                { key: 'yaml', label: inspectTarget?.label === 'JSON' ? 'JSON' : 'YAML', show: !!inspectTarget, badge: 0 },
+                { key: 'events', label: 'Events', show: (inspect?.events || []).length > 0, badge: warningEventCount },
+                { key: 'logs', label: 'Logs', show: source === 'local' && (selectedResource.type === 'docker' || selectedResource.type === 'pod'), badge: 0 },
+                { key: 'actions', label: 'Actions', show: source === 'local' && ['docker', 'pod', 'deployment'].includes(selectedResource.type), badge: 0 },
+                { key: 'security', label: 'Security', show: source === 'local' && selectedResource.type === 'docker', badge: 0 },
+              ] as const).filter(t => t.show).map(t => (
                 <button
-                  onClick={() => setDrawerTab('logs')}
+                  key={t.key}
+                  onClick={() => setDrawerTab(t.key as typeof drawerTab)}
                   style={{
                     background: 'transparent',
-                    color: drawerTab === 'logs' ? '#38bdf8' : '#94a3b8',
+                    color: drawerTab === t.key ? '#38bdf8' : '#94a3b8',
                     border: 'none',
-                    borderBottom: drawerTab === 'logs' ? '2px solid #38bdf8' : 'none',
-                    padding: '6px 12px',
+                    borderBottom: drawerTab === t.key ? '2px solid #38bdf8' : '2px solid transparent',
+                    padding: '6px 10px',
                     fontSize: '12px',
                     cursor: 'pointer',
-                    fontWeight: 500
+                    fontWeight: 500,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '5px'
                   }}
                 >
-                  Logs
+                  {t.label}
+                  {t.badge > 0 && (
+                    <span style={{
+                      background: t.key === 'events' ? 'rgba(244, 63, 94, 0.2)' : 'rgba(148, 163, 184, 0.15)',
+                      color: t.key === 'events' ? '#fda4af' : '#cbd5e1',
+                      borderRadius: '7px', padding: '0 5px', fontSize: '9.5px', fontWeight: 700
+                    }}>{t.badge}</span>
+                  )}
                 </button>
-              )}
-
-              {source === 'local' && (selectedResource.type === 'docker' || selectedResource.type === 'pod' || selectedResource.type === 'deployment') && (
-                <button
-                  onClick={() => setDrawerTab('actions')}
-                  style={{
-                    background: 'transparent',
-                    color: drawerTab === 'actions' ? '#38bdf8' : '#94a3b8',
-                    border: 'none',
-                    borderBottom: drawerTab === 'actions' ? '2px solid #38bdf8' : 'none',
-                    padding: '6px 12px',
-                    fontSize: '12px',
-                    cursor: 'pointer',
-                    fontWeight: 500
-                  }}
-                >
-                  Actions
-                </button>
-              )}
-
-              {source === 'local' && selectedResource.type === 'docker' && (
-                <button
-                  onClick={() => setDrawerTab('security')}
-                  style={{
-                    background: 'transparent',
-                    color: drawerTab === 'security' ? '#38bdf8' : '#94a3b8',
-                    border: 'none',
-                    borderBottom: drawerTab === 'security' ? '2px solid #38bdf8' : 'none',
-                    padding: '6px 12px',
-                    fontSize: '12px',
-                    cursor: 'pointer',
-                    fontWeight: 500
-                  }}
-                >
-                  Security
-                </button>
-              )}
+              ))}
             </div>
 
             {/* Drawer Tab Contents */}
@@ -2002,29 +2060,253 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
                     </tbody>
                   </table>
 
-                  {/* K8s Pod internal containers */}
-                  {selectedResource.type === 'pod' && selectedResource.data.containers && (
-                    <div style={{ marginTop: '10px' }}>
-                      <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                        Pod Containers ({selectedResource.data.ready})
-                      </span>
+                  {/* ── Everything the live object itself reports ──────────
+                      Fetched straight from the cluster on selection, so the
+                      panel shows the full spec/status, not just the fields the
+                      list endpoint happened to carry. */}
+                  {inspectLoading && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#38bdf8', fontSize: 11, padding: '6px 0' }}>
+                      <RefreshCw size={11} className="animate-spin" /> Reading the full object from {source === 'local' ? 'this machine' : source}…
+                    </div>
+                  )}
+                  {inspectError && (
+                    <div style={{ background: 'rgba(244,63,94,0.08)', border: '1px solid rgba(244,63,94,0.35)', color: '#fda4af', padding: '8px 10px', borderRadius: '6px', fontSize: '11px' }}>
+                      <AlertTriangle size={11} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
+                      {inspectError}
+                    </div>
+                  )}
+
+                  {inspect?.summary?.length > 0 && (
+                    <div>
+                      <SectionTitle>Live spec &amp; status</SectionTitle>
+                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <tbody>
+                          {inspect.summary.map((row: any) => (
+                            <tr key={row.label} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                              <td style={{ padding: '6px 0', color: '#64748b', width: '120px', verticalAlign: 'top' }}>{row.label}</td>
+                              <td style={{ padding: '6px 0', fontWeight: 500, wordBreak: 'break-word' }}>{row.value}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Containers: the live object's view when we have it,
+                      otherwise whatever the list payload gave us. */}
+                  {detailContainers.length > 0 && (
+                    <div style={{ marginTop: '4px' }}>
+                      <SectionTitle>Containers ({detailContainers.length})</SectionTitle>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '6px' }}>
-                        {selectedResource.data.containers.map((c: any, idx: number) => (
-                          <div key={idx} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '6px', padding: '8px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600 }}>
-                              <span>{c.name}</span>
-                              <span style={{ color: c.ready ? '#10b981' : '#f59e0b', fontSize: '10px' }}>
-                                {c.ready ? 'Ready' : 'Not Ready'} ({c.state})
+                        {detailContainers.map((c: any, idx: number) => (
+                          <div key={`${c.name}-${idx}`} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '6px', padding: '8px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontWeight: 600 }}>
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {c.name}
+                                {c.init && <span style={{ marginLeft: 5, fontSize: 8.5, color: '#818cf8', border: '1px solid rgba(129,140,248,0.4)', borderRadius: 4, padding: '0 4px' }}>INIT</span>}
                               </span>
+                              {c.ready !== undefined && (
+                                <span style={{ color: c.ready ? '#10b981' : '#f59e0b', fontSize: '10px', whiteSpace: 'nowrap' }}>
+                                  {c.ready ? 'Ready' : 'Not Ready'}{c.state ? ` (${c.state})` : ''}
+                                </span>
+                              )}
                             </div>
                             <div style={{ fontSize: '10px', color: '#94a3b8', wordBreak: 'break-all', marginTop: '4px' }}>
                               Image: {c.image}
                             </div>
+                            {c.reason && (
+                              <div style={{ fontSize: '10px', color: '#fda4af', marginTop: '3px' }}>{c.reason}</div>
+                            )}
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
+                              {c.restarts > 0 && <MiniTag color="#f43f5e">{c.restarts} restarts</MiniTag>}
+                              {c.ports && <MiniTag color="#818cf8">ports {c.ports}</MiniTag>}
+                              {c.requests && <MiniTag color="#34d399">requests {c.requests}</MiniTag>}
+                              {c.limits && <MiniTag color="#fbbf24">limits {c.limits}</MiniTag>}
+                              {c.probes && <MiniTag color="#38bdf8">probes {c.probes}</MiniTag>}
+                            </div>
+                            {c.mounts && (
+                              <div style={{ fontSize: '9.5px', color: '#64748b', marginTop: '5px', wordBreak: 'break-all' }}>
+                                Mounts: {c.mounts}
+                              </div>
+                            )}
+                            {c.command && (
+                              <div style={{ fontSize: '9.5px', color: '#64748b', marginTop: '3px', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                                $ {c.command}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
                     </div>
                   )}
+
+                  {inspect && Object.keys(inspect.labels || {}).length > 0 && (
+                    <div>
+                      <SectionTitle>Labels</SectionTitle>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
+                        {Object.entries(inspect.labels).map(([k, v]) => (
+                          <MiniTag key={k} color="#93c5fd">{k}={String(v)}</MiniTag>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {inspect && Object.keys(inspect.annotations || {}).length > 0 && (
+                    <details style={{ marginTop: '4px' }}>
+                      <summary style={{ cursor: 'pointer', fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                        Annotations ({Object.keys(inspect.annotations).length})
+                      </summary>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '6px' }}>
+                        {Object.entries(inspect.annotations).map(([k, v]) => (
+                          <div key={k} style={{ fontSize: '10px', wordBreak: 'break-all' }}>
+                            <span style={{ color: '#93c5fd' }}>{k}</span>
+                            <span style={{ color: '#64748b' }}>: {String(v).slice(0, 300)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
+
+              {/* Tab: Related — what this object is actually wired to */}
+              {drawerTab === 'related' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {inspectLoading && (
+                    <div style={{ padding: '24px 0', textAlign: 'center', color: '#94a3b8' }}>
+                      <RefreshCw size={16} className="animate-spin" style={{ display: 'block', margin: '0 auto 8px auto' }} />
+                      Working out the connections…
+                    </div>
+                  )}
+                  {!inspectLoading && !relationGroups.length && (
+                    <div style={{ color: '#64748b', fontSize: '11.5px' }}>
+                      Nothing else in the cluster references this object.
+                    </div>
+                  )}
+                  {relationGroups.map(group => (
+                    <div key={group.title}>
+                      <SectionTitle>{group.title}</SectionTitle>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '6px' }}>
+                        {group.items.map((item: any, idx: number) => {
+                          const clickable = !!item.focus;
+                          const dot = item.health === 'failed' ? '#f43f5e'
+                            : item.health === 'degraded' ? '#fbbf24'
+                            : item.health === 'healthy' ? '#10b981' : '#64748b';
+                          return (
+                            <div
+                              key={`${item.kind}-${item.name}-${idx}`}
+                              onClick={() => clickable && focusRelated(item)}
+                              title={clickable ? 'Open this card on the map' : undefined}
+                              style={{
+                                background: 'rgba(255,255,255,0.03)',
+                                border: '1px solid rgba(255,255,255,0.06)',
+                                borderRadius: '6px',
+                                padding: '8px',
+                                cursor: clickable ? 'pointer' : 'default'
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <span style={{ width: 7, height: 7, borderRadius: '50%', background: dot, flexShrink: 0 }} />
+                                <span style={{ fontSize: '8.5px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                                  {item.kind}
+                                </span>
+                                <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {item.name}
+                                </span>
+                                {item.namespace && item.namespace !== selectedResource.data.namespace && (
+                                  <span style={{ fontSize: '9px', color: '#64748b' }}>ns: {item.namespace}</span>
+                                )}
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>{item.via}</div>
+                              {item.detail && (
+                                <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px', wordBreak: 'break-word' }}>{item.detail}</div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Tab: Manifest — the object's own YAML (or docker inspect JSON) */}
+              {drawerTab === 'yaml' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', height: '100%' }}>
+                  <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    {inspect?.describe !== undefined && inspect?.describe !== '' && (
+                      <div style={{ display: 'flex', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '6px', overflow: 'hidden' }}>
+                        {(['yaml', 'describe'] as const).map(v => (
+                          <button
+                            key={v}
+                            onClick={() => setManifestView(v)}
+                            style={{
+                              background: manifestView === v ? 'rgba(56,189,248,0.15)' : 'transparent',
+                              color: manifestView === v ? '#38bdf8' : '#94a3b8',
+                              border: 'none', padding: '4px 10px', fontSize: '11px', cursor: 'pointer', fontWeight: 600
+                            }}
+                          >
+                            {v === 'yaml' ? (inspectTarget?.label === 'JSON' ? 'JSON' : 'YAML') : 'Describe'}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => copyManifest(manifestText)}
+                      style={{ marginLeft: 'auto', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: copied ? '#10b981' : '#fff', padding: '4px 8px', cursor: 'pointer', fontSize: '11px' }}
+                    >
+                      {copied ? 'Copied' : 'Copy'}
+                    </button>
+                    <button
+                      onClick={() => downloadManifest(manifestText, `${selectedResource.data.name}.${inspectTarget?.label === 'JSON' ? 'json' : manifestView === 'yaml' ? 'yaml' : 'txt'}`)}
+                      style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: '#fff', padding: '4px 8px', cursor: 'pointer', fontSize: '11px' }}
+                    >
+                      Download
+                    </button>
+                  </div>
+
+                  {inspectLoading ? (
+                    <div style={{ padding: '30px 0', textAlign: 'center', color: '#94a3b8' }}>
+                      <RefreshCw size={18} className="animate-spin" style={{ display: 'block', margin: '0 auto 10px auto' }} /> Fetching the manifest…
+                    </div>
+                  ) : inspectError ? (
+                    <div style={{ background: 'rgba(244,63,94,0.1)', border: '1px solid #f43f5e', color: '#f43f5e', padding: '10px', borderRadius: '6px' }}>
+                      <AlertTriangle size={14} style={{ display: 'inline', marginRight: '4px' }} /> {inspectError}
+                    </div>
+                  ) : (
+                    <pre style={{
+                      background: '#020617', color: '#a5b4fc', padding: '10px', borderRadius: '6px',
+                      fontFamily: 'monospace', fontSize: '10px', overflow: 'auto', maxHeight: '420px',
+                      margin: 0, border: '1px solid rgba(255,255,255,0.04)', textAlign: 'left',
+                      whiteSpace: 'pre', wordBreak: 'normal'
+                    }}>
+                      {manifestText || 'Nothing returned.'}
+                    </pre>
+                  )}
+                </div>
+              )}
+
+              {/* Tab: Events — the cluster's own explanation of the current state */}
+              {drawerTab === 'events' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {(inspect?.events || []).length === 0 && (
+                    <div style={{ color: '#64748b', fontSize: '11.5px' }}>No recent events for this object.</div>
+                  )}
+                  {(inspect?.events || []).map((e: any, idx: number) => (
+                    <div key={idx} style={{
+                      background: e.type === 'Normal' ? 'rgba(255,255,255,0.03)' : 'rgba(244,63,94,0.08)',
+                      border: `1px solid ${e.type === 'Normal' ? 'rgba(255,255,255,0.06)' : 'rgba(244,63,94,0.3)'}`,
+                      borderRadius: '6px', padding: '8px'
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                        <span style={{ fontWeight: 700, color: e.type === 'Normal' ? '#cbd5e1' : '#fda4af', fontSize: '11px' }}>
+                          {e.reason}{e.count > 1 ? ` ×${e.count}` : ''}
+                        </span>
+                        <span style={{ fontSize: '9.5px', color: '#64748b', whiteSpace: 'nowrap' }}>{formatAge(e.time)}</span>
+                      </div>
+                      <div style={{ fontSize: '10.5px', color: '#94a3b8', marginTop: '4px', lineHeight: 1.4 }}>{e.message}</div>
+                    </div>
+                  ))}
                 </div>
               )}
 

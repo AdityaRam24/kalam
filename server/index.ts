@@ -11,6 +11,7 @@ import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
 import { llmRouter } from './llm.js';
 import { vmsRouter } from './vms.js';
 import { graphRouter } from './graph/router.js';
+import { inspectRouter } from './k8s/inspect.js';
 import { parseAllowedHosts, corsOriginCheck } from './cors.js';
 
 dotenv.config();
@@ -38,6 +39,9 @@ app.use(llmRouter);
 app.use(vmsRouter);
 // Infrastructure dependency graph: root-cause ranking + blast radius.
 app.use(graphRouter);
+// Deep inspect for a single object: YAML, describe, events, and what it is
+// connected to. Backs the topology map's detail drawer.
+app.use(inspectRouter);
 
 // Helper for safe command execution
 async function runCmd(cmd: string): Promise<{ stdout: string; stderr: string; success: boolean }> {

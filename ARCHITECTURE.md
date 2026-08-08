@@ -248,6 +248,45 @@ snapshot it diagnoses, so every finding carries `rootCause`, `explains`, or
 panel and dims collateral findings; the CLI gains `kalam vm graph <name>` and
 `kalam vm impact <name> <id>`.
 
+### 2.2b Object inspect — YAML, describe, events, and what it connects to
+
+The graph above answers *cluster-wide* questions. The inspect API answers the
+question asked one card at a time: "I clicked this pod — what is it, and what is
+it wired to?" `server/k8s/inspect.ts` goes back to the cluster for the whole
+object, and `server/k8s/relate.ts` turns that snapshot into connections.
+
+```
+GET /api/k8s/inspect/:kind/:namespace/:name[?vm=<name>]   -> full object + relations
+GET /api/k8s/inspect/node/:name[?vm=<name>]               -> cluster-scoped form
+GET /api/docker/inspect/:id[?vm=<name>]                   -> docker inspect JSON
+```
+
+One call returns the object's `yaml`, its `describe`, its recent `events`
+(newest first), a `summary` of the fields a describe would show, per-container
+detail (image, ports, requests/limits, probes, restarts, mounts, command), its
+labels/annotations, and `groups` of related objects. `?vm=` runs the same
+read-only `kubectl get`/`describe` over SSH, folded into one round trip with
+`@@TAG@@` markers, so a remote VM source behaves identically to the local one.
+
+Relations are computed, never guessed by name:
+
+| From | Finds |
+|---|---|
+| Pod | owning workload (ReplicaSet collapsed to its Deployment), Services whose **selector** matches — annotated with whether this pod is actually a *ready endpoint*, the Ingress publishing those Services, its node, its ConfigMaps / Secrets / PVCs / ServiceAccount (volumes, `envFrom`, single env keys, image pull secrets), and its sibling replicas |
+| Deployment / StatefulSet / DaemonSet | pods matching its selector, Services matching its **pod template** labels, Ingresses, node spread, template config refs |
+| Service | Endpoints split into serving vs not-serving pods, the workloads behind them, Ingresses |
+| Node | pods scheduled on it, the Services that therefore depend on it, capacity/taints/pressure |
+
+`relate.ts` is pure — it takes parsed `kubectl -o json` and returns plain data —
+so every rule above is unit-tested from fixtures in
+`server/__tests__/relate.test.ts`. Secrets are deliberately not an inspectable
+kind: the endpoint hands back raw YAML.
+
+**Where it shows up:** the topology map's detail drawer gains **Related**,
+**YAML/JSON** (with Describe toggle, copy and download) and **Events** tabs, and
+its Details tab now shows the live object rather than the fields the list
+endpoint happened to carry. Clicking a related object jumps to its card.
+
 ### 2.3 PCAI Assistant (RAG chat)
 
 ```mermaid
