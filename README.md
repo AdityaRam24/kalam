@@ -12,6 +12,7 @@ Kalam is an **Agentic DevOps Dashboard & Chatbot** that captures locally running
 * **☸️ Kubernetes Explorer**: Sectioned view of nodes, deployments, services, and pods. Restarts rollouts, deletes pods, and scales deployment replica counts.
 * **📖 Kubectl Reference Guide & Tools**: A searchable catalog of ~90 commands where every entry is labelled by what it can do to your cluster (read-only / changes state / destructive), fills in its own `<placeholders>`, and — when it is read-only — runs against a connected VM with the output inline. Plus a validating command builder, eight diagnostic runbooks, and a practice quiz.
 * **🕸️ Dependency Graph & Root-Cause Analysis**: Builds a typed graph of what depends on what (VMs → nodes → pods → services/PVCs, plus platform dependencies like SPIRE, CNI and CSI drivers) from one read-only SSH pass. Turns fourteen red pods into one cause with thirteen casualties, and answers "what breaks if I stop this?" before you stop it.
+* **🕓 Cluster Change History**: Answers "what changed, when, and who did it" — the question Kubernetes itself cannot, since its events expire after about an hour. Kalam fingerprints the cluster (workloads, pods, nodes, networking, storage, config and RBAC), diffs each capture against the last, and keeps a durable changelog with field-level before→after values, the writer named from `managedFields`, and Deployment rollout revisions. Read-only, opt-in, and it never stores secret contents.
 * **💬 Agentic Chat Console**: Injects active cluster details into the prompt context of Google Gemini (`gemini-3-flash-preview`) or Local LLMs (Ollama, LM Studio), draws customized mermaid charts dynamically, and recommends action triggers that execute upon user approval.
 
 ---
@@ -58,6 +59,23 @@ Alternatively, copy `.env` configuration file and provide your `GEMINI_API_KEY`:
 ```bash
 cp .env.example .env  # Or edit `.env` directly
 ```
+
+### Optional: record cluster changes continuously
+
+The Change History tab compares captures of the cluster, so it needs something
+to take them. Press **Capture now** whenever you like, or record continuously by
+setting these before starting the server:
+
+```bash
+KALAM_HISTORY=1                  # opt in — nothing polls your cluster otherwise
+KALAM_HISTORY_INTERVAL_SEC=300   # how often to capture (default 5 minutes)
+KALAM_HISTORY_SOURCES=local      # or: all — this machine plus every inventory VM
+KALAM_HISTORY_RETENTION_DAYS=30  # how far back the changelog is kept
+```
+
+Captures only ever run `kubectl get`. They are stored in `server/history/data/`
+(gitignored) as compact fingerprints — never full manifests, never Secret or
+ConfigMap contents, and inline env values are hashed rather than written down.
 
 ### 3. Run in Development Mode
 Start both frontend Vite client and Express server concurrently:
@@ -168,6 +186,11 @@ Run a single task without entering the REPL:
 * `kalam vm graph <name>` — build the dependency graph and rank the root causes.
 * `kalam vm impact <name> <id>` — blast radius: what is already broken downstream of a resource, and what is healthy but at risk.
 * `kalam vm peers <name>` — find other VMs visible from this host.
+
+**Change history (read-only)**
+* `kalam history [--source <local|vm>] [--since 24h]` — the cluster changelog: what changed, when, and who did it.
+* `kalam history capture [--source <name>]` — take a capture now; the one after it can show changes.
+* `kalam vm history <name>` — the same timeline for a VM's cluster.
 
 **Local DevOps**
 * `kalam status` — check local Docker and Kubernetes daemons.

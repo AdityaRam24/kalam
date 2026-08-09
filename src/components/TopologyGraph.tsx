@@ -39,7 +39,8 @@ import {
   Rocket,
   Box,
   Server,
-  Network
+  Network,
+  History
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -92,7 +93,7 @@ function formatAge(creationTime: string | number | undefined): string {
 
 // ─── Custom Premium DevOps Card Node ────────────────────────────────────────
 const DevOpsNode = memo(({ id, data }: NodeProps) => {
-  const { type, name, status, ip, ports, image, ready, replicas, role, state, isHovered, isFocused, onHover, heatmapMode, restarts, created } = data;
+  const { type, name, status, ip, ports, image, ready, replicas, role, state, isHovered, isFocused, onHover, heatmapMode, restarts, created, changeInfo } = data;
 
   // Theme configuration per resource type — one flat accent color each, no gradients
   const themes: Record<string, { icon: LucideIcon; color: string; label: string }> = {
@@ -146,6 +147,13 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
     const intensity = Math.min(restarts / 5, 1);
     accentColor = '#f43f5e';
     heatmapGlow = `0 0 ${12 + intensity * 16}px rgba(244, 63, 94, ${0.4 + intensity * 0.5})`;
+  } else if (heatmapMode === 'changed' && changeInfo) {
+    // Recency drives the intensity: something touched minutes ago is what you
+    // are looking for when a cluster starts misbehaving.
+    const ageMs = Date.now() - Date.parse(changeInfo.lastAt);
+    const fresh = Math.max(0, 1 - ageMs / (24 * 60 * 60 * 1000));
+    accentColor = changeInfo.severity === 'warning' ? '#f43f5e' : '#f59e0b';
+    heatmapGlow = `0 0 ${10 + fresh * 20}px ${accentColor}${Math.round(60 + fresh * 120).toString(16)}`;
   } else if (heatmapMode === 'age' && created) {
     const parsedTime = Date.parse(created.toString());
     if (!isNaN(parsedTime)) {
@@ -225,6 +233,20 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
               </div>
             )}
           </div>
+          {/* Recent-change badge — only in the "changed" overlay */}
+          {heatmapMode === 'changed' && changeInfo && !isPortType && (
+            <span
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: '2px',
+                color: '#fde68a', fontSize: '9px', fontWeight: 700,
+                background: 'rgba(245, 158, 11, 0.2)', border: '1px solid rgba(245, 158, 11, 0.35)',
+                padding: '1px 5px', borderRadius: '6px', flexShrink: 0
+              }}
+              title={`${changeInfo.summary} (${changeInfo.count} change${changeInfo.count === 1 ? '' : 's'} in 24h)`}
+            >
+              {changeInfo.kind}
+            </span>
+          )}
           {/* Restart badge (persistent — it signals a problem) */}
           {restarts > 0 && (
             <span style={{
@@ -470,7 +492,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedNamespace, setSelectedNamespace] = useState('All');
   const [selectedType, setSelectedType] = useState('All');
-  const [heatmapMode, setHeatmapMode] = useState<'none' | 'restarts' | 'age'>('none');
+  const [heatmapMode, setHeatmapMode] = useState<'none' | 'restarts' | 'age' | 'changed'>('none');
+  // key -> last recorded change, for the "recently changed" overlay.
+  const [changeIndex, setChangeIndex] = useState<Record<string, { count: number; lastAt: string; kind: string; severity: string; summary: string }>>({});
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   // ── Source selector: this machine, or any SSH-connected VM ──
@@ -540,7 +564,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
   // Selected Detail Drawer state
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [drawerTab, setDrawerTab] = useState<'details' | 'related' | 'yaml' | 'events' | 'logs' | 'actions' | 'security'>('details');
+  const [drawerTab, setDrawerTab] = useState<'details' | 'related' | 'yaml' | 'events' | 'history' | 'logs' | 'actions' | 'security'>('details');
 
   // Deep inspect: the full object (YAML + describe + events) and everything the
   // backend worked out that it is connected to.
@@ -549,6 +573,11 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
   const [inspectError, setInspectError] = useState('');
   const [manifestView, setManifestView] = useState<'yaml' | 'describe'>('yaml');
   const [copied, setCopied] = useState(false);
+
+  // This object's recorded change history (see server/history). Separate from
+  // `inspect` because it comes from Kalam's own log, not from the cluster.
+  const [objectHistory, setObjectHistory] = useState<any | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   // Logs state
   const [logs, setLogs] = useState('');
@@ -794,6 +823,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           data: {
             type: 'service',
             name: s.name,
+            namespace: ns,
             svcType: s.type,
             clusterIp: s.clusterIp,
             ports: portsTrunc,
@@ -814,6 +844,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           data: {
             type: 'deployment',
             name: d.name,
+            namespace: ns,
             ready: d.ready,
             replicas: d.replicas,
             available: d.available,
@@ -835,6 +866,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           data: {
             type: 'pod',
             name: p.name,
+            namespace: ns,
             status: p.status,
             ready: p.ready,
             ip: p.ip,
@@ -1129,6 +1161,13 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       const isDimmed = (!!hoveredNodeId && !isFocused) || (!!searchTerm && !searchMatch);
       const isSearchHighlighted = !!searchTerm && searchMatch;
 
+      const d: any = node.data || {};
+      const historyKey = d.type === 'pod' ? `Pod/${d.namespace}/${d.name}`
+        : d.type === 'service' ? `Service/${d.namespace}/${d.name}`
+        : d.type === 'deployment' ? `Deployment/${d.namespace}/${d.name}`
+        : d.type === 'k8s-node' ? `Node/${d.name}`
+        : '';
+
       return {
         ...node,
         data: {
@@ -1137,6 +1176,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           isFocused,
           isSearchHighlighted,
           heatmapMode,
+          changeInfo: historyKey ? changeIndex[historyKey] : undefined,
           onHover: setHoveredNodeId
         },
         style: {
@@ -1145,7 +1185,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         }
       };
     });
-  }, [layoutedNodes, problemVisibleIds, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode]);
+  }, [layoutedNodes, problemVisibleIds, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode, changeIndex]);
 
   // Map raw edges & inject states (hover paths)
   const flowEdges = useMemo(() => {
@@ -1278,6 +1318,42 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       .finally(() => { if (!cancelled) setInspectLoading(false); });
     return () => { cancelled = true; };
   }, [inspectTarget, source]);
+
+  // What Kalam has recorded happening to this object. Kubernetes itself cannot
+  // answer this — the entries come from Kalam's own capture log, so an empty
+  // result means "nothing captured yet", not "nothing ever happened".
+  useEffect(() => {
+    if (!selectedResource || selectedResource.type === 'docker' || selectedResource.type === 'port') {
+      setObjectHistory(null);
+      return;
+    }
+    const d: any = selectedResource.data;
+    const kind = selectedResource.type === 'k8s-node' ? 'node' : selectedResource.type;
+    const path = d.namespace
+      ? `/api/history/object/${kind}/${encodeURIComponent(d.namespace)}/${encodeURIComponent(d.name)}`
+      : `/api/history/object/${kind}/${encodeURIComponent(d.name)}`;
+    let cancelled = false;
+    setObjectHistory(null);
+    setHistoryLoading(true);
+    fetch(`${path}?source=${encodeURIComponent(source)}`)
+      .then(r => r.json())
+      .then(h => { if (!cancelled) setObjectHistory(h); })
+      .catch(() => { if (!cancelled) setObjectHistory(null); })
+      .finally(() => { if (!cancelled) setHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedResource, source]);
+
+  // The "recently changed" overlay needs one small index for the whole canvas,
+  // so it is fetched once per source rather than per card.
+  useEffect(() => {
+    if (heatmapMode !== 'changed') return;
+    let cancelled = false;
+    fetch(`/api/history/summary?source=${encodeURIComponent(source)}&since=24h`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setChangeIndex(d.byKey || {}); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [heatmapMode, source, lastRefresh]);
 
   // Jump from a related object straight to its card on the canvas.
   const focusRelated = useCallback((item: any) => {
@@ -1746,6 +1822,24 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           >
             <Clock size={11} /> Age / Freshness
           </button>
+          <button
+            onClick={() => setHeatmapMode('changed')}
+            title="Highlight what Kalam recorded changing in the last 24 hours"
+            style={{
+              background: heatmapMode === 'changed' ? 'rgba(245, 158, 11, 0.15)' : 'transparent',
+              color: heatmapMode === 'changed' ? '#f59e0b' : '#94a3b8',
+              border: 'none',
+              padding: '6px 10px',
+              fontSize: '11px',
+              cursor: 'pointer',
+              fontWeight: 500,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px'
+            }}
+          >
+            <History size={11} /> Recently changed
+          </button>
         </div>
 
         {/* Fit View */}
@@ -1964,6 +2058,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
                 { key: 'related', label: 'Related', show: relationGroups.length > 0 || inspectLoading, badge: relatedCount },
                 { key: 'yaml', label: inspectTarget?.label === 'JSON' ? 'JSON' : 'YAML', show: !!inspectTarget, badge: 0 },
                 { key: 'events', label: 'Events', show: (inspect?.events || []).length > 0, badge: warningEventCount },
+                { key: 'history', label: 'Changes', show: !!objectHistory || historyLoading, badge: (objectHistory?.changes || []).length },
                 { key: 'logs', label: 'Logs', show: source === 'local' && (selectedResource.type === 'docker' || selectedResource.type === 'pod'), badge: 0 },
                 { key: 'actions', label: 'Actions', show: source === 'local' && ['docker', 'pod', 'deployment'].includes(selectedResource.type), badge: 0 },
                 { key: 'security', label: 'Security', show: source === 'local' && selectedResource.type === 'docker', badge: 0 },

@@ -12,6 +12,8 @@ import { llmRouter } from './llm.js';
 import { vmsRouter } from './vms.js';
 import { graphRouter } from './graph/router.js';
 import { inspectRouter } from './k8s/inspect.js';
+import { historyRouter } from './history/router.js';
+import { pollerState, startHistoryPoller } from './history/poller.js';
 import { parseAllowedHosts, corsOriginCheck } from './cors.js';
 
 dotenv.config();
@@ -42,6 +44,8 @@ app.use(graphRouter);
 // Deep inspect for a single object: YAML, describe, events, and what it is
 // connected to. Backs the topology map's detail drawer.
 app.use(inspectRouter);
+// Cluster change history: what changed, when, and who did it.
+app.use(historyRouter);
 
 // Helper for safe command execution
 async function runCmd(cmd: string): Promise<{ stdout: string; stderr: string; success: boolean }> {
@@ -980,6 +984,11 @@ if (fs.existsSync(distDir)) {
 const HOST = process.env.HOST || '127.0.0.1';
 const server = app.listen(Number(PORT), HOST, () => {
   console.log(`✅ Kalam Backend Server running on http://localhost:${PORT}${HOST !== '127.0.0.1' ? ` (bound to ${HOST} — reachable from the network!)` : ''}`);
+  // Opt-in: nothing polls anyone's cluster unless KALAM_HISTORY says so.
+  if (startHistoryPoller()) {
+    const p = pollerState();
+    console.log(`🕓 Change history: capturing ${p.sources.join(', ') || 'local'} every ${p.intervalSec}s`);
+  }
 });
 
 // Clear, actionable message on the most common failure: the port is taken by a

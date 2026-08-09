@@ -16,13 +16,11 @@
 
 import { execFile } from 'child_process';
 import { Router } from 'express';
-import { loadVms, section, sshRun } from '../vms.js';
+import { loadVms, sshRun } from '../vms.js';
+import { SAFE_NAME, parseJson, runSteps, type Step } from './kubectl.js';
 import { factsFor, parseEvents } from './relate.js';
 
 export const inspectRouter = Router();
-
-/** Names we are willing to interpolate into a remote shell command. */
-const SAFE_NAME = /^[a-zA-Z0-9_.-]+$/;
 
 /**
  * Kinds the panel can open. Secrets are deliberately absent: this endpoint
@@ -44,71 +42,6 @@ const KINDS: Record<string, { kubectl: string; namespaced: boolean }> = {
   // The topology names its node cards "k8s-node" — accept that spelling too.
   'k8s-node': { kubectl: 'node', namespaced: false },
 };
-
-interface Step {
-  tag: string;
-  args: string[];
-  /** A failure here degrades the answer instead of failing the request. */
-  optional?: boolean;
-}
-
-/** Run one kubectl invocation locally, without a shell. */
-function runLocal(args: string[], timeout = 20000): Promise<{ stdout: string; ok: boolean; stderr: string }> {
-  return new Promise((resolve) => {
-    execFile('kubectl', args, { timeout, maxBuffer: 1024 * 1024 * 16 }, (err, stdout, stderr) => {
-      resolve({ stdout: stdout || '', stderr: stderr || (err ? err.message : ''), ok: !err });
-    });
-  });
-}
-
-/**
- * Execute every step and return each one's raw stdout by tag.
- *
- * Local runs go through execFile in parallel (no shell, nothing to escape).
- * A VM run is folded into ONE ssh round trip with `@@TAG@@` markers — the same
- * trick the discovery and graph routes use — because ssh latency, not kubectl,
- * dominates the cost.
- */
-async function runSteps(steps: Step[], vmName?: string): Promise<{ out: Record<string, string>; error?: string }> {
-  if (!vmName) {
-    const results = await Promise.all(steps.map((s) => runLocal(s.args)));
-    const out: Record<string, string> = {};
-    let error: string | undefined;
-    steps.forEach((s, i) => {
-      out[s.tag] = results[i].stdout;
-      if (!results[i].ok && !s.optional && !error) {
-        error = (results[i].stderr.split('\n')[0] || 'kubectl failed').slice(0, 300);
-      }
-    });
-    return { out, error };
-  }
-
-  const vm = (await loadVms()).find((v) => v.name === vmName);
-  if (!vm) return { out: {}, error: `VM "${vmName}" is not in the inventory.` };
-
-  const cmd = steps
-    .flatMap((s) => [`echo @@${s.tag}@@`, `(kubectl ${s.args.join(' ')} 2>/dev/null || true)`])
-    .concat('echo @@END@@')
-    .join('; ');
-
-  const { stdout, stderr, ok } = await sshRun(vm, cmd, 45000);
-  if (!ok && !stdout.trim()) {
-    return { out: {}, error: (stderr.split('\n')[0] || 'SSH failed').slice(0, 300) };
-  }
-  const out: Record<string, string> = {};
-  for (const s of steps) out[s.tag] = section(stdout, s.tag);
-  return { out };
-}
-
-function parseJson(raw: string | undefined): any {
-  const t = (raw || '').trim();
-  if (!t.startsWith('{') && !t.startsWith('[')) return undefined;
-  try {
-    return JSON.parse(t);
-  } catch {
-    return undefined;
-  }
-}
 
 async function handleInspect(req: any, res: any, kindKey: string, nsParam: string, nameParam: string) {
   const kind = KINDS[kindKey.toLowerCase()];

@@ -95,10 +95,20 @@ async function getJump(vm: VmEntry): Promise<VmEntry | undefined> {
 
 // Run a remote command over ssh (hopping through vm.via if set).
 // Resolves with combined result — never rejects.
-export async function sshRun(vm: VmEntry, command: string, timeoutMs = 20000): Promise<{ stdout: string; stderr: string; ok: boolean }> {
+//
+// `maxBuffer` defaults to 4 MB, which is plenty for the diagnostic commands
+// this file runs. Callers that pull bulk cluster JSON must raise it: exceeding
+// the buffer truncates stdout mid-stream, and truncated output parses as
+// "these objects are gone" unless the caller is careful.
+export async function sshRun(
+  vm: VmEntry,
+  command: string,
+  timeoutMs = 20000,
+  maxBuffer = 1024 * 1024 * 4
+): Promise<{ stdout: string; stderr: string; ok: boolean }> {
   const jump = await getJump(vm);
   return new Promise((resolve) => {
-    execFile('ssh', [...sshBaseArgs(vm, false, jump), command], { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 4 }, (err, stdout, stderr) => {
+    execFile('ssh', [...sshBaseArgs(vm, false, jump), command], { timeout: timeoutMs, maxBuffer }, (err, stdout, stderr) => {
       resolve({ stdout: stdout || '', stderr: stderr || (err ? err.message : ''), ok: !err });
     });
   });

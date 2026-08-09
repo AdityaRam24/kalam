@@ -19,6 +19,9 @@ server/pcai/kb.json
 # VM SSH inventory (may contain host/user details)
 server/vms.json
 
+# Captured cluster change history (snapshots + changelog, per source)
+server/history/data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
