@@ -11,6 +11,10 @@ import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
 import { llmRouter } from './llm.js';
 import { vmsRouter } from './vms.js';
 import { graphRouter } from './graph/router.js';
+import { inspectRouter } from './k8s/inspect.js';
+import { historyRouter } from './history/router.js';
+import { pollerState, startHistoryPoller } from './history/poller.js';
+import { parseAllowedHosts, corsOriginCheck } from './cors.js';
 
 dotenv.config();
 
@@ -18,7 +22,15 @@ const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+// Restrict who may drive this API from a browser — see server/cors.ts for why
+// that matters here. ALLOWED_HOSTS=true restores the previous "allow any".
+const allowedOrigins = parseAllowedHosts(
+  process.env.ALLOWED_HOSTS || process.env.CLIENT_ALLOWED_HOSTS
+);
+
+app.use(cors({
+  origin: (origin, callback) => callback(null, corsOriginCheck(origin, allowedOrigins)),
+}));
 app.use(express.json({ limit: '2mb' })); // allow pasting large logs/stack traces
 
 // HPE Private Cloud AI assistant (RAG knowledge base + grounded chat).
@@ -29,6 +41,11 @@ app.use(llmRouter);
 app.use(vmsRouter);
 // Infrastructure dependency graph: root-cause ranking + blast radius.
 app.use(graphRouter);
+// Deep inspect for a single object: YAML, describe, events, and what it is
+// connected to. Backs the topology map's detail drawer.
+app.use(inspectRouter);
+// Cluster change history: what changed, when, and who did it.
+app.use(historyRouter);
 
 // Helper for safe command execution
 async function runCmd(cmd: string): Promise<{ stdout: string; stderr: string; success: boolean }> {
@@ -967,6 +984,11 @@ if (fs.existsSync(distDir)) {
 const HOST = process.env.HOST || '127.0.0.1';
 const server = app.listen(Number(PORT), HOST, () => {
   console.log(`✅ Kalam Backend Server running on http://localhost:${PORT}${HOST !== '127.0.0.1' ? ` (bound to ${HOST} — reachable from the network!)` : ''}`);
+  // Opt-in: nothing polls anyone's cluster unless KALAM_HISTORY says so.
+  if (startHistoryPoller()) {
+    const p = pollerState();
+    console.log(`🕓 Change history: capturing ${p.sources.join(', ') || 'local'} every ${p.intervalSec}s`);
+  }
 });
 
 // Clear, actionable message on the most common failure: the port is taken by a

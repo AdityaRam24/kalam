@@ -72,6 +72,23 @@ if [ "$CLIENT_HOST" = "0.0.0.0" ] || [ "$HOST" = "0.0.0.0" ]; then
     hint "Use http://127.0.0.1:${CLIENT_PORT} locally, or http://<this-host-ip>:${CLIENT_PORT} remotely."
 fi
 
+# Serving through a cluster ingress trips three separate things in turn, so
+# report all of them together rather than one error at a time.
+if [ -n "${CLIENT_PUBLIC_HOST}" ] || [ -n "${CLIENT_ALLOWED_HOSTS}" ]; then
+    info "ingress  CLIENT_PUBLIC_HOST=${CLIENT_PUBLIC_HOST:-(unset)}  CLIENT_ALLOWED_HOSTS=${CLIENT_ALLOWED_HOSTS:-(default .pcaicoe.com,.ext.hpe.com)}"
+    if [ "$CLIENT_HOST" != "0.0.0.0" ] && [ "$HOST" != "0.0.0.0" ]; then
+        warn "Ingress settings are present but nothing binds 0.0.0.0 — the ingress cannot reach a loopback-only process."
+        hint "Set HOST=0.0.0.0 (and CLIENT_HOST=0.0.0.0 for dev mode) in .env."
+    fi
+    if [ -n "${CLIENT_PUBLIC_HOST}" ] && [ -z "${CLIENT_ALLOWED_HOSTS}" ]; then
+        case "$CLIENT_PUBLIC_HOST" in
+            *.pcaicoe.com|*.ext.hpe.com) : ;;
+            *) warn "CLIENT_PUBLIC_HOST=${CLIENT_PUBLIC_HOST} is not covered by the default allowlist — Vite will answer 'Blocked request'."
+               hint "Add it: CLIENT_ALLOWED_HOSTS=${CLIENT_PUBLIC_HOST}" ;;
+        esac
+    fi
+fi
+
 # ------------------------------------------------------------- 4. ports ----
 step "[4/7] Ports"
 for pair in "${PORT}:backend" "${CLIENT_PORT}:vite-client"; do

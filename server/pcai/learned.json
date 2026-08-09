@@ -4,97 +4,132 @@
   "url": "datagen://pcai-dataset/chunk/81569ecfba9f3392",
   "text": "HPE Private Cloud AI — Architecture Notes › Control plane and data plane\n\nPCAI separates a control plane (cluster lifecycle, identity, tenancy) from the\nAI service plane (MLIS for inference, MLDM for data pipelines, MLDE for\ndistributed training). The control plane runs on the management nodes; the\nservice plane is scheduled across the GPU worker pool.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "pcai architecture notes",
   "url": "datagen://pcai-dataset/chunk/03a2a7a01214fc7c",
   "text": "HPE Private Cloud AI — Architecture Notes › Identity and access\n\nAuthentication is brokered through Keycloak. Each AI service trusts Keycloak as\nits OIDC provider rather than holding its own user database. Role bindings are\nmapped from Keycloak groups to Kubernetes RBAC at namespace granularity, so a\nteam that can deploy an MLIS endpoint cannot necessarily read another team's\nlakehouse bucket.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "pcai architecture notes",
   "url": "datagen://pcai-dataset/chunk/64ff3e46f5b6f743",
   "text": "HPE Private Cloud AI — Architecture Notes › Storage\n\nThe lakehouse presents an S3-compatible object interface. Model artifacts,\ndatasets and pipeline outputs all land there. Endpoints receive scoped\ncredentials as Kubernetes secrets; those credentials expire, which is the most\ncommon reason a previously working endpoint starts failing to start.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "pcai architecture notes",
   "url": "datagen://pcai-dataset/chunk/f311f9fb238a70ec",
   "text": "HPE Private Cloud AI — Architecture Notes › Networking and ingress\n\nExternal traffic terminates at the ingress controller, which holds the platform\nTLS certificate. Endpoints are exposed as subpaths or subdomains depending on\nthe install profile. In an air-gapped install, no component may reach the public\ninternet, so container images and model artifacts must be pre-staged into the\ninternal registry and the lakehouse before deployment.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "pcai architecture notes",
   "url": "datagen://pcai-dataset/chunk/0ff5756a19e32cfe",
   "text": "HPE Private Cloud AI — Architecture Notes › Sizing\n\nGPU worker sizing is driven by concurrent inference endpoints rather than by\ntotal model count: an idle endpoint still holds its GPU allocation until it is\nscaled to zero. Plan for headroom equal to at least one full node so that a\nrolling upgrade can drain a node without evicting production endpoints.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "pcai architecture notes",
   "url": "datagen://pcai-dataset/chunk/30453c0c491dae89",
   "text": "HPE Private Cloud AI — Architecture Notes › Upgrades and backup\n\nUpgrades are staged control plane first, then service plane. Back up the\nKeycloak realm and the platform configuration before an upgrade; model\nartifacts in the lakehouse are not part of the platform backup and are assumed\nto be reproducible from their source pipelines.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "mlis endpoint unavailable",
   "url": "datagen://pcai-dataset/chunk/c6854ea250a973b3",
   "text": "Runbook: mlis endpoint unavailable › Symptom / when this applies\n\nA deployed MLIS endpoint returns `503 Service Unavailable` for every request.\n`kubectl get pods -n mlis` shows the serving pod in `CrashLoopBackOff`, or\n`Running` but never `1/1 Ready`. Callers see:\n\nupstream connect error or disconnect/reset before headers. reset reason: connection failure",
   "kind": "runbook",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "mlis endpoint unavailable",
   "url": "datagen://pcai-dataset/chunk/18940e59a12432da",
   "text": "Runbook: mlis endpoint unavailable › Verification\n\n- `kubectl get pods -n mlis -l app=$ENDPOINT` shows `1/1 Running`\n- `curl -s -o /dev/null -w '%{http_code}' https://$ENDPOINT/v1/models` returns `200`\n- A test inference returns a payload within the endpoint's latency SLO",
   "kind": "runbook",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "How do I free a GPU allocation on PCAI?",
   "url": "datagen://pcai-dataset/chunk/09f1566f61b2a617",
   "text": "Q: How do I free a GPU allocation on PCAI?\n\nA: Scale the idle endpoint to zero replicas with kubectl -n mlis scale deploy <endpoint> --replicas=0. The GPU is released immediately and the endpoint can be scaled back up later.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "Case: MLIS endpoint returned 503 for 20 minutes after the platform …",
   "url": "datagen://pcai-dataset/chunk/ed16f54a3b8cdd96",
   "text": "Q: I am seeing this problem:\nMLIS endpoint returned 503 for 20 minutes after the platform upgrade\n\nWhat is the cause and how do I fix it?\n\nA: The lakehouse bucket credentials in the endpoint secret expired during the upgrade. Delete the secret with kubectl -n mlis delete secret $ENDPOINT-s3 and re-create it from the MLIS UI under Endpoint > Storage > Reconnect. The pod restarts and pulls the artifact successfully.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "GPU scheduling notes",
   "url": "datagen://pcai-dataset/chunk/0a0e962a055a9a71",
   "text": "GPU scheduling on PCAI\n\nAn MLIS endpoint holds its GPU allocation for as long as it has at least one replica, even when it is serving no traffic at all. Idle endpoints are therefore the most common cause of \"no GPU capacity\" errors when a new endpoint is deployed. Scale idle endpoints to zero rather than deleting them: the model artifact stays in the lakehouse and the endpoint can be restored in seconds.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "PgBouncer pooling modes",
   "url": "datagen://pcai-dataset/chunk/e30622d17243eed1",
   "text": "Connection pooling in PgBouncer runs in three modes: session, transaction and statement. Transaction mode is the usual choice for web applications because it returns the server connection to the pool at commit, letting a small pool serve many clients. Statement mode forbids multi-statement transactions entirely.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "What does the web UI bind to?",
   "url": "datagen://pcai-dataset/chunk/203d8a8bfb0b447f",
   "text": "Q: What does the web UI bind to?\n\nA: It binds to 127.0.0.1 only, so it is not reachable from the network.",
   "kind": "note",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
+ },
+ {
+  "title": "HPE Private Cloud AI - Behind the Curtain",
+  "url": "datagen://pcai-dataset/chunk/4ba9946c78f6f5d9",
+  "text": "HPE Private Cloud AI - Behind the Curtain\nIn this blog\nWelcome to this blog on HPE Private Cloud AI. In this blog, we will show you what it takes to set up this environment and give you, as an infrastructure engineer, tips on how to support it.\nPart of the NVIDIA AI Computing by HPE portfolio, HPE Private Cloud AI is a co-developed scalable, pre-configured, AI-ready private cloud that gives AI and IT teams powerful tools to innovate while simplifying ops and keeping your data under your control.\nHPE Private Cloud AI comes in various sizes based on your use case, ranging from small—inference (rack servers, switches and storage) to XL—RAG/fine model tuning (multiple rack solution with at least 11 nodes and 670 TB of storage). Our solution at WWT's Advanced Technology Center (ATC) is a small T-shirt size, which can be shown off in a demo for both the account team and customers via this schedulable lab in the AI Proving Ground: HPE Private Cloud AI.\nThe demo that we would walk through for you would consist of the following:\n- Deployment of solution from the ground up- Rack/Cable\n- Day 0 operations to get the system online\n\n- Solution overview from the eyes of an infrastructure engineer- Green Lake for Files Array\n- vCenter and K8 cluster components\n- Switching - NVIDIA and Aruba\n\n- Day 2 operations: Connecting to Green Lake Portal- Providing access to data scientists and dev engineers to deploy apps\n- Deploying a chatbot or virtual assistant example",
+  "kind": "note",
+  "addedAt": "2026-08-02T18:21:50Z"
+ },
+ {
+  "title": "HPE Private Cloud AI - Behind the Curtain",
+  "url": "datagen://pcai-dataset/chunk/ec243eafe679a91f",
+  "text": "itching - NVIDIA and Aruba\n\n- Day 2 operations: Connecting to Green Lake Portal- Providing access to data scientists and dev engineers to deploy apps\n- Deploying a chatbot or virtual assistant example\n\nWhat makes this any different from any other solution out there? Why would I choose to use this? Let's examine more to see if we can answer those questions.\nIt's a fully integrated solution designed to allow enterprise users to start building their AI applications without having to think about sizing up their infrastructure.\nIn this case, the big problem is having the hardware together like either of those solutions did and combining HPE AI Essentials and NVIDIA AI Enterprise software to make it useable for your AI use case. This is what sets this solution apart from all others. The best thing about this solution is that all these tools are included from the get-go. You don't have to go out and download Spark, feast, kubeflow, ezpresto; they have workflows you can utilize directly from the solution.",
+  "kind": "note",
+  "addedAt": "2026-08-02T18:21:50Z"
+ },
+ {
+  "title": "HPE Private Cloud AI - Behind the Curtain",
+  "url": "datagen://pcai-dataset/chunk/c803fe5d88371190",
+  "text": "s solution is that all these tools are included from the get-go. You don't have to go out and download Spark, feast, kubeflow, ezpresto; they have workflows you can utilize directly from the solution.\n\nThe setup\nOur solution consisted of four servers (three servers used in the VMware cluster to run the K8 virtual nodes and 1 DL380 as the inference node worker node), two NVIDIA switches, four Aruba switches and a couple of nodes to make up a Green Lake for Files array.\nOnce we completed all the networking online and firmware upgrades, we used the steps below to deploy the solution:\n- Fill out the deployment sheet for both Green Lake for Files and HPE Private Cloud AI.\n- Setup two different /24 networks - One for internal networks and One for an External Network to be used in deployment\n- Deploy the DSC VM that will be used to deploy the infrastructure and connect to Green Lake\n- Set the DSC VM management network and activate it in the Private Cloud AI portal\n- Roll the rack into the Data Center\n- Setup port channel from our core to the NVIDIA Switches\n- HPE GreenLake cloud setup and onboarding\n- Deploy HPE GreenLake for Files\n- Initiate Private Cloud AI setup wizard – which will configure the Infrastructure pieces:- Infrastructure - Management, iLO and data network info control plane node discovery, vCenter, ESXi, iLO credentials.\n- Control plane VM - Control plane VM networking, credentials.\n- Worker node servers - Discovery Management, iLO and data network info.\n- Platform ingress IP\n- Integration with HPE GreenLake for Files.",
+  "kind": "note",
+  "addedAt": "2026-08-02T18:21:50Z"
+ },
+ {
+  "title": "HPE Private Cloud AI - Behind the Curtain",
+  "url": "datagen://pcai-dataset/chunk/505c33ae520e37b5",
+  "text": "Control plane VM - Control plane VM networking, credentials.\n- Worker node servers - Discovery Management, iLO and data network info.\n- Platform ingress IP\n- Integration with HPE GreenLake for Files.\n\n- Verify Setup is complete and access the Green Lake AI portal to start deploying AI solutions and providing access to the data scientists and developers\nOnce the above setup was completed, we connected to the AI Private Cloud instance via the GreenLake portal below.\nFrom there, you can start configuring roles and allowing users access to add a virtual chatbot app or even a Jupyter Notebook.\nExample of the virtual chatbot.\n\nConclusion\nHopefully, this blog has piqued your interest in what HPE Private Cloud AI can do to help speed up the time to deliver AI solutions to your customers and give the engineer who is on the hook to get their AI initiatives up and running a good idea of what they would need to support and set up.\n\nReferences\nhttps://www.hpe.com/us/en/solutions/artificial-intelligence/nvidia-collaboration.html",
+  "kind": "note",
+  "addedAt": "2026-08-02T18:21:50Z"
+ },
+ {
+  "title": "HPE Private Cloud AI",
+  "url": "datagen://pcai-dataset/chunk/f2e8693f33fb5539",
+  "text": "Between cost, compliance, infrastructure, and data accessibility challenges, enterprises are struggling to find the best path to production for their AI workloads. To operationalize enterprise data securely where it resides, you need a full-stack solution with AI modeling, software, infrastructure, and services that support your deployments.\nTo solve these challenges, HPE has coengineered a turnkey solution with NVIDIA to enable instant AI productivity. HPE Private Cloud AI provides secure and unified access to all your data, enabling enterprise-wide collaboration so you can scale projects seamlessly. Deploy HPE Private Cloud AI in an Equinix high performance data center to optimize for performance and connectivity, and leverage Equinix’s vast ecosystem of enterprises, networks, and cloud and IT service providers.",
+  "kind": "note",
+  "addedAt": "2026-08-02T18:21:50Z"
  },
  {
   "title": "Case: I am seeing this problem:\nMLIS endpoint returned 503 for 20 minutes after the pl",
   "url": "datagen://pcai-dataset/case/df6903ded5d79df8",
   "text": "Problem: I am seeing this problem:\nMLIS endpoint returned 503 for 20 minutes after the platform upgrade\n\nWhat is the cause and how do I fix it?\n\nResolution: The lakehouse bucket credentials in the endpoint secret expired during the upgrade. Delete the secret with kubectl -n mlis delete secret $ENDPOINT-s3 and re-create it from the MLIS UI under Endpoint > Storage > Reconnect. The pod restarts and pulls the artifact successfully.\n\nSource: Case: MLIS endpoint returned 503 for 20 minutes after the platform … <human://troubleshooting/i-am-seeing-this-problem-mlis-endpoint-returned--63b8cf68>",
   "kind": "case",
-  "addedAt": "2026-07-30T20:58:48Z"
+  "addedAt": "2026-08-02T18:21:50Z"
  }
 ]

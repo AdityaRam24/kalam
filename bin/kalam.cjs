@@ -653,10 +653,12 @@ async function startRepl(initialMode) {
           else if (sub === 'peers') await vmPeers(vmName);
           else if (sub === 'graph') await vmGraph(vmName);
           else if (sub === 'impact' || sub === 'blast') await vmImpact(vmName, subRest[0]);
+          else if (sub === 'history' || sub === 'changes') await historyCli(['--source', vmName || 'local', ...subRest]);
           else if (sub === 'ssh') console.log(`${colors.yellow}Interactive SSH doesn't fit inside the REPL — run: ${colors.bold}kalam vm ssh ${vmName || '<name>'}${colors.reset}${colors.yellow} in its own terminal.${colors.reset}`);
           else await listVmsCli();
           return reprompt();
         }
+        case 'history': case 'changes': await historyCli(arg ? arg.split(/\s+/) : []); return reprompt();
         case 'status': await showStatus(); return reprompt();
         case 'run': {
           const n = parseInt(arg, 10);
@@ -1032,6 +1034,86 @@ async function vmGraph(name) {
   }
 }
 
+// The cluster changelog: what changed, when, and who did it.
+//
+// Kalam can only report what it has captured, so this command is explicit
+// about that — an empty timeline on a fresh install means "no baseline yet",
+// not "nothing happened", and saying so saves a support question.
+async function historyCli(args) {
+  if (!(await ensureServer())) return;
+  const source = argValue(args, '--source') || argValue(args, '--vm') || 'local';
+  const since = argValue(args, '--since') || '24h';
+
+  if ((args[0] || '').toLowerCase() === 'capture') return historyCapture(source);
+
+  const spin = startSpinner(`Reading the change history for ${source}…`);
+  try {
+    const q = new URLSearchParams({ source, since, limit: '60' });
+    const d = await getJSON(`/api/history?${q}`, 30000);
+    stopSpinner(spin);
+    if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
+
+    const changes = d.changes || [];
+    console.log(`
+${colors.bold}🕓 Change history · ${source}${colors.reset}  ${colors.gray}last ${since}${colors.reset}`);
+    console.log(`   ${colors.gray}${d.trackedObjects || 0} objects tracked${d.capturedAt ? ` · last capture ${new Date(d.capturedAt).toLocaleString()}` : ''}${colors.reset}`);
+    if (d.poller && !d.poller.enabled) {
+      console.log(`   ${colors.gray}Background capture is off. Set KALAM_HISTORY=1 before starting the server, or run: kalam history capture${colors.reset}`);
+    }
+
+    if (!changes.length) {
+      console.log(`
+   ${d.capturedAt ? colors.green + 'Nothing changed in this window.' : colors.yellow + 'No baseline captured yet — run: kalam history capture'}${colors.reset}
+`);
+      return;
+    }
+
+    console.log('');
+    for (const c of changes) {
+      const tone = c.severity === 'warning' ? colors.red : c.severity === 'notice' ? colors.yellow : colors.gray;
+      const who = c.actor ? `${colors.gray} by ${c.actor}${colors.reset}` : '';
+      const when = new Date(c.actualAt || c.at).toLocaleString();
+      console.log(` ${tone}●${colors.reset} ${colors.bold}${c.objectKind} ${c.namespace ? c.namespace + '/' : ''}${c.name}${colors.reset}`);
+      console.log(`   ${c.summary}${who}`);
+      console.log(`   ${colors.gray}${when}${c.cause ? ` · cause: ${c.cause}` : ''}${colors.reset}`);
+    }
+    console.log(`
+${colors.gray}Filter with --since 7d --source <vm>. Capture now: kalam history capture${colors.reset}
+`);
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+async function historyCapture(source) {
+  if (!(await ensureServer())) return;
+  const spin = startSpinner(`Capturing ${source} (read-only)…`);
+  try {
+    const d = await postJSON('/api/history/capture', { source }, 180000);
+    stopSpinner(spin);
+    if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
+    console.log(`
+${colors.bold}📸 Captured ${source}${colors.reset} ${colors.gray}${d.objects} objects · ${d.durationMs}ms${colors.reset}`);
+    if (d.missing && d.missing.length) console.log(`   ${colors.gray}not available here: ${d.missing.join(', ')}${colors.reset}`);
+    if (d.degraded) console.log(`   ${colors.yellow}${d.degraded}${colors.reset}`);
+    for (const n of d.notes || []) console.log(`   ${colors.gray}${n}${colors.reset}`);
+    console.log(`   ${d.changes ? colors.green + d.changes + ' change(s) recorded' : colors.gray + 'no changes'}${colors.reset}`);
+    console.log(`
+${colors.gray}See them with: kalam history --source ${source}${colors.reset}
+`);
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+/** Read a "--flag value" pair out of an argv slice. */
+function argValue(args, flag) {
+  const i = (args || []).indexOf(flag);
+  return i >= 0 ? args[i + 1] : undefined;
+}
+
 // "What breaks if I restart this?" — the blast radius of one graph node.
 async function vmImpact(name, id) {
   if (!name || !id) { console.log(`\n${colors.yellow}Usage: kalam vm impact <name> <node-id>${colors.reset}\n${colors.gray}Get ids from: kalam vm graph <name>${colors.reset}\n`); return; }
@@ -1124,6 +1206,11 @@ ${colors.bold}VMs (SSH):${colors.reset}
   ${colors.green}vm peers <name>${colors.reset}      Find other VMs visible from this host.
   ${colors.green}vm graph <name>${colors.reset}      Dependency graph + ranked root causes (read-only).
   ${colors.green}vm impact <name> <id>${colors.reset} Blast radius: what breaks if that resource stops.
+  ${colors.green}vm history <name>${colors.reset}    What changed on that cluster, when, and who did it.
+
+${colors.bold}CHANGE HISTORY:${colors.reset}
+  ${colors.green}history [--since 7d]${colors.reset} Cluster changelog: what changed, when, and who did it.
+  ${colors.green}history capture${colors.reset}      Capture now (read-only); the next one can show changes.
 
 ${colors.bold}LOCAL DEVOPS:${colors.reset}
   ${colors.green}status${colors.reset}               Docker & Kubernetes health.
@@ -1211,6 +1298,7 @@ async function main() {
       else console.log(`\n${colors.yellow}Usage: kalam vm <list|ssh|diagnose|discover|peers|graph|impact> [name]${colors.reset}\n`);
       break;
     }
+    case 'history': case 'changes': await historyCli(rest); break;
     case 'status': await showStatus(); console.log(); break;
     case 'list': case 'ps': await listResources(rest[0]); break;
     case 'scan': await scanContainer(rest[0]); break;

@@ -248,6 +248,106 @@ snapshot it diagnoses, so every finding carries `rootCause`, `explains`, or
 panel and dims collateral findings; the CLI gains `kalam vm graph <name>` and
 `kalam vm impact <name> <id>`.
 
+### 2.2b Object inspect — YAML, describe, events, and what it connects to
+
+The graph above answers *cluster-wide* questions. The inspect API answers the
+question asked one card at a time: "I clicked this pod — what is it, and what is
+it wired to?" `server/k8s/inspect.ts` goes back to the cluster for the whole
+object, and `server/k8s/relate.ts` turns that snapshot into connections.
+
+```
+GET /api/k8s/inspect/:kind/:namespace/:name[?vm=<name>]   -> full object + relations
+GET /api/k8s/inspect/node/:name[?vm=<name>]               -> cluster-scoped form
+GET /api/docker/inspect/:id[?vm=<name>]                   -> docker inspect JSON
+```
+
+One call returns the object's `yaml`, its `describe`, its recent `events`
+(newest first), a `summary` of the fields a describe would show, per-container
+detail (image, ports, requests/limits, probes, restarts, mounts, command), its
+labels/annotations, and `groups` of related objects. `?vm=` runs the same
+read-only `kubectl get`/`describe` over SSH, folded into one round trip with
+`@@TAG@@` markers, so a remote VM source behaves identically to the local one.
+
+Relations are computed, never guessed by name:
+
+| From | Finds |
+|---|---|
+| Pod | owning workload (ReplicaSet collapsed to its Deployment), Services whose **selector** matches — annotated with whether this pod is actually a *ready endpoint*, the Ingress publishing those Services, its node, its ConfigMaps / Secrets / PVCs / ServiceAccount (volumes, `envFrom`, single env keys, image pull secrets), and its sibling replicas |
+| Deployment / StatefulSet / DaemonSet | pods matching its selector, Services matching its **pod template** labels, Ingresses, node spread, template config refs |
+| Service | Endpoints split into serving vs not-serving pods, the workloads behind them, Ingresses |
+| Node | pods scheduled on it, the Services that therefore depend on it, capacity/taints/pressure |
+
+`relate.ts` is pure — it takes parsed `kubectl -o json` and returns plain data —
+so every rule above is unit-tested from fixtures in
+`server/__tests__/relate.test.ts`. Secrets are deliberately not an inspectable
+kind: the endpoint hands back raw YAML.
+
+**Where it shows up:** the topology map's detail drawer gains **Related**,
+**YAML/JSON** (with Describe toggle, copy and download) and **Events** tabs, and
+its Details tab now shows the live object rather than the fields the list
+endpoint happened to carry. Clicking a related object jumps to its card.
+
+### 2.2c Change history — what changed, when, and who did it
+
+Everything above looks at the cluster as it is *now*. Kubernetes is bad at
+remembering: events expire after roughly an hour, a rolled-back Deployment
+leaves almost no trace, and a pod deleted at 3am is simply gone by morning.
+`server/history/` is the only part of Kalam with a memory.
+
+**It stores fingerprints, not manifests.** Each capture reduces every object to
+the handful of fields whose change is worth reporting — image, replicas,
+selector, taints, ports, rules — as flat strings (`server/history/fingerprint.ts`).
+Two fingerprints diff into field-level before→after pairs, and only those diffs
+are persisted. A 500-object cluster fingerprints to tens of kilobytes, and a
+quiet hour costs nothing because nothing changed.
+
+```
+POST /api/history/capture  { source }         -> capture, diff, append
+GET  /api/history          ?source&since&kind&severity&q   -> the timeline
+GET  /api/history/object/:kind/:ns/:name      -> one object + rollout revisions
+GET  /api/history/summary  ?since=24h         -> key -> last change (heatmap)
+GET  /api/history/status                      -> poller + storage state
+```
+
+**Three guards come before any diffing** (`server/history/diff.ts`), because the
+failure mode of a naive diff is not a missing entry but a confident, wrong one:
+
+| Guard | Prevents |
+|---|---|
+| **Baseline** — no previous snapshot means no changes | Announcing that all 500 objects were "created" the moment Kalam starts |
+| **Section** — a kind is diffed only when its query succeeded on *both* sides | A lost RBAC permission or a missing Ingress API reading as mass deletion |
+| **Sanity** — a capture that lost >50% of its objects is a bad read | A truncated SSH transfer reading as a catastrophe |
+
+Classification is driven by *which field moved*: an image string is a deploy,
+`unschedulable` flipping is a cordon, `node` moving on a pod is a reschedule.
+That is why the timeline reads as sentences rather than a JSON diff.
+
+**Attribution without an audit log.** `metadata.managedFields` records, per
+writer, which fields it owns and when — so `helm`, `kubectl-client-side-apply`
+or a controller can be named. kubectl hides it unless `--show-managed-fields=true`
+is passed, so a capture that fails is retried once without the flag: attribution
+degrades, history does not. A change is credited to a manager only when its
+timestamp *moved* since the last capture — comparing two cluster-supplied
+timestamps, never Kalam's clock, so host/cluster skew cannot mislead it.
+Deployment rollout revisions are read on demand from the ReplicaSets, where
+`kubernetes.io/change-cause` carries whatever note the operator left.
+
+**Nothing sensitive is written.** Inline env values are stored as digests, never
+plaintext; ConfigMaps and Secrets are tracked by `resourceVersion` alone, so
+Kalam never reads their contents. `server/history/data/` is gitignored.
+
+**Collection is opt-in.** `KALAM_HISTORY=1` starts the poller
+(`KALAM_HISTORY_INTERVAL_SEC`, default 300; `KALAM_HISTORY_SOURCES`, default
+`local`, or `all`), captures run sequentially with an in-flight guard, and the
+timer is unref'd. Without it, history advances only when someone presses
+"Capture now". Every query is `kubectl get`.
+
+**Where it shows up:** a "Change History" tab (`src/components/ClusterHistory.tsx`)
+with a filterable day-grouped timeline and expandable field diffs; a **Changes**
+tab in the topology drawer showing one object's history plus its rollout
+revisions; a "Recently changed" heatmap mode on the map; and
+`kalam history [--source x] [--since 7d]` / `kalam history capture` in the CLI.
+
 ### 2.3 PCAI Assistant (RAG chat)
 
 ```mermaid
