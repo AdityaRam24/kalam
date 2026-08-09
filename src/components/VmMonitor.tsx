@@ -113,7 +113,10 @@ export const VmMonitor: React.FC = () => {
   const [topoExpanded, setTopoExpanded] = useState<Record<string, boolean>>({});
   const toggleTopoExpand = useCallback((name: string) => setTopoExpanded((e) => ({ ...e, [name]: !e[name] })), []);
 
-  const explain = async (name: string) => {
+  // Memoised because VmTopology re-runs its dagre layout whenever this prop
+  // changes identity — an un-memoised handler re-laid-out the whole VM graph on
+  // every render of this component, so the nodes never held still.
+  const explain = useCallback(async (name: string) => {
     setBrainBusy((b) => ({ ...b, [name]: true }));
     setBrainFor(name);
     try {
@@ -128,7 +131,7 @@ export const VmMonitor: React.FC = () => {
     } finally {
       setBrainBusy((b) => ({ ...b, [name]: false }));
     }
-  };
+  }, []);
 
   const diagnose = async (name: string) => {
     setDiagBusy((b) => ({ ...b, [name]: true }));
