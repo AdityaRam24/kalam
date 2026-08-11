@@ -18,6 +18,13 @@ import path from 'path';
 // single most common reason a VM "would not connect", so there is no port knob.
 export const SSH_PORT = 22;
 
+// Test-only escape hatch: the SSH test suite runs a real daemon on a loopback
+// ephemeral port. Never set in production, where 22 is always used.
+function connectPort(): number {
+  const override = process.env.SSH_PORT_OVERRIDE;
+  return override ? Number(override) : SSH_PORT;
+}
+
 export interface SshTarget {
   name: string;
   host: string;
@@ -40,25 +47,24 @@ function expandHome(p: string): string {
 async function authFor(vm: SshTarget, timeoutMs: number): Promise<ConnectConfig> {
   const cfg: ConnectConfig = {
     host: vm.host,
-    port: SSH_PORT,
+    port: connectPort(),
     username: vm.user,
     readyTimeout: Math.min(timeoutMs, 20000),
     // Older appliance/hypervisor SSH daemons (common on the hosts this monitors)
-    // still offer only the legacy KEX and host-key algorithms, which ssh2 omits
-    // from its defaults. Append rather than replace so modern hosts are unaffected.
+    // still offer only legacy KEX and host-key algorithms, which ssh2 supports
+    // but leaves out of its defaults. `append` keeps every modern default first
+    // and merely adds the fallbacks at the end — listing algorithms explicitly
+    // would instead REPLACE the defaults and quietly drop some of them.
     algorithms: {
-      kex: [
-        'curve25519-sha256', 'curve25519-sha256@libssh.org',
-        'ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521',
-        'diffie-hellman-group-exchange-sha256', 'diffie-hellman-group14-sha256',
-        'diffie-hellman-group16-sha512', 'diffie-hellman-group18-sha512',
-        'diffie-hellman-group14-sha1', 'diffie-hellman-group1-sha1',
-      ] as any,
-      serverHostKey: [
-        'ssh-ed25519', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521',
-        'rsa-sha2-512', 'rsa-sha2-256', 'ssh-rsa',
-      ] as any,
-    },
+      kex: {
+        append: [
+          'diffie-hellman-group-exchange-sha1',
+          'diffie-hellman-group14-sha1',
+          'diffie-hellman-group1-sha1',
+        ],
+      },
+      serverHostKey: { append: ['ssh-dss'] },
+    } as ConnectConfig['algorithms'],
   };
   if (vm.password) {
     cfg.password = vm.password;
@@ -99,7 +105,7 @@ function connect(cfg: ConnectConfig): Promise<Client> {
 async function jumpSocket(via: SshTarget, vm: SshTarget, timeoutMs: number): Promise<{ sock: any; hop: Client }> {
   const hop = await connect(await authFor(via, timeoutMs));
   return new Promise((resolve, reject) => {
-    hop.forwardOut('127.0.0.1', 0, vm.host, SSH_PORT, (err, stream) => {
+    hop.forwardOut('127.0.0.1', 0, vm.host, connectPort(), (err, stream) => {
       if (err) {
         hop.end();
         reject(new Error(`Jump host ${via.name}: ${err.message}`));
