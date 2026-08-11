@@ -1,12 +1,14 @@
 // Virtual Machine monitoring + SSH for Kalam.
 //
 // A manual SSH inventory (persisted to server/vms.json, git-ignored) plus live
-// health probing. No hypervisor API and no extra npm deps: reachability is a raw
-// TCP connect, metrics/commands shell out to the system `ssh` binary via
-// execFile (arg-array form, so host/user/port are never shell-interpolated).
+// health probing. Connecting works the way MobaXterm does: give a host/IP, a
+// login name and a password. Auth speaks the SSH protocol directly (see
+// ./ssh.ts) because the system `ssh` binary cannot take a password
+// non-interactively. Key files still work as an alternative to the password.
+// Every host is reached on port 22 — there is no port setting.
 //
-//   GET    /api/vms                 -> list inventory
-//   POST   /api/vms                 -> add a VM  { name, host, user, port?, keyPath? }
+//   GET    /api/vms                 -> list inventory (passwords never returned)
+//   POST   /api/vms                 -> add a VM  { name, host, user, password?, keyPath? }
 //   DELETE /api/vms/:name           -> remove a VM
 //   POST   /api/vms/metrics         -> { name } live load/cpu/mem/disk/uptime
 //   POST   /api/vms/exec            -> { name, command } run a remote command
@@ -18,7 +20,7 @@ import { identifyComponent, type ComponentInfo } from './pcai/components.js';
 import { analyzeCauses, graphStats } from './graph/analyze.js';
 import { buildInfraGraph } from './graph/build.js';
 import { nodeId as gid } from './graph/model.js';
-import { execFile } from 'child_process';
+import { sshExec, sshCheck, SSH_PORT } from './ssh.js';
 import { promises as fs } from 'fs';
 import net from 'net';
 import path from 'path';
@@ -36,17 +38,25 @@ export interface VmEntry {
   name: string;
   host: string;
   user: string;
-  port: number;
-  keyPath?: string;
-  via?: string; // name of another inventory VM to use as an SSH jump host
+  password?: string;  // stored in vms.json (git-ignored); never sent to the client
+  keyPath?: string;   // alternative to the password
+  via?: string;       // name of another inventory VM to use as an SSH jump host
 }
 
 export async function loadVms(): Promise<VmEntry[]> {
   try {
-    return JSON.parse(await fs.readFile(VMS_PATH, 'utf-8')) as VmEntry[];
+    const raw = JSON.parse(await fs.readFile(VMS_PATH, 'utf-8')) as any[];
+    // Inventories written before the port field was dropped still carry it.
+    return raw.map(({ port: _port, ...vm }) => vm as VmEntry);
   } catch {
     return [];
   }
+}
+
+// What the browser is allowed to see: the password stays on the server.
+function publicVm(vm: VmEntry) {
+  const { password, ...rest } = vm;
+  return { ...rest, hasPassword: !!password };
 }
 
 async function saveVms(vms: VmEntry[]): Promise<void> {
@@ -72,20 +82,17 @@ function tcpReachable(host: string, port: number, timeoutMs = 3000): Promise<boo
   });
 }
 
-function sshBaseArgs(vm: VmEntry, interactive = false, jump?: VmEntry): string[] {
-  const args = ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=8', '-p', String(vm.port)];
-  if (!interactive) args.unshift('-o', 'BatchMode=yes'); // never hang on a password prompt for probes
+// The equivalent command line for a human to paste into their own terminal.
+function sshCommandString(vm: VmEntry, jump?: VmEntry): string {
+  const args = ['ssh'];
   if (vm.keyPath) args.push('-i', vm.keyPath);
   if (jump) {
     // Hop through the jump VM (e.g. reach a VME host only visible from the DSC
-    // VM). ProxyCommand instead of -J so the jump hop can use its own key/port.
-    const proxy = ['ssh', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'BatchMode=yes', '-p', String(jump.port)];
-    if (jump.keyPath) proxy.push('-i', jump.keyPath);
-    proxy.push('-W', '%h:%p', `${jump.user}@${jump.host}`);
-    args.push('-o', `ProxyCommand=${proxy.join(' ')}`);
+    // VM). -J is what a person would type; the app itself tunnels via ssh2.
+    args.push('-J', `${jump.user}@${jump.host}`);
   }
   args.push(`${vm.user}@${vm.host}`);
-  return args;
+  return args.join(' ');
 }
 
 async function getJump(vm: VmEntry): Promise<VmEntry | undefined> {
@@ -93,7 +100,7 @@ async function getJump(vm: VmEntry): Promise<VmEntry | undefined> {
   return (await loadVms()).find((v) => v.name === vm.via && v.name !== vm.name);
 }
 
-// Run a remote command over ssh (hopping through vm.via if set).
+// Run a remote command over SSH (hopping through vm.via if set).
 // Resolves with combined result — never rejects.
 //
 // `maxBuffer` defaults to 4 MB, which is plenty for the diagnostic commands
@@ -107,11 +114,7 @@ export async function sshRun(
   maxBuffer = 1024 * 1024 * 4
 ): Promise<{ stdout: string; stderr: string; ok: boolean }> {
   const jump = await getJump(vm);
-  return new Promise((resolve) => {
-    execFile('ssh', [...sshBaseArgs(vm, false, jump), command], { timeout: timeoutMs, maxBuffer }, (err, stdout, stderr) => {
-      resolve({ stdout: stdout || '', stderr: stderr || (err ? err.message : ''), ok: !err });
-    });
-  });
+  return sshExec(vm, command, timeoutMs, jump, maxBuffer);
 }
 
 // A jumped VM can't be TCP-probed from here — treat "jump host reachable" as
@@ -119,9 +122,9 @@ export async function sshRun(
 export async function vmReachable(vm: VmEntry): Promise<boolean> {
   if (vm.via) {
     const jump = await getJump(vm);
-    return jump ? tcpReachable(jump.host, jump.port) : false;
+    return jump ? tcpReachable(jump.host, SSH_PORT) : false;
   }
-  return tcpReachable(vm.host, vm.port);
+  return tcpReachable(vm.host, SSH_PORT);
 }
 
 // One shell snippet returning parseable KEY:value lines.
@@ -135,26 +138,77 @@ const METRIC_CMD =
   "echo UP:$(uptime -p 2>/dev/null)";
 
 vmsRouter.get('/api/vms', async (_req, res) => {
-  res.json({ vms: await loadVms() });
+  res.json({ vms: (await loadVms()).map(publicVm) });
 });
 
 vmsRouter.post('/api/vms', async (req, res) => {
-  const { name, host, user, port = 22, keyPath, via } = req.body || {};
+  const { name, host, user, password, keyPath, via } = req.body || {};
   if (!name || !NAME_RE.test(name)) return res.status(400).json({ error: 'Invalid VM name (letters, numbers, . _ - only).' });
   if (!host || !HOST_RE.test(host)) return res.status(400).json({ error: 'Invalid host/IP.' });
   if (!user || !NAME_RE.test(user)) return res.status(400).json({ error: 'Invalid SSH user.' });
-  const p = parseInt(port, 10);
-  if (isNaN(p) || p < 1 || p > 65535) return res.status(400).json({ error: 'Invalid port.' });
 
   const vms = await loadVms();
   if (vms.some((v) => v.name === name)) return res.status(409).json({ error: `A VM named "${name}" already exists.` });
   if (via && !vms.some((v) => v.name === via)) return res.status(400).json({ error: `Jump host "${via}" is not in the inventory.` });
-  const entry: VmEntry = { name, host, user, port: p };
-  if (keyPath && typeof keyPath === 'string') entry.keyPath = keyPath.trim();
+  const entry: VmEntry = { name, host, user };
+  if (password && typeof password === 'string') entry.password = password;
+  if (keyPath && typeof keyPath === 'string' && keyPath.trim()) entry.keyPath = keyPath.trim();
   if (via && typeof via === 'string') entry.via = via;
+
+  // Try the credentials now, so a wrong password is reported here rather than
+  // showing up later as an unexplained "unreachable" row.
+  const jump = via ? vms.find((v) => v.name === via) : undefined;
+  const check = await sshCheck(entry, jump);
+
   vms.push(entry);
   await saveVms(vms);
-  res.json({ ok: true, vm: entry });
+  res.json({ ok: true, vm: publicVm(entry), connected: check.ok, warning: check.ok ? undefined : check.error });
+});
+
+// Update credentials on an existing VM (re-prompt for the password, change the
+// login, move it behind a jump host).
+vmsRouter.put('/api/vms/:name', async (req, res) => {
+  const { host, user, password, keyPath, via } = req.body || {};
+  const vms = await loadVms();
+  const vm = vms.find((v) => v.name === req.params.name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+
+  if (host !== undefined) {
+    if (!host || !HOST_RE.test(host)) return res.status(400).json({ error: 'Invalid host/IP.' });
+    vm.host = host;
+  }
+  if (user !== undefined) {
+    if (!user || !NAME_RE.test(user)) return res.status(400).json({ error: 'Invalid SSH user.' });
+    vm.user = user;
+  }
+  // An empty password means "clear it"; an absent one means "leave it alone".
+  if (typeof password === 'string') {
+    if (password) vm.password = password; else delete vm.password;
+  }
+  if (typeof keyPath === 'string') {
+    if (keyPath.trim()) vm.keyPath = keyPath.trim(); else delete vm.keyPath;
+  }
+  if (typeof via === 'string') {
+    if (via && !vms.some((v) => v.name === via && v.name !== vm.name)) {
+      return res.status(400).json({ error: `Jump host "${via}" is not in the inventory.` });
+    }
+    if (via) vm.via = via; else delete vm.via;
+  }
+
+  const jump = vm.via ? vms.find((v) => v.name === vm.via) : undefined;
+  const check = await sshCheck(vm, jump);
+  await saveVms(vms);
+  res.json({ ok: true, vm: publicVm(vm), connected: check.ok, warning: check.ok ? undefined : check.error });
+});
+
+// Verify credentials without saving anything ("Test connection" in the form).
+vmsRouter.post('/api/vms/test', async (req, res) => {
+  const { host, user, password, keyPath, via } = req.body || {};
+  if (!host || !HOST_RE.test(host)) return res.status(400).json({ error: 'Invalid host/IP.' });
+  if (!user || !NAME_RE.test(user)) return res.status(400).json({ error: 'Invalid SSH user.' });
+  const jump = via ? (await loadVms()).find((v) => v.name === via) : undefined;
+  const check = await sshCheck({ name: host, host, user, password, keyPath: keyPath || undefined }, jump);
+  res.json(check);
 });
 
 vmsRouter.delete('/api/vms/:name', async (req, res) => {
@@ -172,9 +226,9 @@ vmsRouter.post('/api/vms/metrics', async (req, res) => {
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
 
   const reachable = await vmReachable(vm);
-  const out: any = { name: vm.name, host: vm.host, port: vm.port, reachable, via: vm.via };
+  const out: any = { name: vm.name, host: vm.host, reachable, via: vm.via };
   if (!reachable) {
-    out.error = vm.via ? `Jump host "${vm.via}" unreachable` : 'SSH port unreachable';
+    out.error = vm.via ? `Jump host "${vm.via}" unreachable` : 'Host unreachable on SSH (port 22)';
     return res.json(out);
   }
   const { stdout, stderr, ok } = await sshRun(vm, METRIC_CMD);
@@ -203,8 +257,7 @@ vmsRouter.get('/api/vms/ssh-command/:name', async (req, res) => {
   const vm = (await loadVms()).find((v) => v.name === req.params.name);
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
   const jump = await getJump(vm);
-  const args = sshBaseArgs(vm, true, jump).map((a) => (a.startsWith('ProxyCommand=') ? `"${a}"` : a));
-  res.json({ command: ['ssh', ...args].join(' ') });
+  res.json({ command: sshCommandString(vm, jump) });
 });
 
 // ---------------------------------------------------------------------------
@@ -393,7 +446,7 @@ vmsRouter.post('/api/vms/diagnose', async (req, res) => {
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
 
   if (!(await vmReachable(vm))) {
-    return res.json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'SSH port unreachable' });
+    return res.json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'Host unreachable on SSH (port 22)' });
   }
 
   const { stdout, stderr, ok } = await sshRun(vm, DIAG_CMD, 45000);
@@ -593,7 +646,7 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
 
   if (!(await vmReachable(vm))) {
-    return res.status(200).json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'SSH port unreachable' });
+    return res.status(200).json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'Host unreachable on SSH (port 22)' });
   }
 
   const { stdout, stderr, ok } = await sshRun(vm, DISCOVER_CMD, 30000);
@@ -794,7 +847,7 @@ vmsRouter.post('/api/vms/explain', async (req, res) => {
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
 
   if (!(await vmReachable(vm))) {
-    return res.json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'SSH port unreachable' });
+    return res.json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'Host unreachable on SSH (port 22)' });
   }
 
   const { stdout, stderr, ok } = await sshRun(vm, EXPLAIN_CMD, 45000);
