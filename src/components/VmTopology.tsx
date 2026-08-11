@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
-export interface TopoVm { name: string; host: string; user: string; port: number; via?: string; }
+export interface TopoVm { name: string; host: string; user: string; via?: string; }
 export interface TopoMetrics { reachable?: boolean; error?: string; load?: string; ncpu?: string; mem?: string; gpu?: string; up?: string; }
 export interface TopoBrain {
   kubectlAvailable?: boolean;
@@ -105,7 +105,7 @@ const VmNode = ({ data }: NodeProps) => {
           {id?.gpus > 0 && <span className="badge running" style={{ fontSize: 9 }}>{id.gpus} GPU</span>}
         </div>
         <div style={{ fontSize: 10.5, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
-          {vm.user}@{vm.host}:{vm.port}
+          {vm.user}@{vm.host}
         </div>
 
         {id && (

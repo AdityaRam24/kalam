@@ -1,10 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, Network, Brain, History, Info, Share2 } from 'lucide-react';
+import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, Network, Brain, History, Info, Share2, KeyRound } from 'lucide-react';
 import VmTopology from './VmTopology';
 
-interface VmEntry { name: string; host: string; user: string; port: number; keyPath?: string; via?: string; }
+interface VmEntry { name: string; host: string; user: string; hasPassword?: boolean; keyPath?: string; via?: string; }
 interface VmMetrics {
-  name: string; host: string; port: number; reachable: boolean; error?: string;
+  name: string; host: string; reachable: boolean; error?: string;
   host_?: string; load?: string; ncpu?: string; mem?: string; disk?: string; gpu?: string; up?: string;
 }
 
@@ -14,7 +14,17 @@ export const VmMonitor: React.FC = () => {
   const [probing, setProbing] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({ name: '', host: '', user: '', port: '22', keyPath: '', via: '' });
+  const blankForm = { name: '', host: '', user: '', password: '', keyPath: '', via: '' };
+  const [form, setForm] = useState(blankForm);
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Re-prompt for a password on a VM already in the inventory (MobaXterm asks
+  // again when a saved session stops authenticating; so do we).
+  const [credsFor, setCredsFor] = useState<string | null>(null);
+  const [creds, setCreds] = useState({ user: '', password: '' });
+  const [credsBusy, setCredsBusy] = useState(false);
+  const [credsMsg, setCredsMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Peer-VM discovery (hosts visible FROM a connected VM: K8s nodes, /etc/hosts, ARP)
   interface Neighbor { ip: string; hostname?: string; source: string; }
@@ -113,7 +123,10 @@ export const VmMonitor: React.FC = () => {
   const [topoExpanded, setTopoExpanded] = useState<Record<string, boolean>>({});
   const toggleTopoExpand = useCallback((name: string) => setTopoExpanded((e) => ({ ...e, [name]: !e[name] })), []);
 
-  const explain = async (name: string) => {
+  // Memoised because VmTopology re-runs its dagre layout whenever this prop
+  // changes identity — an un-memoised handler re-laid-out the whole VM graph on
+  // every render of this component, so the nodes never held still.
+  const explain = useCallback(async (name: string) => {
     setBrainBusy((b) => ({ ...b, [name]: true }));
     setBrainFor(name);
     try {
@@ -128,7 +141,7 @@ export const VmMonitor: React.FC = () => {
     } finally {
       setBrainBusy((b) => ({ ...b, [name]: false }));
     }
-  };
+  }, []);
 
   const diagnose = async (name: string) => {
     setDiagBusy((b) => ({ ...b, [name]: true }));
@@ -168,7 +181,7 @@ export const VmMonitor: React.FC = () => {
       const data = await res.json();
       setMetrics((m) => ({ ...m, [name]: data }));
     } catch (e: any) {
-      setMetrics((m) => ({ ...m, [name]: { name, host: '', port: 0, reachable: false, error: e.message } }));
+      setMetrics((m) => ({ ...m, [name]: { name, host: '', reachable: false, error: e.message } }));
     } finally {
       setProbing((p) => ({ ...p, [name]: false }));
     }
@@ -180,17 +193,57 @@ export const VmMonitor: React.FC = () => {
   const addVm = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormErr('');
+    setTestMsg(null);
     try {
       const res = await fetch('/api/vms', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, port: parseInt(form.port, 10) || 22, keyPath: form.keyPath || undefined, via: form.via || undefined }),
+        body: JSON.stringify({ ...form, password: form.password || undefined, keyPath: form.keyPath || undefined, via: form.via || undefined }),
       });
       const data = await res.json();
       if (!res.ok) { setFormErr(data.error || 'Failed to add VM'); return; }
-      setForm({ name: '', host: '', user: '', port: '22', keyPath: '', via: '' });
+      // Saved either way — but if the login did not go through, keep the form
+      // open with the reason so the password can be corrected immediately.
+      if (data.warning) {
+        setFormErr(`Saved, but the login failed: ${data.warning}`);
+        loadVms();
+        return;
+      }
+      setForm(blankForm);
       setShowAdd(false);
       loadVms();
     } catch (e: any) { setFormErr(`Network error: ${e.message}`); }
+  };
+
+  const testConnection = async () => {
+    setTesting(true);
+    setTestMsg(null);
+    try {
+      const res = await fetch('/api/vms/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: form.host, user: form.user, password: form.password || undefined, keyPath: form.keyPath || undefined, via: form.via || undefined }),
+      });
+      const data = await res.json();
+      setTestMsg(data.ok ? { ok: true, text: `Connected to ${form.user}@${form.host}` } : { ok: false, text: data.error || 'Connection failed' });
+    } catch (e: any) { setTestMsg({ ok: false, text: `Network error: ${e.message}` }); } finally { setTesting(false); }
+  };
+
+  const saveCreds = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!credsFor) return;
+    setCredsBusy(true);
+    setCredsMsg(null);
+    try {
+      const res = await fetch(`/api/vms/${encodeURIComponent(credsFor)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user: creds.user, password: creds.password }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setCredsMsg({ ok: false, text: data.error || 'Update failed' }); return; }
+      if (data.warning) { setCredsMsg({ ok: false, text: data.warning }); loadVms(); return; }
+      setCredsFor(null);
+      loadVms();
+      probe(credsFor);
+    } catch (e: any) { setCredsMsg({ ok: false, text: `Network error: ${e.message}` }); } finally { setCredsBusy(false); }
   };
 
   const removeVm = async (name: string) => {
@@ -261,16 +314,30 @@ export const VmMonitor: React.FC = () => {
         </div>
 
         {showAdd && (
-          <form onSubmit={addVm} style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 1fr 0.6fr auto', gap: 10, alignItems: 'end', marginBottom: 16, padding: 14, background: 'var(--bg-tertiary)', borderRadius: 10, border: '1px solid var(--border-color)' }}>
+          <form onSubmit={addVm} style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 1fr 1fr auto auto', gap: 10, alignItems: 'end', marginBottom: 16, padding: 14, background: 'var(--bg-tertiary)', borderRadius: 10, border: '1px solid var(--border-color)' }}>
             <div className="form-group"><label style={{ fontSize: 12 }}>Name</label><input className="form-input" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="gpu-node-1" /></div>
             <div className="form-group"><label style={{ fontSize: 12 }}>Host / IP</label><input className="form-input" required value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="10.0.0.11" /></div>
-            <div className="form-group"><label style={{ fontSize: 12 }}>SSH User</label><input className="form-input" required value={form.user} onChange={(e) => setForm({ ...form, user: e.target.value })} placeholder="ubuntu" /></div>
-            <div className="form-group"><label style={{ fontSize: 12 }}>Port</label><input className="form-input" value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} placeholder="22" /></div>
-            <button type="submit" className="btn primary" style={{ height: 40 }}>Save</button>
-            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-              <label style={{ fontSize: 12 }}>Private Key Path (optional)</label>
-              <input className="form-input" value={form.keyPath} onChange={(e) => setForm({ ...form, keyPath: e.target.value })} placeholder="~/.ssh/id_rsa — leave blank to use the SSH agent" />
+            <div className="form-group"><label style={{ fontSize: 12 }}>Login as</label><input className="form-input" required autoComplete="off" value={form.user} onChange={(e) => setForm({ ...form, user: e.target.value })} placeholder="root" /></div>
+            <div className="form-group">
+              <label style={{ fontSize: 12 }}>Password</label>
+              <input className="form-input" type="password" autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="••••••••" />
             </div>
+            <button type="button" className="btn secondary" style={{ height: 40 }} onClick={testConnection} disabled={testing || !form.host || !form.user}>
+              {testing ? <RefreshCw size={14} className="loader" /> : <Network size={14} />} Test
+            </button>
+            <button type="submit" className="btn primary" style={{ height: 40 }}>Save</button>
+            {testMsg && (
+              <div style={{ gridColumn: '1 / -1', fontSize: 12, color: testMsg.ok ? 'var(--hpe-green)' : 'var(--status-error)' }}>
+                {testMsg.ok ? <Check size={12} style={{ verticalAlign: -2, marginRight: 4 }} /> : <AlertTriangle size={12} style={{ verticalAlign: -2, marginRight: 4 }} />}
+                {testMsg.text}
+              </div>
+            )}
+            <details style={{ gridColumn: '1 / -1' }}>
+              <summary style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-secondary)' }}>Use a private key instead of a password</summary>
+              <div className="form-group" style={{ marginTop: 8 }}>
+                <input className="form-input" value={form.keyPath} onChange={(e) => setForm({ ...form, keyPath: e.target.value })} placeholder="~/.ssh/id_rsa — leave blank to use the password above" />
+              </div>
+            </details>
             {vms.length > 0 && (
               <div className="form-group" style={{ gridColumn: '1 / -1' }}>
                 <label style={{ fontSize: 12 }}>Connect via jump host (optional)</label>
@@ -304,8 +371,9 @@ export const VmMonitor: React.FC = () => {
                     <td><span className={`status-dot-pill ${d.cls === 'online' ? 'online' : 'offline'}`} style={{ fontSize: 11 }}><span className="dot" style={d.cls === 'warn' ? { background: 'var(--status-warn, #E5A50A)' } : undefined}></span>{busy ? 'Probing' : d.label}</span></td>
                     <td><strong>{v.name}</strong></td>
                     <td>
-                      <span className="code-id">{v.user}@{v.host}:{v.port}</span>
+                      <span className="code-id">{v.user}@{v.host}</span>
                       {v.via && <span className="badge neutral" style={{ fontSize: 9, marginLeft: 6 }} title={`SSH hops through ${v.via}`}>via {v.via}</span>}
+                      {!v.hasPassword && !v.keyPath && <span className="badge warning" style={{ fontSize: 9, marginLeft: 6 }} title="No password or key saved for this host">no credentials</span>}
                     </td>
                     <td>{m?.error ? '—' : <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{m?.load ?? '—'}{m?.ncpu ? ` / ${m.ncpu}` : ''}</span>}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{m?.mem ?? '—'}</td>
@@ -320,6 +388,7 @@ export const VmMonitor: React.FC = () => {
                         <button className="icon-btn secondary" title="Find peer VMs visible from this host" onClick={() => findNeighbors(v.name)}><Network size={14} className={neighborsBusy && neighborsFor === v.name ? 'loader' : ''} /></button>
                         <button className="icon-btn warning" title="Diagnose cluster (read-only kubectl checks)" onClick={() => diagnose(v.name)}><Activity size={14} className={diagBusy[v.name] ? 'loader' : ''} /></button>
                         <button className="icon-btn secondary" title="Run remote command" onClick={() => { setExecFor(v.name); setExecOut(''); }}><Play size={14} /></button>
+                        <button className="icon-btn secondary" title="Change login / password" onClick={() => { setCredsFor(v.name); setCreds({ user: v.user, password: '' }); setCredsMsg(null); }}><KeyRound size={14} /></button>
                         <button className="icon-btn secondary" title="Copy SSH command" onClick={() => copySsh(v.name)}>{copied === v.name ? <Check size={14} /> : <Copy size={14} />}</button>
                         <button className="icon-btn danger" title="Remove from inventory" onClick={() => removeVm(v.name)}><Trash2 size={14} /></button>
                       </div>
@@ -330,9 +399,31 @@ export const VmMonitor: React.FC = () => {
             </tbody>
           </table>
         </div>
+        {/* Password re-prompt for a host already in the inventory */}
+        {credsFor && (
+          <form onSubmit={saveCreds} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto', gap: 10, alignItems: 'end', marginTop: 12, padding: 14, background: 'var(--bg-tertiary)', borderRadius: 10, border: '1px solid var(--border-color)' }}>
+            <div style={{ gridColumn: '1 / -1', fontSize: 13, fontWeight: 600 }}>
+              <KeyRound size={14} style={{ verticalAlign: -2, marginRight: 6, color: 'var(--hpe-green)' }} />
+              Credentials for {credsFor}
+            </div>
+            <div className="form-group"><label style={{ fontSize: 12 }}>Login as</label><input className="form-input" required autoComplete="off" value={creds.user} onChange={(e) => setCreds({ ...creds, user: e.target.value })} /></div>
+            <div className="form-group"><label style={{ fontSize: 12 }}>Password</label><input className="form-input" type="password" autoComplete="new-password" autoFocus value={creds.password} onChange={(e) => setCreds({ ...creds, password: e.target.value })} placeholder="••••••••" /></div>
+            <button type="submit" className="btn primary" style={{ height: 40 }} disabled={credsBusy}>{credsBusy ? 'Connecting…' : 'Connect'}</button>
+            <button type="button" className="btn secondary" style={{ height: 40 }} onClick={() => setCredsFor(null)}>Cancel</button>
+            {credsMsg && (
+              <div style={{ gridColumn: '1 / -1', fontSize: 12, color: credsMsg.ok ? 'var(--hpe-green)' : 'var(--status-error)' }}>{credsMsg.text}</div>
+            )}
+            <div style={{ gridColumn: '1 / -1', fontSize: 11, color: 'var(--text-muted)' }}>
+              Leave the password blank to clear it and fall back to a key / the SSH agent.
+            </div>
+          </form>
+        )}
+
         <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
           <Terminal size={11} style={{ verticalAlign: -1, marginRight: 4 }} />
-          Metrics are gathered over SSH (system <code>ssh</code>). “Copy SSH command” puts a ready-to-paste connection string on your clipboard for a native terminal.
+          Hosts are reached over SSH on port 22 with the login and password you provide (like MobaXterm); a private key can be used instead.
+          Passwords are kept server-side in <code>server/vms.json</code> and never sent back to the browser.
+          “Copy SSH command” puts a ready-to-paste connection string on your clipboard for a native terminal.
         </p>
       </div>
 
@@ -717,7 +808,7 @@ export const VmMonitor: React.FC = () => {
                             name: (n.hostname || `vm-${n.ip.replace(/\./g, '-')}`).split('.')[0],
                             host: n.ip,
                             user: src?.user || '',
-                            port: '22',
+                            password: '',
                             keyPath: src?.keyPath || '',
                             via: neighborsFor,
                           });
@@ -731,7 +822,7 @@ export const VmMonitor: React.FC = () => {
                 ))}</tbody>
               </table></div>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
-                "Add via" pre-fills the form with {neighborsFor} as the SSH jump host — adjust the user/key if the peer uses different credentials, then Save.
+                "Add via" pre-fills the form with {neighborsFor} as the SSH jump host — enter the peer's login and password, then Save.
               </p>
             </>
           )}

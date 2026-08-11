@@ -13,7 +13,7 @@ import ReactFlow, {
   getBezierPath,
   getSmoothStepPath
 } from 'reactflow';
-import type { NodeProps, Node, Edge, EdgeProps } from 'reactflow';
+import type { NodeProps, Node, NodeChange, Edge, EdgeProps } from 'reactflow';
 import 'reactflow/dist/style.css';
 import dagre from '@dagrejs/dagre';
 import {
@@ -43,6 +43,7 @@ import {
   History
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { canvasSignature } from '../lib/topology';
 
 interface Container {
   id: string;
@@ -90,6 +91,55 @@ function formatAge(creationTime: string | number | undefined): string {
   if (diffHour < 24) return `${diffHour}h ${diffMin % 60}m ago`;
   return `${diffDay}d ${diffHour % 24}h ago`;
 }
+
+// One label/value line on a card. Defined at module level on purpose: when this
+// lived inside DevOpsNode it was a brand-new component type on every render, so
+// React threw the rows away and rebuilt their DOM instead of updating them —
+// which is visible as the card contents flickering.
+const MetaRow = memo(({ label, value, mono, narrow }: { label: string; value: string | number; mono?: boolean; narrow?: boolean }) => (
+  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+    <span style={{ color: '#64748b', fontSize: '10px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em', flexShrink: 0 }}>{label}</span>
+    <span style={{ color: '#e2e8f0', fontSize: '10.5px', fontWeight: 500, fontFamily: mono ? 'JetBrains Mono, monospace' : 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: narrow ? '50px' : '105px', textAlign: 'right' }} title={String(value)}>{value}</span>
+  </div>
+));
+MetaRow.displayName = 'MetaRow';
+
+// Health-bar chip. Module level for the same reason as MetaRow — it sits in the
+// always-visible summary strip, so remounting it on every render made the whole
+// bar flicker each time the cluster was polled.
+const StatChip = memo(({ color, label, value, warn }: { color: string; label: string; value: string; warn?: boolean }) => (
+  <div style={{
+    display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 8,
+    background: warn ? 'rgba(244, 63, 94, 0.12)' : 'rgba(2, 6, 23, 0.5)',
+    border: `1px solid ${warn ? 'rgba(244, 63, 94, 0.4)' : 'rgba(255,255,255,0.07)'}`,
+    fontSize: 11.5, fontFamily: 'Outfit, sans-serif', whiteSpace: 'nowrap'
+  }}>
+    <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 5px ${color}`, flexShrink: 0 }} />
+    <span style={{ color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', fontSize: 9.5 }}>{label}</span>
+    <span style={{ color: warn ? '#fda4af' : '#f1f5f9', fontWeight: 700 }}>{value}</span>
+  </div>
+));
+// Drawer text helpers. Module level so selecting a card does not rebuild every
+// label in the panel from scratch on each render.
+const SectionTitle = memo(({ children }: { children: React.ReactNode }) => (
+  <span style={{ fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+    {children}
+  </span>
+));
+SectionTitle.displayName = 'SectionTitle';
+
+const MiniTag = memo(({ color, children }: { color: string; children: React.ReactNode }) => (
+  <span style={{
+    fontSize: '9px', fontWeight: 600, color,
+    background: `${color}18`, border: `1px solid ${color}40`,
+    borderRadius: '5px', padding: '1px 5px', wordBreak: 'break-all'
+  }}>
+    {children}
+  </span>
+));
+MiniTag.displayName = 'MiniTag';
+
+StatChip.displayName = 'StatChip';
 
 // ─── Custom Premium DevOps Card Node ────────────────────────────────────────
 const DevOpsNode = memo(({ id, data }: NodeProps) => {
@@ -182,14 +232,6 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
       ? `0 0 0 1px ${accentColor}40, 0 0 18px ${accentColor}25, 0 10px 28px rgba(0,0,0,0.45)`
       : '0 1px 2px rgba(0,0,0,0.25)';
 
-  // Helper to render a row
-  const MetaRow = ({ label, value, mono }: { label: string; value: string | number; mono?: boolean }) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
-      <span style={{ color: '#64748b', fontSize: '10px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em', flexShrink: 0 }}>{label}</span>
-      <span style={{ color: '#e2e8f0', fontSize: '10.5px', fontWeight: 500, fontFamily: mono ? 'JetBrains Mono, monospace' : 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: isPortType ? '50px' : '105px', textAlign: 'right' }} title={String(value)}>{value}</span>
-    </div>
-  );
-
   return (
     <div
       onMouseEnter={() => onHover?.(id)}
@@ -266,9 +308,12 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
                   className={`led-halo led-halo-${ledMode}`}
                   style={{
                     position: 'absolute', inset: '-4px', borderRadius: '50%',
-                    background: statusDotColor,
-                    opacity: 0.35,
-                    filter: 'blur(3px)'
+                    // A soft radial gradient instead of `filter: blur(3px)`.
+                    // The blur was re-computed every animation frame on every
+                    // card at once — the single most expensive thing on the
+                    // canvas. This looks the same and composites for free.
+                    background: `radial-gradient(circle, ${statusDotColor} 0%, ${statusDotColor}80 45%, transparent 70%)`,
+                    opacity: 0.35
                   }}
                 />
               )}
@@ -292,34 +337,34 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             {type === 'docker' && (
               <>
-                <MetaRow label="Image" value={(image || '').split('@')[0].split(':').slice(0, 2).join(':')} mono />
-                {showMeta && <MetaRow label="State" value={state} />}
+                <MetaRow narrow={isPortType} label="Image" value={(image || '').split('@')[0].split(':').slice(0, 2).join(':')} mono />
+                {showMeta && <MetaRow narrow={isPortType} label="State" value={state} />}
               </>
             )}
             {type === 'service' && (
               <>
-                <MetaRow label="Ports" value={ports} mono />
-                {showMeta && <MetaRow label="Type" value={data.svcType} />}
-                {showMeta && <MetaRow label="ClusterIP" value={data.clusterIp} mono />}
+                <MetaRow narrow={isPortType} label="Ports" value={ports} mono />
+                {showMeta && <MetaRow narrow={isPortType} label="Type" value={data.svcType} />}
+                {showMeta && <MetaRow narrow={isPortType} label="ClusterIP" value={data.clusterIp} mono />}
               </>
             )}
             {type === 'deployment' && (
               <>
-                <MetaRow label="Ready" value={`${ready} / ${replicas}`} />
-                {showMeta && <MetaRow label="Available" value={data.available} />}
+                <MetaRow narrow={isPortType} label="Ready" value={`${ready} / ${replicas}`} />
+                {showMeta && <MetaRow narrow={isPortType} label="Available" value={data.available} />}
               </>
             )}
             {type === 'pod' && (
               <>
-                <MetaRow label="Ready" value={ready} />
-                {showMeta && <MetaRow label="Status" value={status} />}
-                {showMeta && <MetaRow label="IP" value={ip || 'N/A'} mono />}
+                <MetaRow narrow={isPortType} label="Ready" value={ready} />
+                {showMeta && <MetaRow narrow={isPortType} label="Status" value={status} />}
+                {showMeta && <MetaRow narrow={isPortType} label="IP" value={ip || 'N/A'} mono />}
               </>
             )}
             {type === 'k8s-node' && (
               <>
-                <MetaRow label="Role" value={role} />
-                {showMeta && <MetaRow label="IP" value={ip || 'N/A'} mono />}
+                <MetaRow narrow={isPortType} label="Role" value={role} />
+                {showMeta && <MetaRow narrow={isPortType} label="IP" value={ip || 'N/A'} mono />}
               </>
             )}
           </div>
@@ -328,39 +373,72 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
 
       <Handle type="source" position={Position.Right} style={{ width: 6, height: 6, background: accentColor, border: 'none', opacity: 0.4, minWidth: 6, minHeight: 6 }} />
       <Handle type="source" position={Position.Bottom} id="bottom-source" style={{ width: 6, height: 6, background: accentColor, border: 'none', opacity: 0, minWidth: 6, minHeight: 6 }} />
-
-      {/* Server-LED animation keyframes (injected inline once) */}
-      <style>{`
-        @keyframes led-glow-core {
-          0%, 100% { filter: brightness(1); }
-          50% { filter: brightness(1.35); }
-        }
-        @keyframes led-glow-halo {
-          0%, 100% { opacity: 0.25; transform: scale(1); }
-          50% { opacity: 0.5; transform: scale(1.25); }
-        }
-        @keyframes led-blink-fast {
-          0%, 45% { opacity: 1; }
-          50%, 100% { opacity: 0.12; }
-        }
-        @keyframes led-blink-slow {
-          0%, 65% { opacity: 1; }
-          75%, 100% { opacity: 0.2; }
-        }
-        .led-halo-glow { animation: led-glow-halo 2.2s ease-in-out infinite; }
-        .led-halo-blink-fast { animation: led-blink-fast 0.6s steps(1) infinite; }
-        .led-halo-blink-slow { animation: led-blink-slow 1.6s steps(1) infinite; }
-        .led-core-glow { animation: led-glow-core 2.2s ease-in-out infinite; }
-        .led-core-blink-fast { animation: led-blink-fast 0.6s steps(1) infinite; }
-        .led-core-blink-slow { animation: led-blink-slow 1.6s steps(1) infinite; }
-        @media (prefers-reduced-motion: reduce) {
-          .led-halo, .led-core { animation: none !important; opacity: 1 !important; }
-        }
-      `}</style>
     </div>
   );
 });
 DevOpsNode.displayName = 'DevOpsNode';
+
+// Server-LED keyframes. Mounted once for the whole canvas — when this lived
+// inside DevOpsNode every card re-inserted its own copy of the stylesheet on
+// every render, which made the LEDs restart their animation in unison.
+const LedStyles = () => (
+  <style>{`
+    /* opacity, not filter: brightness() — a filter animating on every card at
+       once is re-rasterised each frame, opacity is composited on the GPU. */
+    @keyframes led-glow-core {
+      0%, 100% { opacity: 0.82; }
+      50% { opacity: 1; }
+    }
+    @keyframes led-glow-halo {
+      0%, 100% { opacity: 0.25; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.25); }
+    }
+    @keyframes led-blink-fast {
+      0%, 45% { opacity: 1; }
+      50%, 100% { opacity: 0.12; }
+    }
+    @keyframes led-blink-slow {
+      0%, 65% { opacity: 1; }
+      75%, 100% { opacity: 0.2; }
+    }
+    /* Travelling dot: "data is moving through this link". One CSS animation per
+       edge, no per-frame JS or SMIL evaluation, so it stays smooth with every
+       edge on the canvas animating at once. */
+    @keyframes kalam-flow-travel {
+      from { offset-distance: 0%; }
+      to { offset-distance: 100%; }
+    }
+    .kalam-flow-dot {
+      offset-distance: 0%;
+      animation: kalam-flow-travel 1.6s linear infinite;
+    }
+
+    /* Fallback for engines without offset-path: a dash travelling the same way.
+       Dash period is 4+8=12, so one period of offset gives a seamless loop. */
+    @keyframes kalam-flow-dashmove {
+      to { stroke-dashoffset: -12; }
+    }
+    .kalam-flow-dash {
+      stroke-dasharray: 4 8;
+      stroke-dashoffset: 0;
+      animation: kalam-flow-dashmove 0.75s linear infinite;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .kalam-flow-dot, .kalam-flow-dash { animation: none; }
+    }
+
+    .led-halo-glow { animation: led-glow-halo 2.2s ease-in-out infinite; }
+    .led-halo-blink-fast { animation: led-blink-fast 0.6s steps(1) infinite; }
+    .led-halo-blink-slow { animation: led-blink-slow 1.6s steps(1) infinite; }
+    .led-core-glow { animation: led-glow-core 2.2s ease-in-out infinite; }
+    .led-core-blink-fast { animation: led-blink-fast 0.6s steps(1) infinite; }
+    .led-core-blink-slow { animation: led-blink-slow 1.6s steps(1) infinite; }
+    @media (prefers-reduced-motion: reduce) {
+      .led-halo, .led-core { animation: none !important; opacity: 1 !important; }
+    }
+  `}</style>
+);
 
 // ─── Custom Premium Group Container Node ────────────────────────────────────
 const GroupNode = memo(({ data, style }: any) => {
@@ -440,15 +518,50 @@ const FlowEdge = memo(({
 
   const strokeColor = (style as any)?.stroke || '#e2e8f0';
   const edgeOpacity = (style as any)?.opacity ?? 1;
-  const showFlow = !!animated && edgeOpacity > 0.15;
+  const flowVisible = !!animated && edgeOpacity > 0.15;
 
   return (
     <>
       <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd as string} />
-      {showFlow && (
-        <circle r={2.6} fill={strokeColor} style={{ filter: `drop-shadow(0 0 3px ${strokeColor})` }}>
-          <animateMotion dur="1.6s" repeatCount="indefinite" path={edgePath} />
-        </circle>
+      {/*
+        A dot travelling along the link. It is positioned by CSS `offset-path`
+        and animated via `offset-distance`, NOT by SMIL <animateMotion>: SMIL is
+        re-evaluated on the main thread for every animated edge on every frame,
+        so a few dozen dots stutter and drag the rest of the canvas down with
+        them. The CSS version is one declarative animation per edge and stays
+        smooth with every edge running at once.
+
+        Where `offset-path` is unavailable, fall back to a dash travelling along
+        the same path so the link still reads as live.
+      */}
+      {!!animated && (
+        SUPPORTS_OFFSET_PATH ? (
+          <circle
+            className="kalam-flow-dot"
+            r={3}
+            fill={strokeColor}
+            style={{
+              offsetPath: `path("${edgePath}")`,
+              opacity: flowVisible ? 1 : 0,
+              transition: 'opacity 0.2s ease',
+              pointerEvents: 'none'
+            }}
+          />
+        ) : (
+          <path
+            d={edgePath}
+            fill="none"
+            className="kalam-flow-dash"
+            stroke={strokeColor}
+            strokeWidth={((style as any)?.strokeWidth ?? 1.5) + 0.6}
+            strokeLinecap="round"
+            style={{
+              opacity: flowVisible ? 0.95 : 0,
+              transition: 'opacity 0.2s ease',
+              pointerEvents: 'none'
+            }}
+          />
+        )
       )}
       {label && (
         <EdgeLabelRenderer>
@@ -477,6 +590,12 @@ FlowEdge.displayName = 'FlowEdge';
 const edgeTypes = {
   flow: FlowEdge
 };
+
+// Chrome, Edge and Firefox all support CSS motion paths; the check keeps the
+// dot from collapsing to the SVG origin on anything that does not.
+const SUPPORTS_OFFSET_PATH =
+  typeof CSS !== 'undefined' && !!CSS.supports?.('offset-path', 'path("M 0 0 L 1 1")');
+
 
 const nodeTypes = {
   devopsNode: DevOpsNode,
@@ -509,6 +628,32 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [problemsOnly, setProblemsOnly] = useState(false);
   const [layoutMode, setLayoutMode] = useState<'columns' | 'auto'>('columns');
+
+  // The flow animation is CSS-driven and costs effectively nothing per edge, so
+  // it stays on by default at any cluster size. The toggle is here for anyone
+  // who simply does not want movement on screen.
+  const [motion, setMotion] = useState<'on' | 'off'>('on');
+  const prefersReducedMotion = useRef(
+    typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  ).current;
+
+  // Where the user has dragged cards. React Flow is driven as a fully controlled
+  // graph here, so without recording position changes a dragged card snapped
+  // straight back to its computed spot on the next render.
+  const [draggedPositions, setDraggedPositions] = useState<Record<string, { x: number; y: number }>>({});
+
+  const onNodesChange = useCallback((changes: NodeChange[]) => {
+    const moves = changes.filter(
+      (c): c is NodeChange & { type: 'position'; id: string; position: { x: number; y: number } } =>
+        c.type === 'position' && !!(c as any).position
+    );
+    if (moves.length === 0) return;
+    setDraggedPositions(prev => {
+      const next = { ...prev };
+      moves.forEach(m => { next[m.id] = m.position; });
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     fetch('/api/vms').then(r => r.json()).then(d => setVmNames((d.vms || []).map((v: any) => v.name))).catch(() => {});
@@ -548,19 +693,40 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
   }, [source, fetchRemote]);
 
   // Live mode: poll the active source every 8 seconds.
+  //
+  // `onRefresh` is re-created by the parent on every one of its renders, so
+  // depending on it here tore the interval down and started a fresh one several
+  // times a minute — the poll never settled into a steady rhythm. Read it
+  // through a ref so the timer is created once per (live, source) pair.
+  const onRefreshRef = useRef(onRefresh);
+  useEffect(() => { onRefreshRef.current = onRefresh; }, [onRefresh]);
+
   useEffect(() => {
     if (!live) return;
     const tick = async () => {
-      if (source === 'local') { await onRefresh?.(); setLastRefresh(new Date()); }
+      if (source === 'local') { await onRefreshRef.current?.(); setLastRefresh(new Date()); }
       else await fetchRemote(source, true);
     };
     const id = setInterval(tick, 8000);
     return () => clearInterval(id);
-  }, [live, source, onRefresh, fetchRemote]);
+  }, [live, source, fetchRemote]);
 
   // Effective data feeding the graph (local props or remote VM snapshot).
-  const effContainers = source === 'local' ? containers : (remote?.containers || []);
-  const effK8s = source === 'local' ? k8sResources : (remote?.k8s || { pods: [], services: [], deployments: [], nodes: [] });
+  const rawEffContainers = source === 'local' ? containers : (remote?.containers || []);
+  const rawEffK8s = source === 'local' ? k8sResources : (remote?.k8s || { pods: [], services: [], deployments: [], nodes: [] });
+
+  // Every poll hands us brand-new array/object identities even when the cluster
+  // has not changed at all. Feeding those straight into the layout memos rebuilt
+  // the whole canvas every few seconds — the visible fluctuation. Compare by
+  // what the canvas draws and keep the previous references when nothing moved,
+  // so a quiet cluster produces a completely still graph.
+  const dataSig = canvasSignature(rawEffContainers, rawEffK8s);
+  const stableData = useRef({ sig: dataSig, containers: rawEffContainers, k8s: rawEffK8s });
+  if (stableData.current.sig !== dataSig) {
+    stableData.current = { sig: dataSig, containers: rawEffContainers, k8s: rawEffK8s };
+  }
+  const effContainers = stableData.current.containers;
+  const effK8s = stableData.current.k8s;
 
   // Selected Detail Drawer state
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -661,6 +827,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       nsNodes.push({
         id: 'docker-group',
         type: 'groupNode',
+        draggable: false,
+        selectable: false,
         position: { x: 70, y: dockerYOffsetVal },
         style: {
           width: 380,
@@ -674,6 +842,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       nsNodes.push({
         id: 'k8s-group',
         type: 'groupNode',
+        draggable: false,
+        selectable: false,
         position: { x: 500, y: k8sYOffsetVal },
         style: {
           width: 870,
@@ -690,6 +860,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         nsNodes.push({
           id: `ns-group-${ns}`,
           type: 'groupNode',
+          draggable: false,
+          selectable: false,
           position: { x: 520, y: rowYStart + 30 },
           style: {
             width: 630,
@@ -1016,9 +1188,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       });
     }
 
+    // Drop edges pointing at a card that the active filters removed (a pod's
+    // "runs on" edge survives even when Node cards are filtered out). React Flow
+    // treats those as errors and they made filtered views render erratically.
+    const presentIds = new Set(nsNodes.map(n => n.id));
+    const connectedEdges = nsEdges.filter(e => presentIds.has(e.source) && presentIds.has(e.target));
+
     return {
       nodes: nsNodes,
-      edges: nsEdges
+      edges: connectedEdges
     };
   }, [effContainers, effK8s, selectedNamespace, selectedType]);
 
@@ -1030,8 +1208,13 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
     g.setGraph({ rankdir: 'LR', nodesep: 26, ranksep: 130, marginx: 40, marginy: 40 });
     g.setDefaultEdgeLabel(() => ({}));
     const resource = rawNodes.filter(n => n.type === 'devopsNode');
-    resource.forEach(n => g.setNode(n.id, { width: n.data?.type === 'port' ? 90 : 190, height: n.data?.type === 'port' ? 44 : 74 }));
-    rawEdges.forEach(e => { if (g.hasNode(e.source) && g.hasNode(e.target)) g.setEdge(e.source, e.target); });
+    // Dagre's result depends on insertion order, so feed it in a fixed order —
+    // otherwise a poll that merely reorders the API response reshuffles the
+    // whole layout and every card jumps to a new place.
+    [...resource].sort((a, b) => a.id.localeCompare(b.id))
+      .forEach(n => g.setNode(n.id, { width: n.data?.type === 'port' ? 90 : 190, height: n.data?.type === 'port' ? 44 : 74 }));
+    [...rawEdges].sort((a, b) => a.id.localeCompare(b.id))
+      .forEach(e => { if (g.hasNode(e.source) && g.hasNode(e.target)) g.setEdge(e.source, e.target); });
     dagre.layout(g);
     return resource.map(n => {
       const pos = g.node(n.id);
@@ -1111,18 +1294,25 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
     return rawNodes.filter(n => n.type === 'devopsNode' && matchesSearch(n)).map(n => n.id);
   }, [rawNodes, searchTerm, matchesSearch]);
 
-  // Auto-pan/zoom to the result when the search narrows to a single match
+  // Auto-pan/zoom to the result when the search narrows to a single match.
+  // Guarded on *which* node matched, not on the array: the ids are recomputed on
+  // every poll, and re-firing this yanked the viewport back mid-inspection.
+  const lastFittedMatch = useRef<string | null>(null);
   useEffect(() => {
-    if (searchMatchIds.length === 1) {
-      fitView({ nodes: [{ id: searchMatchIds[0] }], duration: 500, padding: 1.2, maxZoom: 1 });
+    const only = searchMatchIds.length === 1 ? searchMatchIds[0] : null;
+    if (only && only !== lastFittedMatch.current) {
+      fitView({ nodes: [{ id: only }], duration: 500, padding: 1.2, maxZoom: 1 });
     }
+    lastFittedMatch.current = only;
   }, [searchMatchIds, fitView]);
 
   // Re-fit the viewport whenever the graph's shape changes fundamentally.
+  // Drag overrides are dropped at the same time — they describe the old layout.
   useEffect(() => {
+    setDraggedPositions({});
     const t = setTimeout(() => fitView({ duration: 500, padding: 0.2 }), 80);
     return () => clearTimeout(t);
-  }, [layoutMode, source, problemsOnly, fitView]);
+  }, [layoutMode, source, problemsOnly, selectedNamespace, selectedType, fitView]);
 
   // Keyboard shortcuts: "/" focuses search, "Escape" clears search / closes drawer
   useEffect(() => {
@@ -1147,16 +1337,28 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
     return () => window.removeEventListener('keydown', handler);
   }, [searchTerm, selectedNodeId, isFullscreen]);
 
-  // Map raw nodes & inject states (search matching, dimming, hover states)
+  // Map raw nodes & inject states (search matching, dimming, hover states).
+  //
+  // Cards whose appearance did not actually change keep their *previous* object
+  // identity, so hovering one card re-renders that card and its neighbours
+  // instead of every card on the canvas — which is what made the graph stutter
+  // and the LEDs flicker as the pointer moved across it.
+  const decoratedCache = useRef(new Map<string, { base: Node; sig: string; out: Node }>());
+  const prevFlowNodes = useRef<Node[]>([]);
   const flowNodes = useMemo(() => {
     let base = layoutedNodes;
     if (problemVisibleIds) base = base.filter(n => n.type !== 'groupNode' && problemVisibleIds.has(n.id));
-    return base.map(node => {
+
+    const cache = decoratedCache.current;
+    const seen = new Set<string>();
+
+    const out = base.map(node => {
+      seen.add(node.id);
       if (node.type === 'groupNode') return node;
 
       const isHovered = hoveredNodeId === node.id;
       const isFocused = neighboringNodeIds.has(node.id);
-      
+
       const searchMatch = matchesSearch(node);
       const isDimmed = (!!hoveredNodeId && !isFocused) || (!!searchTerm && !searchMatch);
       const isSearchHighlighted = !!searchTerm && searchMatch;
@@ -1167,16 +1369,28 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         : d.type === 'deployment' ? `Deployment/${d.namespace}/${d.name}`
         : d.type === 'k8s-node' ? `Node/${d.name}`
         : '';
+      const changeInfo = historyKey ? changeIndex[historyKey] : undefined;
+      const dragged = draggedPositions[node.id];
 
-      return {
+      const sig = [
+        isHovered, isFocused, isSearchHighlighted, isDimmed, heatmapMode,
+        changeInfo ? `${changeInfo.count}@${changeInfo.lastAt}` : '',
+        dragged ? `${dragged.x},${dragged.y}` : ''
+      ].join('|');
+
+      const cached = cache.get(node.id);
+      if (cached && cached.base === node && cached.sig === sig) return cached.out;
+
+      const built: Node = {
         ...node,
+        position: dragged || node.position,
         data: {
           ...node.data,
           isHovered,
           isFocused,
           isSearchHighlighted,
           heatmapMode,
-          changeInfo: historyKey ? changeIndex[historyKey] : undefined,
+          changeInfo,
           onHover: setHoveredNodeId
         },
         style: {
@@ -1184,17 +1398,43 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           transition: 'opacity 0.2s ease',
         }
       };
+      cache.set(node.id, { base: node, sig, out: built });
+      return built;
     });
-  }, [layoutedNodes, problemVisibleIds, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode, changeIndex]);
+
+    cache.forEach((_v, k) => { if (!seen.has(k)) cache.delete(k); });
+
+    // Nothing changed at all — hand back the very same array so React Flow does
+    // not even run a diff.
+    const prev = prevFlowNodes.current;
+    if (prev.length === out.length && prev.every((n, i) => n === out[i])) return prev;
+    prevFlowNodes.current = out;
+    return out;
+  }, [layoutedNodes, problemVisibleIds, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode, changeIndex, draggedPositions]);
 
   // Map raw edges & inject states (hover paths)
+  const edgeCache = useRef(new Map<string, { base: Edge; sig: string; out: Edge }>());
+  const prevFlowEdges = useRef<Edge[]>([]);
   const flowEdges = useMemo(() => {
     let base = rawEdges;
     if (problemVisibleIds) base = base.filter(e => problemVisibleIds.has(e.source) && problemVisibleIds.has(e.target));
-    return base.map(edge => {
+
+    // Same identity-preserving trick as the nodes: an edge whose highlight state
+    // is unchanged is handed back as-is so it is not re-rendered on every hover.
+    const cache = edgeCache.current;
+    const seen = new Set<string>();
+
+    const dotsOn = !prefersReducedMotion && motion === 'on';
+
+    const out = base.map(edge => {
+      seen.add(edge.id);
       const isHovered = hoveredNodeId === edge.source || hoveredNodeId === edge.target;
       const isDimmed = !!hoveredNodeId && !isHovered;
       const isCrossPanel = edge.id.includes('pod-') && edge.id.includes('docker-') || edge.id.includes('k8snode-') && edge.id.includes('docker-');
+
+      const sig = `${isHovered}|${isDimmed}|${isCrossPanel}|${dotsOn}`;
+      const cached = cache.get(edge.id);
+      if (cached && cached.base === edge && cached.sig === sig) return cached.out;
 
       let edgeStyle = { ...edge.style };
       if (isDimmed) {
@@ -1222,14 +1462,24 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         labelStyle.fill = '#f1f5f9';
       }
 
-      return {
+      const built: Edge = {
         ...edge,
+        animated: !!edge.animated && dotsOn,
         style: edgeStyle,
         markerEnd,
         ...(labelStyle ? { labelStyle } : {})
       };
+      cache.set(edge.id, { base: edge, sig, out: built });
+      return built;
     });
-  }, [rawEdges, problemVisibleIds, hoveredNodeId]);
+
+    cache.forEach((_v, k) => { if (!seen.has(k)) cache.delete(k); });
+
+    const prev = prevFlowEdges.current;
+    if (prev.length === out.length && prev.every((e, i) => e === out[i])) return prev;
+    prevFlowEdges.current = out;
+    return out;
+  }, [rawEdges, problemVisibleIds, hoveredNodeId, motion, prefersReducedMotion]);
 
   // Bind node click to open details drawer
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -1519,35 +1769,6 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
 
   const manifestText: string = (manifestView === 'describe' ? inspect?.describe : inspect?.yaml) || '';
 
-  const SectionTitle = ({ children }: { children: React.ReactNode }) => (
-    <span style={{ fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-      {children}
-    </span>
-  );
-
-  const MiniTag = ({ color, children }: { color: string; children: React.ReactNode }) => (
-    <span style={{
-      fontSize: '9px', fontWeight: 600, color,
-      background: `${color}18`, border: `1px solid ${color}40`,
-      borderRadius: '5px', padding: '1px 5px', wordBreak: 'break-all'
-    }}>
-      {children}
-    </span>
-  );
-
-  const StatChip = ({ color, label, value, warn }: { color: string; label: string; value: string; warn?: boolean }) => (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 8,
-      background: warn ? 'rgba(244, 63, 94, 0.12)' : 'rgba(2, 6, 23, 0.5)',
-      border: `1px solid ${warn ? 'rgba(244, 63, 94, 0.4)' : 'rgba(255,255,255,0.07)'}`,
-      fontSize: 11.5, fontFamily: 'Outfit, sans-serif', whiteSpace: 'nowrap'
-    }}>
-      <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 5px ${color}`, flexShrink: 0 }} />
-      <span style={{ color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', fontSize: 9.5 }}>{label}</span>
-      <span style={{ color: warn ? '#fda4af' : '#f1f5f9', fontWeight: 700 }}>{value}</span>
-    </div>
-  );
-
   return (
     <div style={{ position: 'relative', width: '100%' }}>
       {/* ─── Cluster health summary + legend ─── */}
@@ -1623,6 +1844,26 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           }} />
           {live ? 'LIVE' : 'Paused'}
           {live && lastRefresh && <span style={{ fontWeight: 400, color: '#64748b' }}>{lastRefresh.toLocaleTimeString()}</span>}
+        </button>
+
+        {/* Animation budget. Auto keeps the flow dots on small graphs and drops
+            them once there are more than the canvas can animate smoothly. */}
+        <button
+          onClick={() => setMotion(m => (m === 'on' ? 'off' : 'on'))}
+          title={
+            motion === 'on'
+              ? 'Flow animation is on — dashes travel along every live link. Click to stop all movement.'
+              : 'Flow animation is off. Click to turn it back on.'
+          }
+          style={{
+            background: motion === 'off' ? 'rgba(2, 6, 23, 0.4)' : 'rgba(56, 189, 248, 0.12)',
+            border: `1px solid ${motion === 'off' ? 'rgba(255,255,255,0.08)' : 'rgba(56, 189, 248, 0.4)'}`,
+            borderRadius: '6px', color: motion === 'off' ? '#94a3b8' : '#38bdf8',
+            padding: '6px 12px', fontSize: '11px', cursor: 'pointer', fontWeight: 600,
+            display: 'flex', alignItems: 'center', gap: '5px'
+          }}
+        >
+          <Activity size={11} /> Flow: {motion === 'on' ? 'On' : 'Off'}
         </button>
 
         {/* Problems-only focus */}
@@ -1957,9 +2198,14 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         <ReactFlow
           nodes={flowNodes}
           edges={flowEdges}
+          onNodesChange={onNodesChange}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           onNodeClick={onNodeClick}
+          nodeDragThreshold={2}
+          // With ~90 cards, drawing the ones scrolled out of view costs more
+          // than the culling does.
+          onlyRenderVisibleElements
           fitView
           fitViewOptions={{ padding: 0.2 }}
           minZoom={0.2}
@@ -1971,12 +2217,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           nodesDraggable={true}
           style={{ width: '100%', height: isFullscreen ? 'calc(100vh - 40px)' : '100%' }}
         >
+          <LedStyles />
           <Background color="rgba(255,255,255,0.03)" gap={24} size={0.8} />
           <Controls
             showInteractive={false}
             style={{
-              background: 'rgba(15, 23, 42, 0.9)',
-              backdropFilter: 'blur(12px)',
+              // Opaque, not translucent-with-backdrop-blur: a backdrop filter
+              // sitting over a canvas that pans and zooms is re-blurred every
+              // frame of every interaction.
+              background: 'rgb(17, 25, 45)',
               border: '1px solid rgba(255,255,255,0.06)',
               color: '#e2e8f0',
               borderRadius: '10px',
@@ -1998,7 +2247,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
             }}
             maskColor="rgba(2, 6, 23, 0.75)"
             style={{
-              background: 'rgba(15, 23, 42, 0.9)',
+              background: 'rgb(17, 25, 45)',
               border: '1px solid rgba(255,255,255,0.06)',
               borderRadius: '10px',
               boxShadow: '0 4px 16px rgba(0,0,0,0.3)'

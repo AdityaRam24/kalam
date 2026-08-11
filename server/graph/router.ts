@@ -61,7 +61,7 @@ export function cachedGraph(name: string): InfraGraph | undefined {
 
 export async function buildGraphForVm(vm: VmEntry): Promise<{ graph?: InfraGraph; error?: string }> {
   if (!(await vmReachable(vm))) {
-    return { error: vm.via ? `Jump host "${vm.via}" unreachable` : 'SSH port unreachable' };
+    return { error: vm.via ? `Jump host "${vm.via}" unreachable` : 'Host unreachable on SSH (port 22)' };
   }
 
   const { stdout, stderr, ok } = await sshRun(vm, GRAPH_CMD, 45000);

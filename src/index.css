@@ -783,8 +783,10 @@ html[data-theme='dark'] .nav-item.active {
 }
 
 .topology-visualizer-container .react-flow__controls {
-  background: rgba(15, 23, 42, 0.95) !important;
-  backdrop-filter: blur(12px);
+  /* Opaque and unblurred on purpose: a backdrop-filter layered over a canvas
+     that pans and zooms is re-blurred every frame of every interaction, which
+     showed up as the whole map juddering while you moved around it. */
+  background: rgb(17, 25, 45) !important;
   border: 1px solid rgba(255,255,255,0.08) !important;
   border-radius: 10px !important;
   overflow: hidden;
