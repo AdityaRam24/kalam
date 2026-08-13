@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Server, utils } from 'ssh2';
 import type { AddressInfo } from 'net';
-import { sshExec, sshCheck, friendly } from '../ssh.js';
+import { sshExec, sshCheck, friendly, buildRemoteCommand, friendlyElevation } from '../ssh.js';
 
 const USER = 'kalam';
 const PASS = 'correct-horse';
@@ -54,6 +54,14 @@ describe('password SSH login', () => {
   it('authenticates with just host, user and password', async () => {
     const r = await sshExec({ name: 'vm', host: '127.0.0.1', user: USER, password: PASS }, 'uptime');
     expect(r.ok).toBe(true);
+    // The command reaches the host with a PATH prefix (see buildRemoteCommand)
+    // so tools in /usr/local/bin resolve the way they do in a real terminal.
+    expect(r.stdout).toContain('uptime');
+    expect(r.stdout).toContain('/usr/local/bin');
+  });
+
+  it('sends the command untouched when raw is requested', async () => {
+    const r = await sshExec({ name: 'vm', host: '127.0.0.1', user: USER, password: PASS }, 'uptime', 15000, undefined, { raw: true });
     expect(r.stdout).toContain('ran:uptime');
   });
 
@@ -66,6 +74,58 @@ describe('password SSH login', () => {
   it('does not hang or prompt when no credentials are supplied', async () => {
     const r = await sshCheck({ name: 'vm', host: '127.0.0.1', user: USER });
     expect(r.ok).toBe(false);
+  });
+});
+
+describe('buildRemoteCommand', () => {
+  const base = { name: 'vm', host: 'h', user: 'ubuntu', password: 'pw' };
+
+  it('runs user commands in a login shell so their PATH and profile apply', () => {
+    const b = buildRemoteCommand(base, 'kubectl get pods', { login: true });
+    expect(b.command).toContain('bash -lc');
+    expect(b.command).toContain('kubectl get pods');
+    expect(b.pty).toBe(false);
+  });
+
+  it('gives parsed probes an explicit PATH instead of a login shell', () => {
+    // A login shell would print profile banners into output that gets parsed.
+    const b = buildRemoteCommand(base, 'echo @@X@@');
+    expect(b.command).not.toContain('bash -lc');
+    expect(b.command).toContain('/usr/local/bin');
+  });
+
+  it('feeds the sudo password on stdin, never as an argument', () => {
+    const b = buildRemoteCommand({ ...base, elevate: 'sudo' }, 'crictl ps');
+    expect(b.command).toContain('sudo -S');
+    expect(b.command).not.toContain('pw'); // would otherwise show up in `ps`
+    expect(b.stdin).toBe('pw\n');
+  });
+
+  it('uses a separate elevation password when one is stored', () => {
+    const b = buildRemoteCommand({ ...base, elevate: 'su', elevatePassword: 'rootpw' }, 'id');
+    expect(b.command).toContain('su - root -c');
+    expect(b.stdin).toBe('rootpw\n');
+    expect(b.pty).toBe(true); // su refuses to run without a terminal
+  });
+
+  it('never wraps a root login in sudo', () => {
+    const b = buildRemoteCommand({ ...base, user: 'root', elevate: 'sudo' }, 'id');
+    expect(b.command).not.toContain('sudo');
+    expect(b.stdin).toBeUndefined();
+  });
+
+  it('quotes commands containing single quotes', () => {
+    const b = buildRemoteCommand(base, `awk '{print $1}'`, { login: true });
+    // Round-trips through the shell without ending the quoted string early.
+    expect(b.command).toContain(`'\\''`);
+  });
+});
+
+describe('friendlyElevation', () => {
+  it('explains why elevation failed in terms of what to change', () => {
+    expect(friendlyElevation('user is not in the sudoers file')).toMatch(/Log in as root|sudoers/);
+    expect(friendlyElevation('sudo: no tty present and no askpass program specified')).toMatch(/su to root/);
+    expect(friendlyElevation('sudo: 1 incorrect password attempt')).toMatch(/Wrong password/);
   });
 });
 

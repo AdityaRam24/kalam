@@ -1,8 +1,12 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, Network, Brain, History, Info, Share2, KeyRound } from 'lucide-react';
+import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, ShieldAlert, Network, Brain, History, Info, Share2, KeyRound } from 'lucide-react';
 import VmTopology from './VmTopology';
+import RemoteTerminal from './RemoteTerminal';
 
-interface VmEntry { name: string; host: string; user: string; hasPassword?: boolean; keyPath?: string; via?: string; }
+interface VmEntry {
+  name: string; host: string; user: string; hasPassword?: boolean; keyPath?: string; via?: string;
+  elevate?: 'none' | 'sudo' | 'su'; hasElevatePassword?: boolean; runsAsRoot?: boolean;
+}
 interface VmMetrics {
   name: string; host: string; reachable: boolean; error?: string;
   host_?: string; load?: string; ncpu?: string; mem?: string; disk?: string; gpu?: string; up?: string;
@@ -25,6 +29,72 @@ export const VmMonitor: React.FC = () => {
   const [creds, setCreds] = useState({ user: '', password: '' });
   const [credsBusy, setCredsBusy] = useState(false);
   const [credsMsg, setCredsMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Root access. Offered right after a VM is added or its credentials change,
+  // because most of what Kalam can discover on a host (containerd via crictl,
+  // service logs, /etc/kubernetes) is unreadable to an ordinary login — an
+  // unprivileged session reports a nearly empty machine and looks broken.
+  interface RootOptions {
+    reachable: boolean; error?: string; currentUser?: string; alreadyRoot?: boolean;
+    sudoAvailable?: boolean; sudoPasswordless?: boolean; suAvailable?: boolean; elevate?: string;
+  }
+  const [rootFor, setRootFor] = useState<string | null>(null);
+  const [rootOpts, setRootOpts] = useState<RootOptions | null>(null);
+  const [rootMode, setRootMode] = useState<'login' | 'sudo' | 'su'>('sudo');
+  const [rootPassword, setRootPassword] = useState('');
+  const [rootBusy, setRootBusy] = useState(false);
+  const [rootMsg, setRootMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const openRoot = useCallback(async (name: string) => {
+    setRootFor(name);
+    setRootOpts(null);
+    setRootMsg(null);
+    setRootPassword('');
+    setRootBusy(true);
+    try {
+      const res = await fetch(`/api/vms/${encodeURIComponent(name)}/root-options`, { method: 'POST' });
+      const data: RootOptions = await res.json();
+      setRootOpts(data);
+      // Recommend what this host actually supports rather than making the user
+      // guess: sudo where it exists, su where it does not, nothing if already root.
+      setRootMode(data.alreadyRoot ? 'login' : data.sudoAvailable ? 'sudo' : data.suAvailable ? 'su' : 'login');
+    } catch (e: any) {
+      setRootOpts({ reachable: false, error: e.message });
+    } finally {
+      setRootBusy(false);
+    }
+  }, []);
+
+  const applyRoot = async (mode: 'login' | 'sudo' | 'su' | 'none') => {
+    if (!rootFor) return;
+    setRootBusy(true);
+    setRootMsg(null);
+    try {
+      const res = await fetch(`/api/vms/${encodeURIComponent(rootFor)}/root`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, password: rootPassword || undefined }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setRootMsg({ ok: false, text: data.error || 'Failed to change the user.' }); return; }
+      if (!data.ok) { setRootMsg({ ok: false, text: data.error || 'Elevation failed.' }); return; }
+      setRootMsg({
+        ok: true,
+        text: mode === 'none'
+          ? 'Reverted — commands run as the login user again.'
+          : `Commands on ${rootFor} now run as root${mode === 'login' ? ' (logged in as root)' : ` (via ${mode})`}. Re-scanning what this host can see…`,
+      });
+      setRootPassword('');
+      await loadVms();
+      probe(rootFor);
+      // The point of getting root is seeing what was hidden before, so refresh
+      // discovery straight away rather than making the user ask again.
+      if (mode !== 'none') discover(rootFor);
+    } catch (e: any) {
+      setRootMsg({ ok: false, text: `Network error: ${e.message}` });
+    } finally {
+      setRootBusy(false);
+    }
+  };
 
   // Peer-VM discovery (hosts visible FROM a connected VM: K8s nodes, /etc/hosts, ARP)
   interface Neighbor { ip: string; hostname?: string; source: string; }
@@ -54,11 +124,8 @@ export const VmMonitor: React.FC = () => {
   const [formErr, setFormErr] = useState('');
   const [copied, setCopied] = useState('');
 
-  // Ad-hoc command runner
+  // Which VM has an interactive terminal open (see RemoteTerminal).
   const [execFor, setExecFor] = useState<string | null>(null);
-  const [command, setCommand] = useState('uptime');
-  const [execOut, setExecOut] = useState('');
-  const [execBusy, setExecBusy] = useState(false);
 
   // Remote workload discovery (containers + pods running ON the VM)
   interface Discovery {
@@ -211,6 +278,10 @@ export const VmMonitor: React.FC = () => {
       setForm(blankForm);
       setShowAdd(false);
       loadVms();
+      // A freshly connected host is exactly when root matters: offer it now,
+      // instead of leaving the user to discover later that half the machine
+      // was invisible to their login.
+      if (form.user !== 'root') openRoot(data.vm?.name || form.name);
     } catch (e: any) { setFormErr(`Network error: ${e.message}`); }
   };
 
@@ -240,9 +311,13 @@ export const VmMonitor: React.FC = () => {
       const data = await res.json();
       if (!res.ok) { setCredsMsg({ ok: false, text: data.error || 'Update failed' }); return; }
       if (data.warning) { setCredsMsg({ ok: false, text: data.warning }); loadVms(); return; }
+      const updated = credsFor;
       setCredsFor(null);
       loadVms();
-      probe(credsFor);
+      probe(updated);
+      // Same offer after an update — the login may have changed to one that
+      // needs (or no longer needs) elevation.
+      if (creds.user !== 'root') openRoot(updated);
     } catch (e: any) { setCredsMsg({ ok: false, text: `Network error: ${e.message}` }); } finally { setCredsBusy(false); }
   };
 
@@ -260,19 +335,6 @@ export const VmMonitor: React.FC = () => {
       setCopied(name);
       setTimeout(() => setCopied(''), 1800);
     } catch { /* clipboard unavailable */ }
-  };
-
-  const runCommand = async (name: string) => {
-    setExecBusy(true);
-    setExecOut('');
-    try {
-      const res = await fetch('/api/vms/exec', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, command }),
-      });
-      const data = await res.json();
-      setExecOut((data.output || '') + (data.error ? `\n[stderr] ${data.error}` : '') || '(no output)');
-    } catch (e: any) { setExecOut(`Network error: ${e.message}`); } finally { setExecBusy(false); }
   };
 
   const discover = async (name: string) => {
@@ -372,6 +434,12 @@ export const VmMonitor: React.FC = () => {
                     <td><strong>{v.name}</strong></td>
                     <td>
                       <span className="code-id">{v.user}@{v.host}</span>
+                      {v.runsAsRoot && (
+                        <span className="badge error" style={{ fontSize: 9, marginLeft: 6 }}
+                          title={v.user === 'root' ? 'Logged in as root' : `Commands are elevated with ${v.elevate}`}>
+                          root{v.user === 'root' ? '' : ` · ${v.elevate}`}
+                        </span>
+                      )}
                       {v.via && <span className="badge neutral" style={{ fontSize: 9, marginLeft: 6 }} title={`SSH hops through ${v.via}`}>via {v.via}</span>}
                       {!v.hasPassword && !v.keyPath && <span className="badge warning" style={{ fontSize: 9, marginLeft: 6 }} title="No password or key saved for this host">no credentials</span>}
                     </td>
@@ -387,7 +455,8 @@ export const VmMonitor: React.FC = () => {
                         <button className="icon-btn primary" title="Explain this node — what it is, why each component runs here, what changed" onClick={() => explain(v.name)}><Brain size={14} className={brainBusy[v.name] ? 'loader' : ''} /></button>
                         <button className="icon-btn secondary" title="Find peer VMs visible from this host" onClick={() => findNeighbors(v.name)}><Network size={14} className={neighborsBusy && neighborsFor === v.name ? 'loader' : ''} /></button>
                         <button className="icon-btn warning" title="Diagnose cluster (read-only kubectl checks)" onClick={() => diagnose(v.name)}><Activity size={14} className={diagBusy[v.name] ? 'loader' : ''} /></button>
-                        <button className="icon-btn secondary" title="Run remote command" onClick={() => { setExecFor(v.name); setExecOut(''); }}><Play size={14} /></button>
+                        <button className="icon-btn secondary" title="Open an interactive terminal" onClick={() => setExecFor(v.name)}><Play size={14} /></button>
+                        <button className={`icon-btn ${v.runsAsRoot ? 'success' : 'warning'}`} title={v.runsAsRoot ? 'Root access — change or revert' : 'Switch this host to root (sudo / su / root login)'} onClick={() => openRoot(v.name)}><ShieldAlert size={14} className={rootBusy && rootFor === v.name ? 'loader' : ''} /></button>
                         <button className="icon-btn secondary" title="Change login / password" onClick={() => { setCredsFor(v.name); setCreds({ user: v.user, password: '' }); setCredsMsg(null); }}><KeyRound size={14} /></button>
                         <button className="icon-btn secondary" title="Copy SSH command" onClick={() => copySsh(v.name)}>{copied === v.name ? <Check size={14} /> : <Copy size={14} />}</button>
                         <button className="icon-btn danger" title="Remove from inventory" onClick={() => removeVm(v.name)}><Trash2 size={14} /></button>
@@ -418,6 +487,122 @@ export const VmMonitor: React.FC = () => {
             </div>
           </form>
         )}
+
+        {/* Root access for a host that was just added or updated */}
+        {rootFor && (() => {
+          const vm = vms.find((v) => v.name === rootFor);
+          const o = rootOpts;
+          const already = o?.alreadyRoot || vm?.user === 'root';
+          const modeCard = (
+            mode: 'login' | 'sudo' | 'su',
+            title: string,
+            body: string,
+            disabled?: string,
+          ) => (
+            <label key={mode}
+              style={{
+                display: 'flex', gap: 10, alignItems: 'flex-start', padding: '10px 12px', borderRadius: 8,
+                border: `1px solid ${rootMode === mode ? 'var(--hpe-green)' : 'var(--border-color)'}`,
+                background: rootMode === mode ? 'rgba(1, 169, 130, 0.08)' : 'var(--bg-tertiary)',
+                cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1,
+              }}>
+              <input type="radio" name="rootmode" checked={rootMode === mode} disabled={!!disabled}
+                onChange={() => setRootMode(mode)} style={{ marginTop: 3 }} />
+              <span>
+                <span style={{ fontSize: 13, fontWeight: 600, display: 'block' }}>{title}</span>
+                <span style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{disabled || body}</span>
+              </span>
+            </label>
+          );
+
+          return (
+            <div style={{ marginTop: 12, padding: 14, background: 'var(--bg-tertiary)', borderRadius: 10, border: '1px solid var(--border-color)', borderLeft: '3px solid var(--hpe-green)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>
+                  <ShieldAlert size={14} style={{ verticalAlign: -2, marginRight: 6, color: 'var(--hpe-green)' }} />
+                  Root access on {rootFor}
+                  {vm?.runsAsRoot && <span className="badge error" style={{ fontSize: 10, marginLeft: 8 }}>currently root</span>}
+                </div>
+                <button className="icon-btn" onClick={() => setRootFor(null)}><X size={16} /></button>
+              </div>
+
+              <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 10px' }}>
+                Discovery reads containerd (<code>crictl</code>), kubelet config, service logs and package history — all of
+                which an ordinary login cannot see, so an unelevated host looks almost empty. Pick how Kalam should become
+                root; the choice is verified against the host before it is saved.
+              </p>
+
+              {rootBusy && !o ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-secondary)', fontSize: 12 }}>
+                  <span className="loader" /> Checking what this host allows…
+                </div>
+              ) : o && !o.reachable ? (
+                <p style={{ color: 'var(--status-error)', fontSize: 12 }}>{o.error || 'Host unreachable.'}</p>
+              ) : (
+                <>
+                  {o && (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                      <span className="badge neutral" style={{ fontSize: 10 }}>logs in as {o.currentUser || vm?.user}</span>
+                      {o.alreadyRoot && <span className="badge running" style={{ fontSize: 10 }}>already root</span>}
+                      {o.sudoPasswordless && <span className="badge running" style={{ fontSize: 10 }}>passwordless sudo</span>}
+                      {!o.sudoAvailable && <span className="badge warning" style={{ fontSize: 10 }}>no sudo</span>}
+                      {!o.suAvailable && <span className="badge warning" style={{ fontSize: 10 }}>no su</span>}
+                    </div>
+                  )}
+
+                  {already ? (
+                    <p style={{ fontSize: 12.5, color: 'var(--hpe-green)', margin: '0 0 10px' }}>
+                      <Check size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
+                      This login is already root — nothing to change. Everything Kalam runs here is fully privileged.
+                    </p>
+                  ) : (
+                    <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
+                      {modeCard('sudo', 'Keep this login, run commands with sudo',
+                        o?.sudoPasswordless
+                          ? 'This host allows passwordless sudo — leave the password blank.'
+                          : 'Uses the password below (usually the same login password). Recommended.',
+                        o && !o.sudoAvailable ? 'sudo is not installed on this host.' : undefined)}
+                      {modeCard('su', 'Keep this login, switch with su - root',
+                        'Uses root’s own password. Use this when the login is not a sudoer.',
+                        o && !o.suAvailable ? 'su is not available on this host.' : undefined)}
+                      {modeCard('login', 'Log in as root directly',
+                        'Replaces the stored login with root and root’s password. Fails if the host denies root SSH login.')}
+                    </div>
+                  )}
+
+                  {!already && (
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                      <div className="form-group" style={{ flex: '1 1 220px' }}>
+                        <label style={{ fontSize: 12 }}>
+                          {rootMode === 'sudo' ? 'sudo password' : rootMode === 'su' ? 'root password' : 'root’s SSH password'}
+                          {rootMode === 'sudo' && ' (blank = reuse the login password)'}
+                        </label>
+                        <input className="form-input" type="password" autoComplete="new-password" value={rootPassword}
+                          onChange={(e) => setRootPassword(e.target.value)} placeholder="••••••••" />
+                      </div>
+                      <button className="btn primary" style={{ height: 40 }} disabled={rootBusy} onClick={() => applyRoot(rootMode)}>
+                        {rootBusy ? <RefreshCw size={14} className="loader" /> : <ShieldAlert size={14} />} Become root
+                      </button>
+                      {vm?.runsAsRoot && vm.user !== 'root' && (
+                        <button className="btn secondary" style={{ height: 40 }} disabled={rootBusy} onClick={() => applyRoot('none')}>
+                          Revert to {vm.user}
+                        </button>
+                      )}
+                      <button className="btn secondary" style={{ height: 40 }} onClick={() => setRootFor(null)}>Not now</button>
+                    </div>
+                  )}
+
+                  {rootMsg && (
+                    <div style={{ marginTop: 10, fontSize: 12, color: rootMsg.ok ? 'var(--hpe-green)' : 'var(--status-error)' }}>
+                      {rootMsg.ok ? <Check size={12} style={{ verticalAlign: -2, marginRight: 4 }} /> : <AlertTriangle size={12} style={{ verticalAlign: -2, marginRight: 4 }} />}
+                      {rootMsg.text}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })()}
 
         <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
           <Terminal size={11} style={{ verticalAlign: -1, marginRight: 4 }} />
@@ -936,21 +1121,14 @@ export const VmMonitor: React.FC = () => {
         );
       })()}
 
-      {/* Remote command runner */}
+      {/* Interactive terminal (persistent login shell over SSH) */}
       {execFor && (
-        <div className="panel-card" style={{ borderLeft: '3px solid var(--hpe-green)' }}>
-          <div className="panel-card-title">
-            <h2><Cpu size={18} /> Remote Command · {execFor}</h2>
-            <button className="icon-btn" onClick={() => setExecFor(null)}><X size={16} /></button>
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-            <input className="form-input" style={{ flex: 1, fontFamily: 'var(--font-mono)' }} value={command} onChange={(e) => setCommand(e.target.value)} placeholder="e.g. nvidia-smi" onKeyDown={(e) => { if (e.key === 'Enter') runCommand(execFor); }} />
-            <button className="btn primary" onClick={() => runCommand(execFor)} disabled={execBusy}><Play size={14} /> {execBusy ? 'Running…' : 'Run'}</button>
-          </div>
-          {execOut && (
-            <pre style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 8, padding: 12, fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', margin: 0 }}>{execOut}</pre>
-          )}
-        </div>
+        <RemoteTerminal
+          key={execFor}
+          vm={execFor}
+          asRoot={!!vms.find((v) => v.name === execFor)?.runsAsRoot && vms.find((v) => v.name === execFor)?.user !== 'root'}
+          onClose={() => setExecFor(null)}
+        />
       )}
     </div>
   );

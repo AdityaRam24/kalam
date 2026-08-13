@@ -162,6 +162,39 @@ export function App() {
   const [dockerFilter, setDockerFilter] = useState<'all' | 'running' | 'stopped'>('all');
   const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services'>('all');
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
+
+  // ── Where the cluster views read from ────────────────────────────────────
+  // Kalam started as a local-only tool, so every view queried the Docker and
+  // Kubernetes running on THIS machine. With hosts in the VM inventory the
+  // interesting cluster is usually somewhere else, so the source is picked once
+  // here and every view (dashboard, topology, Docker, Kubernetes) follows it.
+  const [source, setSource] = useState<string>(() => localStorage.getItem('kalam_source') || 'local');
+  const [vmList, setVmList] = useState<Array<{ name: string; host: string; user: string; via?: string; runsAsRoot?: boolean }>>([]);
+  const isRemote = source !== 'local';
+
+  useEffect(() => { localStorage.setItem('kalam_source', source); }, [source]);
+
+  useEffect(() => {
+    const load = () => fetch('/api/vms')
+      .then(r => r.json())
+      .then(d => setVmList(d.vms || []))
+      .catch(() => { /* backend down — the picker just shows "This machine" */ });
+    load();
+    // The inventory changes on the VMs tab; pick that up without a reload.
+    const id = setInterval(load, 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // A source that was removed from the inventory must not leave the app
+  // querying a host that no longer exists.
+  useEffect(() => {
+    if (isRemote && vmList.length && !vmList.some(v => v.name === source)) setSource('local');
+  }, [vmList, source, isRemote]);
+
+  const sourceOptions = [
+    { name: 'local', label: 'This machine' },
+    ...vmList.map(v => ({ name: v.name, label: `${v.name} (${v.user}@${v.host})${v.via ? ` via ${v.via}` : ''}` })),
+  ];
   const [status, setStatus] = useState<SystemStatus>({
     docker: { installed: false, version: '', running: false },
     kubernetes: { installed: false, version: '', running: false, context: '' }
@@ -528,6 +561,48 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
       setLoading(true);
     }
     setErrorMsg(null);
+
+    // Remote source: one SSH round trip enumerates the VM's containers, pods,
+    // services, nodes and deployments, mapped into the same shapes the local
+    // endpoints return so every view downstream works unchanged.
+    if (isRemote) {
+      try {
+        const res = await fetch('/api/vms/discover', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: source }),
+        });
+        const d = await res.json();
+        if (d.error || d.reachable === false) {
+          setErrorMsg(`${source}: ${d.error || 'host unreachable over SSH'}. Check the host on the Virtual Machines tab.`);
+          setStatus({ docker: { installed: false, version: '', running: false }, kubernetes: { installed: false, version: '', running: false, context: source } });
+          setDockerContainers([]);
+          setK8sResources({ pods: [], services: [], deployments: [], nodes: [] });
+          return;
+        }
+        const engines: string[] = d.engines || [];
+        const hasKube = engines.includes('kubectl');
+        setStatus({
+          docker: { installed: engines.includes('docker'), version: engines.includes('docker') ? `docker (on ${source})` : 'Not found', running: (d.containers || []).length > 0 || engines.includes('docker') },
+          kubernetes: { installed: hasKube, version: hasKube ? `kubectl (on ${source})` : 'Not found', running: (d.pods || []).length > 0 || (d.nodes || []).length > 0, context: source },
+        });
+        setDockerContainers(d.containers || []);
+        setK8sResources({
+          pods: d.pods || [], services: d.services || [],
+          deployments: d.deployments || [], nodes: d.nodes || [],
+        });
+        // Nothing at all usually means the login cannot see it: crictl, the
+        // kubeconfig and most of /var/log are root-only.
+        if (!(d.containers || []).length && !(d.pods || []).length && !engines.length) {
+          setErrorMsg(`No container runtime was visible on ${source}. If this host does run Docker or Kubernetes, give Kalam root there (Virtual Machines tab → shield icon) and re-scan.`);
+        }
+      } catch (e: any) {
+        setErrorMsg(`Failed to read ${source} over SSH: ${e.message}`);
+      } finally {
+        setLoading(false);
+        hasDataRef.current = true;
+      }
+      return;
+    }
+
     try {
       // Get Status. A network/proxy failure here means the BACKEND is down
       // (not Docker/K8s) — surface that distinctly so it's actionable.
@@ -576,7 +651,9 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
     if (!autoRefresh) return;
     const interval = setInterval(fetchClusterState, 10000);
     return () => clearInterval(interval);
-  }, [autoRefresh]);
+    // Switching source re-reads immediately rather than waiting for the timer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRefresh, source]);
 
   // Save API Key
   const handleSaveApiKey = (key: string) => {
@@ -589,11 +666,14 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
     setLogsLoading(true);
     setLogs('');
     try {
-      const url = type === 'docker' 
-        ? `/api/docker/logs/${id}`
-        : `/api/k8s/logs/${namespace}/${id}`;
-      
-      const res = await fetch(url);
+      // Same request against whichever machine is selected: locally through the
+      // Docker/kubectl on this box, remotely over SSH on the chosen VM.
+      const res = isRemote
+        ? await fetch('/api/vms/logs', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: source, kind: type === 'docker' ? 'docker' : 'pod', id, namespace }),
+          })
+        : await fetch(type === 'docker' ? `/api/docker/logs/${id}` : `/api/k8s/logs/${namespace}/${id}`);
       const data = await res.json();
       if (res.ok) {
         setLogs(data.logs || 'No logs generated.');
@@ -615,16 +695,21 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
   // Trigger container actions
   const triggerDockerAction = async (action: 'start' | 'stop' | 'restart' | 'remove', id: string) => {
-    if (!confirm(`Are you sure you want to ${action} container ${id}?`)) return;
+    if (!confirm(`Are you sure you want to ${action} container ${id}${isRemote ? ` on ${source}` : ''}?`)) return;
     setLoading(true);
     try {
-      const res = await fetch('/api/docker/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, containerId: id })
-      });
+      const res = isRemote
+        ? await fetch('/api/vms/action', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: source, kind: 'docker', action, id }),
+          })
+        : await fetch('/api/docker/action', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, containerId: id })
+          });
       const data = await res.json();
-      if (!res.ok) {
+      if (!res.ok || data.ok === false) {
         alert(`Failed: ${data.error || 'Action failed'}`);
       }
     } catch (e: any) {
@@ -638,13 +723,18 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
   const triggerK8sAction = async (action: 'restart_deploy' | 'scale_deploy' | 'delete_pod', name: string, namespace: string, replicas?: number) => {
     setLoading(true);
     try {
-      const res = await fetch('/api/k8s/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, name, namespace, replicas })
-      });
+      const res = isRemote
+        ? await fetch('/api/vms/action', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: source, kind: 'k8s', action, id: name, namespace, replicas }),
+          })
+        : await fetch('/api/k8s/action', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, name, namespace, replicas })
+          });
       const data = await res.json();
-      if (!res.ok) {
+      if (!res.ok || data.ok === false) {
         alert(`Failed: ${data.error || 'Action failed'}`);
       }
     } catch (e: any) {
@@ -1085,6 +1175,38 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           </div>
 
           <div className="topbar-right">
+            {/* Source: this machine, or any SSH-connected VM / cluster node.
+                Everything below (dashboard, topology, Docker, Kubernetes) reads
+                from whatever is selected here. */}
+            <div
+              className="cluster-kpi-pill"
+              title="Which machine the Docker and Kubernetes views read from"
+              style={{
+                gap: 6,
+                borderColor: isRemote ? 'var(--hpe-green-border)' : undefined,
+                background: isRemote ? 'rgba(1, 167, 129, 0.06)' : undefined,
+              }}
+            >
+              <Server size={13} style={{ color: isRemote ? 'var(--hpe-green)' : 'var(--text-muted)' }} />
+              <select
+                value={source}
+                onChange={(e) => setSource(e.target.value)}
+                style={{
+                  background: 'transparent', border: 'none', outline: 'none', cursor: 'pointer',
+                  color: 'var(--text-primary)', fontSize: 12, fontWeight: 600, maxWidth: 230,
+                }}
+              >
+                {sourceOptions.map(o => <option key={o.name} value={o.name}>{o.label}</option>)}
+              </select>
+              {isRemote && <span className="badge running" style={{ fontSize: 9 }}>SSH</span>}
+            </div>
+
+            {vmList.length === 0 && (
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="Add hosts on the Virtual Machines tab to view their Docker and Kubernetes here">
+                local only
+              </span>
+            )}
+
             {/* HPE GreenLake Tenant & SLA Badges */}
             <div className="cluster-kpi-pill" title="HPE Tenant" style={{ borderColor: 'var(--hpe-green-border)', background: 'rgba(1, 167, 129, 0.06)' }}>
               <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--hpe-green)' }}></span>
@@ -1162,6 +1284,32 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             </div>
           )}
 
+          {/* Remote source banner: it must never be ambiguous whose containers
+              are on screen, especially before an action is taken. */}
+          {isRemote && ['dashboard', 'docker', 'k8s', 'security'].includes(activeTab) && (
+            <div className="panel-card" style={{ borderLeft: '4px solid var(--hpe-green)', padding: '12px 16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 13 }}>
+                <Server size={16} style={{ color: 'var(--hpe-green)' }} />
+                <span>
+                  Showing <strong>{source}</strong> over SSH
+                  {(() => { const v = vmList.find(x => x.name === source); return v ? ` (${v.user}@${v.host})` : ''; })()}.
+                  Containers, pods and the actions on this page apply to that host, not to this machine.
+                </span>
+                {vmList.find(v => v.name === source)?.runsAsRoot === false && (
+                  <span className="badge warning" style={{ fontSize: 10 }} title="Some workloads stay invisible without root">
+                    not root — some workloads may be hidden
+                  </span>
+                )}
+                {activeTab === 'security' && (
+                  <span className="badge warning" style={{ fontSize: 10 }}>image scanning still runs locally</span>
+                )}
+                <button className="btn secondary" style={{ padding: '4px 10px', fontSize: 12, marginLeft: 'auto' }} onClick={() => setSource('local')}>
+                  Back to this machine
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* DASHBOARD TAB */}
           {activeTab === 'dashboard' && (
             <div className="tab-panel" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -1234,7 +1382,14 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                       <span>Scanning cluster topology graph...</span>
                     </div>
                   ) : dockerContainers.length > 0 || k8sResources.pods.length > 0 ? (
-                    <TopologyGraph containers={dockerContainers} k8sResources={k8sResources} onRefresh={fetchClusterState} />
+                    <TopologyGraph
+                      containers={dockerContainers}
+                      k8sResources={k8sResources}
+                      onRefresh={fetchClusterState}
+                      source={source}
+                      onSourceChange={setSource}
+                      sources={sourceOptions}
+                    />
                   ) : (
                     <div className="text-secondary" style={{ fontStyle: 'italic', padding: '32px', textAlign: 'center' }}>
                       No active containers or nodes detected to generate visual map.
