@@ -747,8 +747,13 @@ const DISCOVER_CMD = [
   "(kubectl get nodes -o json 2>/dev/null || true)",
   "echo @@KDEPLOYS@@",
   "(kubectl get deploy -A -o json 2>/dev/null || true)",
+  // -a so exited containers are visible too, matching `docker ps -a` above.
   "echo @@CRICTL@@",
-  "(sudo -n crictl ps -o json 2>/dev/null || crictl ps -o json 2>/dev/null || true)",
+  "(sudo -n crictl ps -a -o json 2>/dev/null || crictl ps -a -o json 2>/dev/null || true)",
+  "echo @@NERDCTL@@",
+  "(nerdctl ps -a --format '{{json .}}' 2>/dev/null || true)",
+  "echo @@PODMAN@@",
+  "(podman ps -a --format json 2>/dev/null || true)",
   "echo @@SYSTEMD@@",
   "(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | head -50 || true)",
   "echo @@PORTS@@",
@@ -762,6 +767,92 @@ export function section(text: string, tag: string): string {
   const from = start + tag.length + 4;
   const nextIdx = text.indexOf('@@', from);
   return text.slice(from, nextIdx < 0 ? undefined : nextIdx).trim();
+}
+
+// Containers from crictl (containerd). This is the ONLY container view on a
+// normal Kubernetes node, which has no docker binary at all.
+export function parseCrictl(stdout: string): any[] {
+  const out: any[] = [];
+  try {
+    const craw = section(stdout, 'CRICTL');
+    if (!craw.startsWith('{')) return out;
+    for (const c of JSON.parse(craw).containers || []) {
+      out.push({
+        id: (c.id || '').slice(0, 12),
+        name: c.metadata?.name || '',
+        state: (c.state || '').replace('CONTAINER_', ''),
+        image: c.image?.image || c.imageRef || '',
+        pod: c.labels?.['io.kubernetes.pod.name'] || '',
+      });
+    }
+  } catch { /* ignore parse errors */ }
+  return out;
+}
+
+// Every container on the host, whatever runtime is running it, normalized into
+// one list. Docker is one option among four here — the dashboard and topology
+// read this list and must not care which engine produced an entry, so each
+// carries a `runtime` tag and the docker-shaped fields the views already use.
+//
+// Missing runtimes are a no-op: their sections come back empty from the shell
+// guards in DISCOVER_CMD, so a host with none of them yields [].
+export function parseContainers(stdout: string): any[] {
+  const containers: any[] = [];
+
+  // Docker and nerdctl: one JSON object per line, identical field names.
+  for (const [tag, runtime] of [['DOCKER', 'docker'], ['NERDCTL', 'nerdctl']] as const) {
+    for (const line of section(stdout, tag).split('\n')) {
+      const t = line.trim();
+      if (!t.startsWith('{')) continue;
+      try {
+        const p = JSON.parse(t);
+        containers.push({
+          id: p.ID,
+          name: p.Names,
+          image: p.Image,
+          status: p.Status,
+          state: p.State || (String(p.Status || '').toLowerCase().includes('up') ? 'running' : 'exited'),
+          ports: p.Ports || '',
+          runtime,
+        });
+      } catch { /* skip bad line */ }
+    }
+  }
+
+  // Podman: a single JSON array, with its own field casing.
+  try {
+    const praw = section(stdout, 'PODMAN');
+    if (praw.startsWith('[')) {
+      for (const c of JSON.parse(praw) || []) {
+        containers.push({
+          id: String(c.Id || '').slice(0, 12),
+          name: (c.Names || [])[0] || '',
+          image: c.Image || c.ImageName || '',
+          status: c.Status || c.State || '',
+          state: String(c.State || '').toLowerCase() === 'running' ? 'running' : 'exited',
+          ports: (c.Ports || [])
+            .map((x: any) => `${x.host_port || ''}:${x.container_port || ''}`)
+            .filter((x: string) => x !== ':')
+            .join(', '),
+          runtime: 'podman',
+        });
+      }
+    }
+  } catch { /* ignore parse errors */ }
+
+  // containerd, mapped onto the same shape. crictl reports RUNNING/EXITED/
+  // CREATED; the views filter on a lowercase 'running' exactly as for docker.
+  for (const c of parseCrictl(stdout)) {
+    containers.push({
+      ...c,
+      state: String(c.state).toLowerCase() === 'running' ? 'running' : 'exited',
+      status: c.state,
+      ports: '',
+      runtime: 'containerd',
+    });
+  }
+
+  return containers;
 }
 
 vmsRouter.post('/api/vms/discover', async (req, res) => {
@@ -780,20 +871,8 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
 
   const engines = section(stdout, 'ENGINES').split('\n').map((s) => s.trim()).filter(Boolean);
 
-  // Docker containers (one JSON object per line).
-  const containers: any[] = [];
-  for (const line of section(stdout, 'DOCKER').split('\n')) {
-    const t = line.trim();
-    if (!t.startsWith('{')) continue;
-    try {
-      const p = JSON.parse(t);
-      containers.push({
-        id: p.ID, name: p.Names, image: p.Image, status: p.Status,
-        state: p.State || (String(p.Status || '').toLowerCase().includes('up') ? 'running' : 'exited'),
-        ports: p.Ports || '',
-      });
-    } catch { /* skip bad line */ }
-  }
+  // Containers, from whichever runtime the host actually has.
+  const containers: any[] = parseContainers(stdout);
 
   // Kubernetes pods (kubectl -o json).
   const pods: any[] = [];
@@ -820,22 +899,11 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
     }
   } catch { /* ignore parse errors */ }
 
-  // containerd via crictl (fallback container view on K8s nodes without docker).
-  const crictl: any[] = [];
-  try {
-    const craw = section(stdout, 'CRICTL');
-    if (craw.startsWith('{')) {
-      for (const c of JSON.parse(craw).containers || []) {
-        crictl.push({
-          id: (c.id || '').slice(0, 12),
-          name: c.metadata?.name || '',
-          state: (c.state || '').replace('CONTAINER_', ''),
-          image: c.image?.image || c.imageRef || '',
-          pod: c.labels?.['io.kubernetes.pod.name'] || '',
-        });
-      }
-    }
-  } catch { /* ignore parse errors */ }
+  // containerd via crictl — the primary container view on a Kubernetes node,
+  // which normally has no docker at all. Kept as its own `crictl` key for
+  // callers that want the raw shape, AND folded into `containers` so the
+  // dashboard and topology see these hosts' workloads like any other.
+  const crictl: any[] = parseCrictl(stdout);
 
   // Kubernetes services (kubectl get svc -A -o json).
   const services: any[] = [];

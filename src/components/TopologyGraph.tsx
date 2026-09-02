@@ -1785,6 +1785,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       nodesReady,
       docker: effContainers.length,
       dockerRunning,
+      // Which runtimes these containers actually came from. Docker is one
+      // option; a plain Kubernetes node reports containerd instead.
+      runtimes: Array.from(new Set(effContainers.map(c => (c as any).runtime || 'docker'))).sort(),
     };
   }, [effContainers, effK8s]);
 
@@ -1811,8 +1814,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         {healthStats.pods > 0 && <StatChip color="#34d399" label="Pods" value={`${healthStats.podsRunning}/${healthStats.pods} healthy`} />}
         {healthStats.services > 0 && <StatChip color="#fbbf24" label="Services" value={String(healthStats.services)} />}
         {healthStats.deployments > 0 && <StatChip color="#a78bfa" label="Deploys" value={String(healthStats.deployments)} />}
-        {healthStats.docker > 0 && <StatChip color="#38bdf8" label="Docker" value={`${healthStats.dockerRunning}/${healthStats.docker} up`} />}
-        {healthStats.pods === 0 && healthStats.docker === 0 && (
+        {healthStats.docker > 0 && (
+          <StatChip
+            color="#38bdf8"
+            label={healthStats.runtimes.length === 1 ? healthStats.runtimes[0] : 'Containers'}
+            value={`${healthStats.dockerRunning}/${healthStats.docker} up`}
+          />
+        )}
+        {healthStats.pods === 0 && healthStats.docker === 0 && healthStats.nodes === 0 &&
+          healthStats.services === 0 && healthStats.deployments === 0 && (
           <span style={{ fontSize: 12, color: '#64748b', fontFamily: 'Outfit, sans-serif' }}>No workloads detected yet.</span>
         )}
       </div>
