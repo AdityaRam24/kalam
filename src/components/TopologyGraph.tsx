@@ -65,7 +65,14 @@ interface K8sResources {
 interface TopologyGraphProps {
   containers: Container[];
   k8sResources: K8sResources;
-  onRefresh?: () => Promise<void> | void; // re-fetch local data (used by Live mode)
+  onRefresh?: () => Promise<void> | void; // re-fetch the current source (used by Live mode)
+  // Controlled source: when the app owns "which machine am I looking at", it
+  // passes the choice and the matching data down, and the picker here only
+  // reports changes. Left undefined, this component manages its own source and
+  // fetches remote VMs itself.
+  source?: string;
+  onSourceChange?: (source: string) => void;
+  sources?: Array<{ name: string; label: string }>;
 }
 
 // Canvas node ids. Built in exactly one place so that "which card is this?"
@@ -603,7 +610,10 @@ const nodeTypes = {
 };
 
 
-const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResources, onRefresh }) => {
+const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
+  containers, k8sResources, onRefresh,
+  source: sourceProp, onSourceChange, sources: sourcesProp,
+}) => {
   const { fitView } = useReactFlow();
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -616,8 +626,16 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
   const [changeIndex, setChangeIndex] = useState<Record<string, { count: number; lastAt: string; kind: string; severity: string; summary: string }>>({});
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // ── Source selector: this machine, or any SSH-connected VM ──
-  const [source, setSource] = useState<string>('local');
+  // ── Source selector: this machine, or any SSH-connected VM / node ──
+  // `controlled` means the app above is doing the fetching for the chosen
+  // source and handing the result down as props.
+  const controlled = sourceProp !== undefined;
+  const [innerSource, setInnerSource] = useState<string>('local');
+  const source = controlled ? sourceProp! : innerSource;
+  const setSource = useCallback((s: string) => {
+    if (onSourceChange) onSourceChange(s);
+    if (!controlled) setInnerSource(s);
+  }, [controlled, onSourceChange]);
   const [vmNames, setVmNames] = useState<string[]>([]);
   const [remote, setRemote] = useState<{ containers: Container[]; k8s: K8sResources } | null>(null);
   const [remoteBusy, setRemoteBusy] = useState(false);
@@ -656,8 +674,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
   }, []);
 
   useEffect(() => {
+    if (sourcesProp) return; // the app supplied the list
     fetch('/api/vms').then(r => r.json()).then(d => setVmNames((d.vms || []).map((v: any) => v.name))).catch(() => {});
-  }, []);
+  }, [sourcesProp]);
+
+  // What the picker offers: the app's list, or the inventory we fetched.
+  const sourceOptions = sourcesProp || [
+    { name: 'local', label: 'This machine' },
+    ...vmNames.map(n => ({ name: n, label: `VM: ${n}` })),
+  ];
 
   // Map a VM's discover payload into the same shapes the local topology uses.
   const fetchRemote = useCallback(async (vmName: string, silent = false) => {
@@ -688,9 +713,10 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
   }, []);
 
   useEffect(() => {
+    if (controlled) return; // the app fetches for whichever source is selected
     if (source !== 'local') fetchRemote(source);
     else { setRemote(null); setRemoteErr(''); }
-  }, [source, fetchRemote]);
+  }, [controlled, source, fetchRemote]);
 
   // Live mode: poll the active source every 8 seconds.
   //
@@ -704,16 +730,17 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
   useEffect(() => {
     if (!live) return;
     const tick = async () => {
-      if (source === 'local') { await onRefreshRef.current?.(); setLastRefresh(new Date()); }
+      if (controlled || source === 'local') { await onRefreshRef.current?.(); setLastRefresh(new Date()); }
       else await fetchRemote(source, true);
     };
     const id = setInterval(tick, 8000);
     return () => clearInterval(id);
-  }, [live, source, fetchRemote]);
+  }, [live, controlled, source, fetchRemote]);
 
-  // Effective data feeding the graph (local props or remote VM snapshot).
-  const rawEffContainers = source === 'local' ? containers : (remote?.containers || []);
-  const rawEffK8s = source === 'local' ? k8sResources : (remote?.k8s || { pods: [], services: [], deployments: [], nodes: [] });
+  // Effective data feeding the graph. In controlled mode the props already hold
+  // the selected source's snapshot; otherwise local props or our own remote fetch.
+  const rawEffContainers = controlled || source === 'local' ? containers : (remote?.containers || []);
+  const rawEffK8s = controlled || source === 'local' ? k8sResources : (remote?.k8s || { pods: [], services: [], deployments: [], nodes: [] });
 
   // Every poll hands us brand-new array/object identities even when the cluster
   // has not changed at all. Feeding those straight into the layout memos rebuilt
@@ -1758,6 +1785,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
       nodesReady,
       docker: effContainers.length,
       dockerRunning,
+      // Which runtimes these containers actually came from. Docker is one
+      // option; a plain Kubernetes node reports containerd instead.
+      runtimes: Array.from(new Set(effContainers.map(c => (c as any).runtime || 'docker'))).sort(),
     };
   }, [effContainers, effK8s]);
 
@@ -1784,8 +1814,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
         {healthStats.pods > 0 && <StatChip color="#34d399" label="Pods" value={`${healthStats.podsRunning}/${healthStats.pods} healthy`} />}
         {healthStats.services > 0 && <StatChip color="#fbbf24" label="Services" value={String(healthStats.services)} />}
         {healthStats.deployments > 0 && <StatChip color="#a78bfa" label="Deploys" value={String(healthStats.deployments)} />}
-        {healthStats.docker > 0 && <StatChip color="#38bdf8" label="Docker" value={`${healthStats.dockerRunning}/${healthStats.docker} up`} />}
-        {healthStats.pods === 0 && healthStats.docker === 0 && (
+        {healthStats.docker > 0 && (
+          <StatChip
+            color="#38bdf8"
+            label={healthStats.runtimes.length === 1 ? healthStats.runtimes[0] : 'Containers'}
+            value={`${healthStats.dockerRunning}/${healthStats.docker} up`}
+          />
+        )}
+        {healthStats.pods === 0 && healthStats.docker === 0 && healthStats.nodes === 0 &&
+          healthStats.services === 0 && healthStats.deployments === 0 && (
           <span style={{ fontSize: 12, color: '#64748b', fontFamily: 'Outfit, sans-serif' }}>No workloads detected yet.</span>
         )}
       </div>
@@ -1811,15 +1848,14 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({ containers, k8sResou
           <select
             value={source}
             onChange={(e) => setSource(e.target.value)}
-            title="Which machine's topology to display"
+            title="Which machine's topology to display — this machine, or a connected VM / cluster node"
             style={{
               background: source === 'local' ? 'rgba(2, 6, 23, 0.6)' : 'rgba(1, 169, 130, 0.12)',
               border: `1px solid ${source === 'local' ? 'rgba(255,255,255,0.08)' : 'rgba(1, 169, 130, 0.5)'}`,
               borderRadius: '6px', color: '#f8fafc', padding: '6px 10px', fontSize: '12px', outline: 'none', cursor: 'pointer', fontWeight: 600
             }}
           >
-            <option value="local">This machine</option>
-            {vmNames.map(n => <option key={n} value={n}>VM: {n}</option>)}
+            {sourceOptions.map(o => <option key={o.name} value={o.name}>{o.label}</option>)}
           </select>
           {remoteBusy && <RefreshCw size={12} className="animate-spin" style={{ color: '#01a982' }} />}
         </div>

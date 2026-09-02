@@ -10,6 +10,7 @@ import { GoogleGenAI } from '@google/genai';
 import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
 import { llmRouter } from './llm.js';
 import { vmsRouter } from './vms.js';
+import { shellRouter } from './shell.js';
 import { graphRouter } from './graph/router.js';
 import { inspectRouter } from './k8s/inspect.js';
 import { historyRouter } from './history/router.js';
@@ -39,6 +40,8 @@ app.use(pcaiRouter);
 app.use(llmRouter);
 // Virtual Machine monitoring + SSH (manual inventory).
 app.use(vmsRouter);
+// Persistent interactive SSH terminals (one real login shell per session).
+app.use(shellRouter);
 // Infrastructure dependency graph: root-cause ranking + blast radius.
 app.use(graphRouter);
 // Deep inspect for a single object: YAML, describe, events, and what it is
@@ -47,10 +50,20 @@ app.use(inspectRouter);
 // Cluster change history: what changed, when, and who did it.
 app.use(historyRouter);
 
-// Helper for safe command execution
-async function runCmd(cmd: string): Promise<{ stdout: string; stderr: string; success: boolean }> {
+// Helper for safe command execution.
+// A timeout is mandatory, not a nicety: on Windows a `docker` CLI whose daemon
+// is installed-but-stopped blocks on the named pipe indefinitely. Without this,
+// one dead runtime stalls /api/status and every view that waits on it.
+async function runCmd(
+  cmd: string,
+  timeout = 8000,
+): Promise<{ stdout: string; stderr: string; success: boolean }> {
   try {
-    const { stdout, stderr } = await execAsync(cmd, { maxBuffer: 1024 * 1024 * 10 }); // 10MB buffer
+    const { stdout, stderr } = await execAsync(cmd, {
+      maxBuffer: 1024 * 1024 * 10, // 10MB buffer
+      timeout,
+      killSignal: 'SIGKILL',
+    });
     return { stdout, stderr, success: true };
   } catch (error: any) {
     return {
@@ -66,11 +79,28 @@ const ALPHANUMERIC_DASH = /^[a-zA-Z0-9_.-]+$/;
 const DOCKER_ID_REGEX = /^[a-fA-F0-9]{12,64}$|^[a-zA-Z0-9_.-]+$/;
 
 // API: Get Status
+// Probed in parallel, not in sequence: Docker is one optional runtime among
+// several, so a slow or absent one must not delay reporting the others.
 app.get('/api/status', async (req, res) => {
-  const dockerVer = await runCmd('docker --version');
-  const k8sVer = await runCmd('kubectl version --client');
-  const dockerRunning = await runCmd('docker ps');
-  const k8sRunning = await runCmd('kubectl get nodes');
+  const [dockerVer, k8sVer, dockerRunning, k8sRunning, crictlVer, nerdctlVer, podmanVer] =
+    await Promise.all([
+      runCmd('docker --version'),
+      runCmd('kubectl version --client'),
+      runCmd('docker ps'),
+      runCmd('kubectl get nodes'),
+      runCmd('crictl version'),
+      runCmd('nerdctl --version'),
+      runCmd('podman --version'),
+    ]);
+
+  // Every container runtime that answered on this machine. Consumers should
+  // prefer this over `docker.installed` when asking "can we see containers?".
+  const runtimes = [
+    dockerVer.success && 'docker',
+    crictlVer.success && 'containerd',
+    nerdctlVer.success && 'nerdctl',
+    podmanVer.success && 'podman',
+  ].filter(Boolean) as string[];
 
   res.json({
     docker: {
@@ -83,15 +113,20 @@ app.get('/api/status', async (req, res) => {
       version: k8sVer.stdout.trim() || 'Not found',
       running: k8sRunning.success,
       context: k8sRunning.success ? 'docker-desktop' : 'Unavailable',
-    }
+    },
+    runtimes,
   });
 });
 
 // API: List Docker Containers
 app.get('/api/docker/containers', async (req, res) => {
   const { stdout, success, stderr } = await runCmd('docker ps -a --format "{{json .}}"');
+  // "No Docker here" is a normal state for a visualizer, not an error. Always
+  // answer with an array so a failure can never land in client state where an
+  // array is expected and blow up a render-time .filter().
   if (!success) {
-    return res.status(500).json({ error: 'Failed to list containers', details: stderr });
+    console.warn('[docker] could not list containers:', (stderr || '').split('\n')[0]);
+    return res.json([]);
   }
 
   const lines = stdout.split('\n').filter(line => line.trim() !== '');

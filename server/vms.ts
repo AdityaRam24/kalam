@@ -14,13 +14,19 @@
 //   POST   /api/vms/exec            -> { name, command } run a remote command
 //   GET    /api/vms/ssh-command/:name -> the ssh command string (to copy/paste)
 //   POST   /api/vms/explain           -> { name } "what is this node" brain report
+//   POST   /api/vms/:name/root        -> { mode, password } become root on this host
+//   POST   /api/vms/:name/root-options-> what this host allows (sudo? su? already root?)
+//   POST   /api/vms/logs              -> { name, kind, id, namespace } container/pod logs
+//   POST   /api/vms/action            -> { name, kind, action, ... } start/stop/restart/scale
+//
+// Interactive terminals against these hosts live in ./shell.ts.
 
 import { Router } from 'express';
 import { identifyComponent, type ComponentInfo } from './pcai/components.js';
 import { analyzeCauses, graphStats } from './graph/analyze.js';
 import { buildInfraGraph } from './graph/build.js';
 import { nodeId as gid } from './graph/model.js';
-import { sshExec, sshCheck, SSH_PORT } from './ssh.js';
+import { sshExec, sshCheck, sshWhoami, shQuote, SSH_PORT, type Elevation, type ExecOptions } from './ssh.js';
 import { promises as fs } from 'fs';
 import net from 'net';
 import path from 'path';
@@ -41,6 +47,11 @@ export interface VmEntry {
   password?: string;  // stored in vms.json (git-ignored); never sent to the client
   keyPath?: string;   // alternative to the password
   via?: string;       // name of another inventory VM to use as an SSH jump host
+  // Root access for a non-root login: every command Kalam runs on this host is
+  // wrapped in sudo / su. Discovery needs it — crictl, containerd and most of
+  // /var/log are root-only, which is why an ordinary login sees "nothing here".
+  elevate?: Elevation;
+  elevatePassword?: string; // sudo/su password; falls back to `password`
 }
 
 export async function loadVms(): Promise<VmEntry[]> {
@@ -55,8 +66,15 @@ export async function loadVms(): Promise<VmEntry[]> {
 
 // What the browser is allowed to see: the password stays on the server.
 function publicVm(vm: VmEntry) {
-  const { password, ...rest } = vm;
-  return { ...rest, hasPassword: !!password };
+  const { password, elevatePassword, ...rest } = vm;
+  return {
+    ...rest,
+    hasPassword: !!password,
+    hasElevatePassword: !!elevatePassword,
+    // The UI shows a "root" badge on this, so compute it the same way the SSH
+    // layer does rather than letting the two drift apart.
+    runsAsRoot: vm.user === 'root' || (!!vm.elevate && vm.elevate !== 'none'),
+  };
 }
 
 async function saveVms(vms: VmEntry[]): Promise<void> {
@@ -111,10 +129,10 @@ export async function sshRun(
   vm: VmEntry,
   command: string,
   timeoutMs = 20000,
-  maxBuffer = 1024 * 1024 * 4
+  options: number | ExecOptions = {}
 ): Promise<{ stdout: string; stderr: string; ok: boolean }> {
   const jump = await getJump(vm);
-  return sshExec(vm, command, timeoutMs, jump, maxBuffer);
+  return sshExec(vm, command, timeoutMs, jump, options);
 }
 
 // A jumped VM can't be TCP-probed from here — treat "jump host reachable" as
@@ -243,14 +261,113 @@ vmsRouter.post('/api/vms/metrics', async (req, res) => {
   res.json(out);
 });
 
+// One-shot command. Runs in a login shell so PATH, aliases and profile match
+// what the user gets in their own terminal, and honours the host's elevation
+// setting. `pty` allocates a terminal for tools that refuse to run without one.
 vmsRouter.post('/api/vms/exec', async (req, res) => {
-  const { name, command } = req.body || {};
+  const { name, command, pty } = req.body || {};
   if (!command || !String(command).trim()) return res.status(400).json({ error: 'A command is required.' });
   const vm = (await loadVms()).find((v) => v.name === name);
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
 
-  const { stdout, stderr, ok } = await sshRun(vm, String(command), 30000);
-  res.json({ ok, output: stdout, error: stderr });
+  const { stdout, stderr, ok } = await sshRun(vm, String(command), 60000, { login: true, pty: !!pty });
+  res.json({ ok, output: stdout, error: stderr, elevated: vm.user === 'root' || !!(vm.elevate && vm.elevate !== 'none') });
+});
+
+// ---------------------------------------------------------------------------
+// Root access.
+//
+// POST /api/vms/:name/root { mode, password }
+//   mode 'login' — switch the stored login to root (root's own password)
+//   mode 'sudo'  — keep the login, wrap commands in `sudo -S`
+//   mode 'su'    — keep the login, wrap commands in `su - root -c`
+//   mode 'none'  — drop back to the plain login user
+//
+// The change is verified against the host (`id -un` must answer `root`) BEFORE
+// it is saved, so a wrong password can never leave a VM in a state where every
+// later command silently fails.
+// ---------------------------------------------------------------------------
+vmsRouter.post('/api/vms/:name/root', async (req, res) => {
+  const { mode, password, user } = req.body || {};
+  if (!['login', 'sudo', 'su', 'none'].includes(mode)) {
+    return res.status(400).json({ error: 'mode must be one of: login, sudo, su, none.' });
+  }
+  const vms = await loadVms();
+  const vm = vms.find((v) => v.name === req.params.name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+  const jump = vm.via ? vms.find((v) => v.name === vm.via) : undefined;
+
+  // Build the candidate without touching the stored entry until it is proven.
+  const candidate: VmEntry = { ...vm };
+  if (mode === 'none') {
+    delete candidate.elevate;
+    delete candidate.elevatePassword;
+  } else if (mode === 'login') {
+    const rootUser = (typeof user === 'string' && user.trim()) || 'root';
+    if (!NAME_RE.test(rootUser)) return res.status(400).json({ error: 'Invalid root user name.' });
+    candidate.user = rootUser;
+    if (typeof password === 'string' && password) candidate.password = password;
+    delete candidate.elevate;
+    delete candidate.elevatePassword;
+  } else {
+    candidate.elevate = mode as Elevation;
+    // An empty password means "reuse the login password" (the common case for
+    // sudo); a supplied one is stored separately (root's password for su).
+    if (typeof password === 'string' && password) candidate.elevatePassword = password;
+    else delete candidate.elevatePassword;
+  }
+
+  // Replace the whole entry rather than merging: a merge cannot clear fields,
+  // so switching su -> sudo would leave root's password behind as the sudo one.
+  const commit = () => {
+    vms[vms.indexOf(vm)] = candidate;
+    return saveVms(vms);
+  };
+
+  if (mode === 'none') {
+    await commit();
+    return res.json({ ok: true, vm: publicVm(candidate), user: candidate.user, root: candidate.user === 'root' });
+  }
+
+  const login = await sshCheck(candidate, jump);
+  if (!login.ok) return res.json({ ok: false, error: login.error });
+
+  const who = await sshWhoami(candidate, jump);
+  if (!who.ok) return res.json({ ok: false, error: who.error });
+  if (who.user !== 'root') {
+    return res.json({ ok: false, user: who.user, error: `Commands still run as "${who.user}", not root. Try a different mode (sudo / su / log in as root).` });
+  }
+
+  await commit();
+  res.json({ ok: true, root: true, user: 'root', mode, vm: publicVm(candidate) });
+});
+
+// What can this host actually offer? Probes (read-only) whether the login is
+// already root, whether passwordless sudo works, and whether sudo/su exist —
+// so the UI can recommend a mode instead of making the user guess.
+vmsRouter.post('/api/vms/:name/root-options', async (req, res) => {
+  const vm = (await loadVms()).find((v) => v.name === req.params.name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+  if (!(await vmReachable(vm))) return res.json({ reachable: false, error: 'SSH unreachable' });
+
+  const probe = [
+    'echo @@WHO@@', '(id -un || true)',
+    'echo @@SUDO@@', '(command -v sudo >/dev/null 2>&1 && echo yes || echo no)',
+    'echo @@NOPASS@@', '(sudo -n true >/dev/null 2>&1 && echo yes || echo no)',
+    'echo @@SU@@', '(command -v su >/dev/null 2>&1 && echo yes || echo no)',
+    'echo @@END@@',
+  ].join('; ');
+  const { stdout } = await sshRun({ ...vm, elevate: 'none' }, probe, 25000);
+  const yes = (tag: string) => section(stdout, tag).trim() === 'yes';
+  res.json({
+    reachable: true,
+    currentUser: section(stdout, 'WHO').trim() || vm.user,
+    alreadyRoot: section(stdout, 'WHO').trim() === 'root',
+    sudoAvailable: yes('SUDO'),
+    sudoPasswordless: yes('NOPASS'),
+    suAvailable: yes('SU'),
+    elevate: vm.elevate || 'none',
+  });
 });
 
 vmsRouter.get('/api/vms/ssh-command/:name', async (req, res) => {
@@ -623,8 +740,20 @@ const DISCOVER_CMD = [
   "(kubectl get pods -A -o json 2>/dev/null || true)",
   "echo @@KSVCS@@",
   "(kubectl get svc -A -o json 2>/dev/null || true)",
+  // Nodes and deployments so a remote source fills the same views as the local
+  // one — without them the visualizer showed a VM's pods floating with no
+  // cluster around them.
+  "echo @@KNODES@@",
+  "(kubectl get nodes -o json 2>/dev/null || true)",
+  "echo @@KDEPLOYS@@",
+  "(kubectl get deploy -A -o json 2>/dev/null || true)",
+  // -a so exited containers are visible too, matching `docker ps -a` above.
   "echo @@CRICTL@@",
-  "(sudo -n crictl ps -o json 2>/dev/null || crictl ps -o json 2>/dev/null || true)",
+  "(sudo -n crictl ps -a -o json 2>/dev/null || crictl ps -a -o json 2>/dev/null || true)",
+  "echo @@NERDCTL@@",
+  "(nerdctl ps -a --format '{{json .}}' 2>/dev/null || true)",
+  "echo @@PODMAN@@",
+  "(podman ps -a --format json 2>/dev/null || true)",
   "echo @@SYSTEMD@@",
   "(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | head -50 || true)",
   "echo @@PORTS@@",
@@ -638,6 +767,92 @@ export function section(text: string, tag: string): string {
   const from = start + tag.length + 4;
   const nextIdx = text.indexOf('@@', from);
   return text.slice(from, nextIdx < 0 ? undefined : nextIdx).trim();
+}
+
+// Containers from crictl (containerd). This is the ONLY container view on a
+// normal Kubernetes node, which has no docker binary at all.
+export function parseCrictl(stdout: string): any[] {
+  const out: any[] = [];
+  try {
+    const craw = section(stdout, 'CRICTL');
+    if (!craw.startsWith('{')) return out;
+    for (const c of JSON.parse(craw).containers || []) {
+      out.push({
+        id: (c.id || '').slice(0, 12),
+        name: c.metadata?.name || '',
+        state: (c.state || '').replace('CONTAINER_', ''),
+        image: c.image?.image || c.imageRef || '',
+        pod: c.labels?.['io.kubernetes.pod.name'] || '',
+      });
+    }
+  } catch { /* ignore parse errors */ }
+  return out;
+}
+
+// Every container on the host, whatever runtime is running it, normalized into
+// one list. Docker is one option among four here — the dashboard and topology
+// read this list and must not care which engine produced an entry, so each
+// carries a `runtime` tag and the docker-shaped fields the views already use.
+//
+// Missing runtimes are a no-op: their sections come back empty from the shell
+// guards in DISCOVER_CMD, so a host with none of them yields [].
+export function parseContainers(stdout: string): any[] {
+  const containers: any[] = [];
+
+  // Docker and nerdctl: one JSON object per line, identical field names.
+  for (const [tag, runtime] of [['DOCKER', 'docker'], ['NERDCTL', 'nerdctl']] as const) {
+    for (const line of section(stdout, tag).split('\n')) {
+      const t = line.trim();
+      if (!t.startsWith('{')) continue;
+      try {
+        const p = JSON.parse(t);
+        containers.push({
+          id: p.ID,
+          name: p.Names,
+          image: p.Image,
+          status: p.Status,
+          state: p.State || (String(p.Status || '').toLowerCase().includes('up') ? 'running' : 'exited'),
+          ports: p.Ports || '',
+          runtime,
+        });
+      } catch { /* skip bad line */ }
+    }
+  }
+
+  // Podman: a single JSON array, with its own field casing.
+  try {
+    const praw = section(stdout, 'PODMAN');
+    if (praw.startsWith('[')) {
+      for (const c of JSON.parse(praw) || []) {
+        containers.push({
+          id: String(c.Id || '').slice(0, 12),
+          name: (c.Names || [])[0] || '',
+          image: c.Image || c.ImageName || '',
+          status: c.Status || c.State || '',
+          state: String(c.State || '').toLowerCase() === 'running' ? 'running' : 'exited',
+          ports: (c.Ports || [])
+            .map((x: any) => `${x.host_port || ''}:${x.container_port || ''}`)
+            .filter((x: string) => x !== ':')
+            .join(', '),
+          runtime: 'podman',
+        });
+      }
+    }
+  } catch { /* ignore parse errors */ }
+
+  // containerd, mapped onto the same shape. crictl reports RUNNING/EXITED/
+  // CREATED; the views filter on a lowercase 'running' exactly as for docker.
+  for (const c of parseCrictl(stdout)) {
+    containers.push({
+      ...c,
+      state: String(c.state).toLowerCase() === 'running' ? 'running' : 'exited',
+      status: c.state,
+      ports: '',
+      runtime: 'containerd',
+    });
+  }
+
+  return containers;
 }
 
 vmsRouter.post('/api/vms/discover', async (req, res) => {
@@ -656,20 +871,8 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
 
   const engines = section(stdout, 'ENGINES').split('\n').map((s) => s.trim()).filter(Boolean);
 
-  // Docker containers (one JSON object per line).
-  const containers: any[] = [];
-  for (const line of section(stdout, 'DOCKER').split('\n')) {
-    const t = line.trim();
-    if (!t.startsWith('{')) continue;
-    try {
-      const p = JSON.parse(t);
-      containers.push({
-        id: p.ID, name: p.Names, image: p.Image, status: p.Status,
-        state: p.State || (String(p.Status || '').toLowerCase().includes('up') ? 'running' : 'exited'),
-        ports: p.Ports || '',
-      });
-    } catch { /* skip bad line */ }
-  }
+  // Containers, from whichever runtime the host actually has.
+  const containers: any[] = parseContainers(stdout);
 
   // Kubernetes pods (kubectl -o json).
   const pods: any[] = [];
@@ -683,27 +886,24 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
           status: it.status?.phase || 'Unknown',
           ready: `${cs.filter((c: any) => c.ready).length}/${cs.length}`,
           node: it.spec?.nodeName || '', restarts: cs.reduce((a: number, c: any) => a + (c.restartCount || 0), 0),
+          // The extra fields the topology/detail views read on local pods.
+          ip: it.status?.podIP || 'None',
+          labels: it.metadata?.labels || {},
+          created: it.metadata?.creationTimestamp,
+          containers: (it.spec?.containers || []).map((c: any) => {
+            const st = cs.find((s: any) => s.name === c.name) || {};
+            return { name: c.name, image: c.image, ready: !!st.ready, state: Object.keys(st.state || {})[0] || 'unknown' };
+          }),
         });
       }
     }
   } catch { /* ignore parse errors */ }
 
-  // containerd via crictl (fallback container view on K8s nodes without docker).
-  const crictl: any[] = [];
-  try {
-    const craw = section(stdout, 'CRICTL');
-    if (craw.startsWith('{')) {
-      for (const c of JSON.parse(craw).containers || []) {
-        crictl.push({
-          id: (c.id || '').slice(0, 12),
-          name: c.metadata?.name || '',
-          state: (c.state || '').replace('CONTAINER_', ''),
-          image: c.image?.image || c.imageRef || '',
-          pod: c.labels?.['io.kubernetes.pod.name'] || '',
-        });
-      }
-    }
-  } catch { /* ignore parse errors */ }
+  // containerd via crictl — the primary container view on a Kubernetes node,
+  // which normally has no docker at all. Kept as its own `crictl` key for
+  // callers that want the raw shape, AND folded into `containers` so the
+  // dashboard and topology see these hosts' workloads like any other.
+  const crictl: any[] = parseCrictl(stdout);
 
   // Kubernetes services (kubectl get svc -A -o json).
   const services: any[] = [];
@@ -717,6 +917,49 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
           type: s.spec?.type || 'ClusterIP',
           clusterIp: s.spec?.clusterIP || '—',
           ports: (s.spec?.ports || []).map((p: any) => `${p.port}${p.nodePort ? `:${p.nodePort}` : ''}/${p.protocol || 'TCP'}`).join(', '),
+        });
+      }
+    }
+  } catch { /* ignore parse errors */ }
+
+  // Cluster nodes, in the same shape /api/k8s/resources returns for local.
+  const nodes: any[] = [];
+  try {
+    const nraw = section(stdout, 'KNODES');
+    if (nraw.startsWith('{')) {
+      for (const n of JSON.parse(nraw).items || []) {
+        const conds = n.status?.conditions || [];
+        const ready = conds.find((c: any) => c.type === 'Ready');
+        const ip = (n.status?.addresses || []).find((a: any) => a.type === 'InternalIP');
+        const labels = n.metadata?.labels || {};
+        nodes.push({
+          name: n.metadata?.name,
+          status: ready ? (ready.status === 'True' ? 'Ready' : 'NotReady') : 'Unknown',
+          role: 'node-role.kubernetes.io/control-plane' in labels || 'node-role.kubernetes.io/master' in labels ? 'control-plane' : (labels['kubernetes.io/role'] || 'worker'),
+          version: n.status?.nodeInfo?.kubeletVersion || 'Unknown',
+          ip: ip?.address || 'Unknown',
+          os: n.status?.nodeInfo?.operatingSystem || 'Linux',
+          gpus: n.status?.capacity?.['nvidia.com/gpu'] || '0',
+          created: n.metadata?.creationTimestamp,
+        });
+      }
+    }
+  } catch { /* ignore parse errors */ }
+
+  // Deployments.
+  const deployments: any[] = [];
+  try {
+    const draw = section(stdout, 'KDEPLOYS');
+    if (draw.startsWith('{')) {
+      for (const d of JSON.parse(draw).items || []) {
+        deployments.push({
+          name: d.metadata?.name,
+          namespace: d.metadata?.namespace || 'default',
+          ready: `${d.status?.readyReplicas || 0}/${d.spec?.replicas || 0}`,
+          available: d.status?.availableReplicas || 0,
+          updated: d.status?.updatedReplicas || 0,
+          replicas: d.spec?.replicas || 0,
+          created: d.metadata?.creationTimestamp,
         });
       }
     }
@@ -741,7 +984,71 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
     listeningPorts.push({ proto, local, process: procMatch ? procMatch[1] : '' });
   }
 
-  res.json({ reachable: true, engines, containers, pods, services, crictl, systemServices, listeningPorts });
+  res.json({ reachable: true, engines, containers, pods, services, nodes, deployments, crictl, systemServices, listeningPorts });
+});
+
+// ---------------------------------------------------------------------------
+// Operate on a REMOTE host's workloads, so the visualizer is not stuck showing
+// this laptop's Docker/Kubernetes. Same actions the local endpoints expose,
+// executed over SSH against the selected VM (elevated when configured).
+// ---------------------------------------------------------------------------
+const DOCKER_ID_RE = /^[a-fA-F0-9]{12,64}$|^[a-zA-Z0-9_.-]+$/;
+
+vmsRouter.post('/api/vms/logs', async (req, res) => {
+  const { name, kind, id, namespace = 'default', container, tail = 150 } = req.body || {};
+  const vm = (await loadVms()).find((v) => v.name === name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+  const lines = Math.min(Math.max(parseInt(String(tail), 10) || 150, 1), 2000);
+
+  let cmd: string;
+  if (kind === 'docker') {
+    if (!id || !DOCKER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid container ID.' });
+    cmd = `docker logs --tail ${lines} ${shQuote(id)} 2>&1`;
+  } else if (kind === 'pod') {
+    if (!id || !NAME_RE.test(id)) return res.status(400).json({ error: 'Invalid pod name.' });
+    if (!NAME_RE.test(namespace)) return res.status(400).json({ error: 'Invalid namespace.' });
+    const c = container && NAME_RE.test(container) ? ` -c ${shQuote(container)}` : '';
+    cmd = `kubectl logs -n ${shQuote(namespace)} ${shQuote(id)}${c} --tail=${lines} 2>&1`;
+  } else {
+    return res.status(400).json({ error: 'kind must be "docker" or "pod".' });
+  }
+
+  const { stdout, stderr, ok } = await sshRun(vm, cmd, 30000);
+  res.json({ ok, logs: stdout || stderr || 'No logs generated.' });
+});
+
+vmsRouter.post('/api/vms/action', async (req, res) => {
+  const { name, kind, action, id, namespace = 'default', replicas } = req.body || {};
+  const vm = (await loadVms()).find((v) => v.name === name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+
+  let cmd: string;
+  if (kind === 'docker') {
+    if (!id || !DOCKER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid container ID.' });
+    const verb: Record<string, string> = { start: 'start', stop: 'stop', restart: 'restart', remove: 'rm -f' };
+    if (!verb[action]) return res.status(400).json({ error: 'Invalid docker action.' });
+    cmd = `docker ${verb[action]} ${shQuote(id)}`;
+  } else if (kind === 'k8s') {
+    if (!id || !NAME_RE.test(id)) return res.status(400).json({ error: 'Invalid resource name.' });
+    if (!NAME_RE.test(namespace)) return res.status(400).json({ error: 'Invalid namespace.' });
+    if (action === 'restart_deploy') {
+      cmd = `kubectl rollout restart deployment/${shQuote(id)} -n ${shQuote(namespace)}`;
+    } else if (action === 'scale_deploy') {
+      const n = parseInt(String(replicas), 10);
+      if (isNaN(n) || n < 0) return res.status(400).json({ error: 'A replica count is required.' });
+      cmd = `kubectl scale deployment/${shQuote(id)} --replicas=${n} -n ${shQuote(namespace)}`;
+    } else if (action === 'delete_pod') {
+      cmd = `kubectl delete pod/${shQuote(id)} -n ${shQuote(namespace)}`;
+    } else {
+      return res.status(400).json({ error: 'Invalid kubernetes action.' });
+    }
+  } else {
+    return res.status(400).json({ error: 'kind must be "docker" or "k8s".' });
+  }
+
+  const { stdout, stderr, ok } = await sshRun(vm, `${cmd} 2>&1`, 60000);
+  if (!ok) return res.status(200).json({ ok: false, error: (stdout || stderr).split('\n').filter(Boolean).slice(-3).join(' ').slice(0, 300) || 'Command failed.' });
+  res.json({ ok: true, output: stdout.trim(), command: cmd });
 });
 
 // ---------------------------------------------------------------------------

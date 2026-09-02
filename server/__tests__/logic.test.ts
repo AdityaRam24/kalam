@@ -3,7 +3,7 @@
 // Run with: npm test
 
 import { describe, it, expect } from 'vitest';
-import { diagnoseReason, section, humanAge, matchNode } from '../vms.js';
+import { diagnoseReason, section, humanAge, matchNode, parseContainers, parseCrictl } from '../vms.js';
 import { identifyComponent } from '../pcai/components.js';
 import { chunkText, tokenize, searchKB, KnowledgeBase } from '../pcai/store.js';
 import { guessKind } from '../pcai/router.js';
@@ -178,5 +178,89 @@ describe('matchNode (SSH host -> cluster node)', () => {
   });
   it('returns undefined for a host outside the cluster', () => {
     expect(matchNode(nodes, 'laptop', ['192.168.1.5'])).toBeUndefined();
+  });
+});
+
+
+// Kalam must visualize a host that has no Docker at all. A stock Kubernetes
+// node runs containerd only, so if container discovery is docker-shaped the
+// dashboard and topology come up empty on exactly the machines that matter.
+describe('parseContainers (runtime-agnostic container discovery)', () => {
+  const dockerLine = JSON.stringify({ ID: 'abc123456789', Names: 'web', Image: 'nginx:1.25', Status: 'Up 3 hours', Ports: '0.0.0.0:80->80/tcp' });
+  const nerdctlLine = JSON.stringify({ ID: 'def123456789', Names: 'side', Image: 'redis:7', Status: 'Up 2 minutes', Ports: '' });
+  const crictlJson = JSON.stringify({
+    containers: [{
+      id: 'aaaabbbbccccdddd', state: 'CONTAINER_RUNNING',
+      metadata: { name: 'coredns' }, image: { image: 'registry.k8s.io/coredns:1.11' },
+      labels: { 'io.kubernetes.pod.name': 'coredns-1' },
+    }, {
+      id: 'eeeeffff00001111', state: 'CONTAINER_EXITED',
+      metadata: { name: 'install-cni' }, imageRef: 'calico/cni:v3',
+      labels: { 'io.kubernetes.pod.name': 'calico-node-x' },
+    }],
+  });
+  const podmanJson = JSON.stringify([
+    { Id: '99998888777766665555', Names: ['pod-web'], Image: 'httpd:2.4', State: 'running', Ports: [{ host_port: 8080, container_port: 80 }] },
+  ]);
+
+  const build = (parts: Record<string, string>) =>
+    Object.entries(parts).map(([tag, body]) => `@@${tag}@@\n${body}`).join('\n') + '\n@@END@@';
+
+  it('reads containerd workloads on a host with no docker', () => {
+    const out = parseContainers(build({ ENGINES: 'kubectl\ncrictl', DOCKER: '', CRICTL: crictlJson }));
+    expect(out).toHaveLength(2);
+    expect(out.every((c) => c.runtime === 'containerd')).toBe(true);
+    expect(out.find((c) => c.name === 'coredns')?.image).toBe('registry.k8s.io/coredns:1.11');
+  });
+
+  it('normalizes crictl states to the lowercase form the views filter on', () => {
+    const out = parseContainers(build({ CRICTL: crictlJson }));
+    expect(out.find((c) => c.name === 'coredns')?.state).toBe('running');
+    // -a in the probe means exited containers are visible; they must not be
+    // mistaken for running ones.
+    expect(out.find((c) => c.name === 'install-cni')?.state).toBe('exited');
+  });
+
+  it('merges every runtime into one list, each tagged with its origin', () => {
+    const out = parseContainers(build({
+      DOCKER: dockerLine, NERDCTL: nerdctlLine, PODMAN: podmanJson, CRICTL: crictlJson,
+    }));
+    expect(out).toHaveLength(5);
+    expect(out.map((c) => c.runtime).sort()).toEqual(
+      ['containerd', 'containerd', 'docker', 'nerdctl', 'podman'],
+    );
+  });
+
+  it('derives docker state from the status line when State is absent', () => {
+    const [c] = parseContainers(build({ DOCKER: dockerLine }));
+    expect(c.state).toBe('running');
+    expect(c.runtime).toBe('docker');
+    expect(c.ports).toBe('0.0.0.0:80->80/tcp');
+  });
+
+  it('maps podman ports and truncates its long ids', () => {
+    const [c] = parseContainers(build({ PODMAN: podmanJson }));
+    expect(c.id).toBe('999988887777');
+    expect(c.name).toBe('pod-web');
+    expect(c.ports).toBe('8080:80');
+    expect(c.state).toBe('running');
+  });
+
+  it('returns an empty list when no runtime answered, without throwing', () => {
+    expect(parseContainers(build({ ENGINES: '', DOCKER: '', CRICTL: '', PODMAN: '' }))).toEqual([]);
+    expect(parseContainers('')).toEqual([]);
+  });
+
+  it('skips malformed output instead of losing the whole host', () => {
+    const out = parseContainers(build({ DOCKER: 'not json\n' + dockerLine, PODMAN: '[oops' }));
+    expect(out).toHaveLength(1);
+    expect(out[0].name).toBe('web');
+  });
+
+  it('still exposes the raw crictl shape, with its pod association intact', () => {
+    const raw = parseCrictl(build({ CRICTL: crictlJson }));
+    expect(raw).toHaveLength(2);
+    expect(raw[0].state).toBe('RUNNING');
+    expect(raw[0].pod).toBe('coredns-1');
   });
 });
