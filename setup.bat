@@ -68,19 +68,28 @@ if %errorlevel% neq 0 (
     echo [SUCCESS] 'kalam' command registered. Open a NEW terminal to use it.
 )
 
-:: 4. Check Optional Prerequisites (Docker & kubectl)
+:: 4. Check Optional Prerequisites (container runtime & kubectl)
+::    None of these are required. Kalam reads containers from whichever
+::    runtime a machine has (Docker, containerd/crictl, nerdctl, podman), and a
+::    machine with none of them still shows every VM in the SSH inventory.
 echo.
-echo [4/4] Checking optional cluster tools (Docker / kubectl)...
-where docker >nul 2>nul
-if %errorlevel% neq 0 (
-    echo [INFO] Docker is not detected in PATH. (Required only for container management features)
-) else (
-    echo [SUCCESS] Docker is installed.
+echo [4/4] Checking optional cluster tools (all optional)...
+set RUNTIME_FOUND=0
+for %%r in (docker crictl nerdctl podman) do (
+    where %%r >nul 2>nul && (
+        echo [SUCCESS] %%r found.
+        set RUNTIME_FOUND=1
+    )
+)
+if "%RUNTIME_FOUND%"=="0" (
+    echo [INFO] No container runtime on this machine. That is fine: add your VMs
+    echo        on the Virtual Machines tab and the dashboard reads them over SSH.
 )
 
 where kubectl >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [INFO] kubectl is not detected in PATH. (Required only for Kubernetes cluster operations)
+    echo [INFO] kubectl not found. Needed only to read a cluster from THIS machine;
+    echo        clusters on your VMs are read over SSH without it.
 ) else (
     echo [SUCCESS] kubectl is installed.
 )

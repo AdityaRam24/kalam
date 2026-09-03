@@ -29,8 +29,8 @@ flowchart LR
         LLM["LLM router (llm.ts, pcai/router.ts)"]
     end
 
-    subgraph L["Local machine"]
-        DOCKER["Docker CLI"]
+    subgraph L["Local machine (every tool optional)"]
+        DOCKER["container runtime CLI: docker / crictl / nerdctl / podman"]
         KUBECTL["kubectl"]
         SSHBIN["system ssh"]
     end
@@ -79,7 +79,7 @@ sequenceDiagram
     V-->>S: KEY:value lines
     S-->>U: reachable, load, mem, disk, gpu, uptime
     U->>S: POST /api/vms/discover
-    S->>V: ssh docker ps + kubectl pods/services + crictl + systemctl + ss
+    S->>V: ssh docker ps + crictl ps + nerdctl ps + podman ps + kubectl pods/svc/nodes/deploy + systemctl + ss
     V-->>S: sectioned output
     S-->>U: containers, pods, K8s services, systemd services, listening ports
 ```
@@ -238,7 +238,7 @@ GET  /api/graph/:name                      -> the cached graph
 ```
 
 One read-only SSH round trip (`kubectl get nodes|pods|svc|pvc`, `docker ps`,
-`systemctl list-units`, `ss -tuln`) builds it; the result is cached per VM so
+`crictl ps`, `systemctl list-units`, `ss -tuln`) builds it; the result is cached per VM so
 blast-radius and path queries are free. `server/graph/build.ts` is pure — no
 SSH, no fs, no Express — so the entire edge model is tested from fixtures.
 
@@ -260,6 +260,26 @@ GET /api/k8s/inspect/:kind/:namespace/:name[?vm=<name>]   -> full object + relat
 GET /api/k8s/inspect/node/:name[?vm=<name>]               -> cluster-scoped form
 GET /api/docker/inspect/:id[?vm=<name>]                   -> docker inspect JSON
 ```
+
+**No Docker dependency.** Container discovery (`server/vms.ts: parseContainers`)
+probes docker, containerd (`crictl ps -a`), nerdctl and podman in the same SSH
+round trip and normalizes all of them into one `containers[]` list, each entry
+tagged `runtime`. A missing binary is a no-op, so a plain Kubernetes node —
+which has only containerd — fills the dashboard like any other host. Locally,
+`/api/status` probes the same four runtimes in parallel with a hard timeout and
+reports them as `runtimes[]`; `/api/docker/containers` answers `[]` rather than
+an error when Docker is absent, so nothing docker-shaped can poison client
+state. The UI's source picker adds **All hosts**, which fans `/api/vms/discover`
+out over the inventory and merges the results, stamping each resource with its
+`host` so the drawer's logs and actions still reach the right machine.
+
+**Engine connection test.** `POST /api/llm/test` proves the configured AI engine
+answers end to end — a real (tiny) completion, not a ping — and classifies a
+failure by what the wire actually did (`describeConnectError`): host not
+resolvable (off the VPN), timeout/unreachable, refused port, untrusted internal
+certificate, http-vs-https, token rejected, model not served. The call is made by
+the Node backend, so it is the machine running Kalam that must be on the
+endpoint's network.
 
 One call returns the object's `yaml`, its `describe`, its recent `events`
 (newest first), a `summary` of the fields a describe would show, per-container
