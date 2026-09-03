@@ -48,6 +48,8 @@ interface Container {
   state: string;
   ports: string;
   created: string;
+  runtime?: string; // docker | containerd | nerdctl | podman
+  host?: string;    // set in the merged "All hosts" view
 }
 
 interface Pod {
@@ -138,6 +140,28 @@ export function App() {
   // Model discovery for the custom endpoint (works with any OpenAI-compatible API)
   const [customModels, setCustomModels] = useState<string[]>([]);
   const [customDetectMsg, setCustomDetectMsg] = useState<string>('');
+  // Result of the last "Test connection" in Settings. Proving the engine
+  // answers here beats finding out three messages into a conversation.
+  const [llmTest, setLlmTest] = useState<{ status: 'idle' | 'running' | 'ok' | 'fail'; msg: string; hint?: string }>({ status: 'idle', msg: '' });
+  const testLlmConnection = async () => {
+    setLlmTest({ status: 'running', msg: 'Contacting the engine…' });
+    try {
+      const res = await fetch('/api/llm/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: effProvider, apiKey, localUrl: effLocalUrl, localModel: effLocalModel, authKey: effAuthKey }),
+      });
+      const d = await res.json();
+      if (d.ok) {
+        const where = d.provider === 'gemini' ? d.model : `${d.model} @ ${d.endpoint}`;
+        setLlmTest({ status: 'ok', msg: `Connected — ${where} answered in ${d.latencyMs} ms${d.reply ? ` ("${d.reply}")` : ''}.` });
+      } else {
+        setLlmTest({ status: 'fail', msg: d.error || 'The engine did not answer.', hint: d.hint });
+      }
+    } catch (e: any) {
+      setLlmTest({ status: 'fail', msg: `Could not reach the Kalam backend: ${e.message}` });
+    }
+  };
+
   const detectCustomModels = async () => {
     if (!customUrl.trim()) { setCustomDetectMsg('Enter the endpoint base URL first.'); return; }
     setCustomDetectMsg('Detecting…');
@@ -961,21 +985,34 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
       let body: any = {};
 
       if (action.type.startsWith('docker_')) {
-        url = '/api/docker/action';
         // Map type (e.g. docker_restart) to action string (e.g. restart)
         const actStr = action.type.replace('docker_', '');
-        body = { action: actStr, containerId: action.id };
+        const host = hostFor('container', action.id);
+        if (isRemote) {
+          url = '/api/vms/action';
+          body = { name: host, kind: 'docker', action: actStr, id: action.id };
+        } else {
+          url = '/api/docker/action';
+          body = { action: actStr, containerId: action.id };
+        }
       } else if (action.type.startsWith('k8s_')) {
-        url = '/api/k8s/action';
         // Map type (e.g. k8s_restart_deploy) to action string (e.g. restart_deploy)
         const actStr = action.type.replace('k8s_', '');
-        body = { 
-          action: actStr, 
-          name: action.name, 
-          namespace: action.namespace,
-          replicas: action.replicas 
-        };
+        const host = hostFor('k8s', action.name, action.namespace);
+        if (isRemote) {
+          url = '/api/vms/action';
+          body = { name: host, kind: 'k8s', action: actStr, id: action.name, namespace: action.namespace, replicas: action.replicas };
+        } else {
+          url = '/api/k8s/action';
+          body = {
+            action: actStr,
+            name: action.name,
+            namespace: action.namespace,
+            replicas: action.replicas
+          };
+        }
       }
+      if (isRemote && !body.name) throw new Error('Could not tell which host this resource is on. Pick that host in the source selector and retry.');
 
       const res = await fetch(url, {
         method: 'POST',
@@ -1041,7 +1078,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
   const runtimeBreakdown = useMemo(() => {
     const counts = new Map<string, number>();
     for (const c of dockerContainers) {
-      const r = (c as any).runtime || 'docker';
+      const r = c.runtime || 'docker';
       counts.set(r, (counts.get(r) || 0) + 1);
     }
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} ${r}`).join(', ');
@@ -1052,7 +1089,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
   const hostFor = (kind: 'container' | 'k8s', id: string, namespace?: string): string => {
     if (!isAggregate) return source;
     if (kind === 'container') {
-      const c: any = dockerContainers.find(x => x.id === id || x.name === id);
+      const c = dockerContainers.find(x => x.id === id || x.name === id);
       return c?.host || '';
     }
     const r: any =
@@ -1624,6 +1661,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 localModel={effLocalModel}
                 apiKey={apiKey}
                 provider={effProvider}
+                authKey={effAuthKey}
               />
             </div>
           )}
@@ -2351,6 +2389,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                       />
                       <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                         OpenAI-compatible base URL. For an HPE <strong>MLIS</strong> deployment use its serving URL ending in <code>/v1</code>.
+                        Kalam's backend makes the call, so <em>this machine</em> must be on the network that hosts it (VPN / PCAI network) — use <strong>Test connection</strong> below to confirm.
                       </span>
                     </div>
                     <div className="form-group">
@@ -2452,8 +2491,27 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                   </>
                 )}
 
-                <div className="form-actions" style={{ marginTop: '12px' }}>
-                  <button className="btn primary" style={{ width: '100%' }} onClick={() => setSettingsModalOpen(false)}>
+                {llmTest.status !== 'idle' && (
+                  <div
+                    style={{
+                      marginTop: 12, padding: '10px 12px', borderRadius: 8, fontSize: 12, lineHeight: 1.5,
+                      border: `1px solid ${llmTest.status === 'ok' ? 'var(--hpe-green-border)' : llmTest.status === 'fail' ? 'rgba(239,68,68,0.4)' : 'var(--border-color)'}`,
+                      background: llmTest.status === 'ok' ? 'rgba(1,167,129,0.08)' : llmTest.status === 'fail' ? 'rgba(239,68,68,0.06)' : 'transparent',
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>
+                      {llmTest.status === 'running' ? 'Testing…' : llmTest.status === 'ok' ? 'Connection OK' : 'Connection failed'}
+                    </div>
+                    <div style={{ color: 'var(--text-secondary)', wordBreak: 'break-word' }}>{llmTest.msg}</div>
+                    {llmTest.hint && <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>{llmTest.hint}</div>}
+                  </div>
+                )}
+
+                <div className="form-actions" style={{ marginTop: '12px', display: 'flex', gap: 8 }}>
+                  <button className="btn secondary" style={{ flex: 1 }} onClick={testLlmConnection} disabled={llmTest.status === 'running'}>
+                    {llmTest.status === 'running' ? 'Testing…' : 'Test connection'}
+                  </button>
+                  <button className="btn primary" style={{ flex: 1 }} onClick={() => setSettingsModalOpen(false)}>
                     Save Configuration
                   </button>
                 </div>

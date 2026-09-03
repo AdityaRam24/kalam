@@ -8,6 +8,7 @@
 //   POST /api/llm/pull  { localUrl, name } (SSE) -> pull a model, stream progress
 
 import { Router } from 'express';
+import { GoogleGenAI } from '@google/genai';
 
 export const llmRouter = Router();
 
@@ -225,5 +226,220 @@ llmRouter.post('/api/llm/pull', async (req, res) => {
     sse({ status: 'error', error: `Could not reach Ollama at ${base}: ${e.message}` });
     sse('[DONE]');
     res.end();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Connection test: prove the configured AI engine actually answers, end to end,
+// before the user discovers otherwise mid-conversation. Every failure comes
+// back with the specific thing that went wrong (unreachable, token rejected,
+// model missing) rather than a generic "error".
+//
+//   POST /api/llm/test { provider: 'gemini' | 'local', apiKey?, localUrl?, localModel?, authKey? }
+
+interface LlmTestResult {
+  ok: boolean;
+  provider: 'gemini' | 'local';
+  latencyMs: number;
+  endpoint?: string;
+  model?: string;
+  reply?: string;
+  modelsSeen?: number;
+  error?: string;
+  hint?: string;
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not answer within ${Math.round(ms / 1000)}s`)), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Turn a raw fetch failure into what actually went wrong on the wire. The
+// endpoint is often on a network the user has to join first (VPN, the PCAI
+// management network), and "fetch failed" tells them nothing about that.
+export function describeConnectError(base: string, err: any): { error: string; hint: string } {
+  let host = base;
+  let isLocal = false;
+  let https = false;
+  try {
+    const u = new URL(base);
+    host = u.host;
+    https = u.protocol === 'https:';
+    isLocal = /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:|$)/.test(u.host);
+  } catch { /* leave defaults */ }
+
+  const cause = err?.cause || err;
+  const code: string = String(cause?.code || '').toUpperCase();
+  const raw = String(cause?.message || err?.message || err || '');
+
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return {
+      error: `Cannot resolve host "${host}" (${code}).`,
+      hint: isLocal
+        ? 'Local DNS is broken - try 127.0.0.1 instead of localhost.'
+        : 'This machine cannot look up that hostname. Connect to the network that hosts the endpoint (VPN / PCAI network) and test again, or use its IP address.',
+    };
+  }
+  if (code === 'ETIMEDOUT' || code === 'EHOSTUNREACH' || code === 'ENETUNREACH' || err?.name === 'AbortError') {
+    return {
+      error: `No answer from ${host} (${code || 'timeout'}).`,
+      hint: isLocal
+        ? 'The local server is not responding. Check it is running and not stuck.'
+        : 'The host exists but nothing came back - typical when you are not on its network or a firewall is between you. Check the VPN, then the port.',
+    };
+  }
+  if (code === 'ECONNREFUSED') {
+    return {
+      error: `${host} refused the connection (ECONNREFUSED).`,
+      hint: isLocal
+        ? `Nothing is listening at ${base}. Start the server (e.g. "ollama serve") or fix the URL.`
+        : 'The host is reachable but nothing is listening on that port. Check the port in the URL and that the model server is up.',
+    };
+  }
+  if (code === 'ECONNRESET' || code === 'EPIPE') {
+    return {
+      error: `Connection to ${host} was dropped (${code}).`,
+      hint: 'The server closed the connection mid-request. If the URL is http:// but the server expects https:// (or the reverse), fix the scheme.',
+    };
+  }
+  if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY|DEPTH_ZERO|certificate/i.test(code + ' ' + raw)) {
+    return {
+      error: `TLS certificate for ${host} was rejected (${code || 'certificate error'}).`,
+      hint: 'The endpoint uses a certificate this machine does not trust - common for internal MLIS deployments. Point NODE_EXTRA_CA_CERTS at your CA bundle when starting Kalam, or (lab only) set NODE_TLS_REJECT_UNAUTHORIZED=0.',
+    };
+  }
+  if (/wrong version number|ssl|tls/i.test(raw) && !https) {
+    return {
+      error: `${host} answered with TLS on a plain http:// URL.`,
+      hint: 'Change the URL scheme to https://.',
+    };
+  }
+  return {
+    error: raw.slice(0, 300) || 'fetch failed',
+    hint: isLocal
+      ? `Nothing is listening at ${base}. Start the server (e.g. "ollama serve") or fix the URL.`
+      : `Could not reach ${host}. Make sure you are on the network that hosts the endpoint (VPN / PCAI network) and that the URL and port are right.`,
+  };
+}
+
+export async function testGemini(apiKey: string): Promise<LlmTestResult> {
+  const started = Date.now();
+  const model = 'gemini-3-flash-preview';
+  if (!apiKey?.trim()) {
+    return { ok: false, provider: 'gemini', latencyMs: 0, model, error: 'No Gemini API key entered.', hint: 'Paste the key from Google AI Studio (it starts with "AIzaSy").' };
+  }
+  try {
+    const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
+    const resp: any = await withTimeout(
+      ai.models.generateContent({ model, contents: 'Reply with the single word OK.' }),
+      20000,
+      'Gemini',
+    );
+    const reply = String(resp?.text ?? resp?.candidates?.[0]?.content?.parts?.[0]?.text ?? '').trim();
+    return { ok: true, provider: 'gemini', latencyMs: Date.now() - started, model, reply: reply.slice(0, 80) };
+  } catch (e: any) {
+    // The SDK wraps the API's JSON error body in the message; surface the
+    // human sentence inside it rather than the whole envelope.
+    let msg = String(e?.message || e);
+    try {
+      const inner = JSON.parse(msg)?.error?.message;
+      if (typeof inner === 'string' && inner) msg = inner;
+    } catch { /* not JSON, keep as-is */ }
+    const lower = msg.toLowerCase();
+    let hint = 'Check the key and that this machine can reach generativelanguage.googleapis.com.';
+    if (lower.includes('api key not valid') || lower.includes('api_key_invalid') || lower.includes('401') || lower.includes('403')) {
+      hint = 'The key was rejected. Re-copy it from Google AI Studio and make sure the Generative Language API is enabled.';
+    } else if (lower.includes('quota') || lower.includes('429')) {
+      hint = 'The key works but is rate-limited or out of quota right now.';
+    } else if (lower.includes('fetch failed') || lower.includes('enotfound') || lower.includes('econnrefused') || lower.includes('did not answer')) {
+      hint = 'No route to Google. Expected on an air-gapped PCAI network - use a Local or Custom endpoint instead.';
+    }
+    return { ok: false, provider: 'gemini', latencyMs: Date.now() - started, model, error: msg.slice(0, 300), hint };
+  }
+}
+
+export async function testLocal(localUrl: string, localModel: string, authKey?: string): Promise<LlmTestResult> {
+  const started = Date.now();
+  const base = (localUrl || 'http://localhost:11434/v1').trim().replace(/\/+$/, '');
+  const endpoint = `${base}/chat/completions`;
+  const model = (localModel || '').trim();
+  if (!model) {
+    return { ok: false, provider: 'local', latencyMs: 0, endpoint, error: 'No model name selected.', hint: 'Pick or type a model name first.' };
+  }
+
+  // Step 1: is anything listening, and does the token get past the door?
+  const discovered = await discoverModels(base, authKey);
+  const modelsSeen = discovered.models.length;
+  const listed = discovered.models.some((m) => m.name === model || m.name.split(':')[0] === model.split(':')[0]);
+
+  // Step 2: an actual completion with the chosen model - the only test that
+  // proves chat will work. Tiny prompt, a handful of tokens, cheap anywhere.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', ...authHeaders(authKey) },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: 'Reply with the single word OK.' }],
+        max_tokens: 5,
+        temperature: 0,
+        stream: false,
+      }),
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      let detail: string = text.slice(0, 300);
+      try {
+        const parsed = JSON.parse(text);
+        detail = parsed?.error?.message || (typeof parsed?.error === 'string' ? parsed.error : detail);
+      } catch { /* keep raw */ }
+      let hint = 'The endpoint answered but refused the request.';
+      if (resp.status === 401 || resp.status === 403) hint = 'Token rejected. Check the API key / bearer token for this endpoint.';
+      else if (resp.status === 404) hint = modelsSeen
+        ? `Model "${model}" is not served here.${listed ? '' : ' Click "Detect models" and pick one of the listed names.'}`
+        : `Nothing at ${endpoint}. Make sure the URL ends in /v1 for OpenAI-compatible servers.`;
+      else if (resp.status === 400 && /model/i.test(detail)) hint = `Model "${model}" was not accepted. Use the exact name the server lists.`;
+      return { ok: false, provider: 'local', latencyMs: Date.now() - started, endpoint, model, modelsSeen, error: `HTTP ${resp.status}: ${detail}`, hint };
+    }
+    let reply = '';
+    try { reply = String(JSON.parse(text)?.choices?.[0]?.message?.content ?? '').trim(); } catch { reply = text.slice(0, 80); }
+    return { ok: true, provider: 'local', latencyMs: Date.now() - started, endpoint, model, modelsSeen, reply: reply.slice(0, 80) };
+  } catch (e: any) {
+    const timedOut = e?.name === 'AbortError';
+    // The listing succeeded a moment ago, so the wire is fine and the problem
+    // is the model itself; otherwise say what the network actually did.
+    if (discovered.endpointUp) {
+      const msg = timedOut ? 'The model did not answer within 30s.' : String(e?.message || e);
+      const hint = timedOut
+        ? 'The server is up but slow to load the model. Try once more; the first call after a cold start can take a minute.'
+        : 'The server is up but the completion call failed. If this is Ollama, the model may still be loading - try again.';
+      return { ok: false, provider: 'local', latencyMs: Date.now() - started, endpoint, model, modelsSeen, error: msg.slice(0, 300), hint };
+    }
+    const { error, hint } = describeConnectError(base, e);
+    return { ok: false, provider: 'local', latencyMs: Date.now() - started, endpoint, model, modelsSeen, error, hint };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+llmRouter.post('/api/llm/test', async (req, res) => {
+  const { provider = 'gemini', apiKey, localUrl, localModel, authKey } = req.body || {};
+  try {
+    const result = provider === 'local'
+      ? await testLocal(String(localUrl || ''), String(localModel || ''), authKey ? String(authKey) : undefined)
+      : await testGemini(String(apiKey || process.env.GEMINI_API_KEY || ''));
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ ok: false, provider, latencyMs: 0, error: String(e?.message || e) });
   }
 });

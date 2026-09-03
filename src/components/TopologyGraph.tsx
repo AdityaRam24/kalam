@@ -53,6 +53,8 @@ interface Container {
   status: string;
   ports: string;
   created?: string;
+  runtime?: string; // docker | containerd | nerdctl | podman
+  host?: string;    // set in the merged "All hosts" view
 }
 
 interface K8sResources {
@@ -1574,6 +1576,12 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     }
   }, [selectedResource]);
 
+  // Which machine the selected object lives on. In the merged "All hosts" view
+  // each resource carries its own host; otherwise it is wherever the map is
+  // pointed. 'all' itself is never a host, so it must not leak into a request.
+  const resourceHost = (d: any): string => d?.host || (source === 'all' ? '' : source);
+  const isRemoteHost = (h: string) => !!h && h !== 'local';
+
   // Pull the full object as soon as a card is selected — the drawer's Details,
   // Related, Manifest and Events tabs all read from this one payload.
   useEffect(() => {
@@ -1583,7 +1591,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     setInspectError('');
     setInspectLoading(true);
     setManifestView('yaml');
-    const q = source === 'local' ? '' : `?vm=${encodeURIComponent(source)}`;
+    const h = resourceHost(selectedResource?.data);
+    if (source === 'all' && !h) { setInspectError('Could not tell which host this object is on.'); setInspectLoading(false); return; }
+    const q = isRemoteHost(h) ? `?vm=${encodeURIComponent(h)}` : '';
     fetch(inspectTarget.path + q)
       .then(r => r.json())
       .then(d => {
@@ -1674,16 +1684,27 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     setLogsError(null);
     setLogs('');
     try {
-      let url = '';
-      if (selectedResource.type === 'docker') {
-        url = `/api/docker/logs/${selectedResource.data.id}`;
+      const d = selectedResource.data;
+      const h = resourceHost(d);
+      if (source === 'all' && !h) throw new Error('Could not tell which host this object is on.');
+      let res: Response | null = null;
+      if (isRemoteHost(h)) {
+        // The object lives on a VM: same log request, over SSH to that host.
+        const kind = selectedResource.type === 'docker' ? 'docker' : selectedResource.type === 'pod' ? 'pod' : '';
+        if (kind) {
+          res = await fetch('/api/vms/logs', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: h, kind, id: kind === 'docker' ? d.id : d.name, namespace: d.namespace }),
+          });
+        }
+      } else if (selectedResource.type === 'docker') {
+        res = await fetch(`/api/docker/logs/${d.id}`);
       } else if (selectedResource.type === 'pod') {
-        url = `/api/k8s/logs/${selectedResource.data.namespace}/${selectedResource.data.name}`;
+        res = await fetch(`/api/k8s/logs/${d.namespace}/${d.name}`);
       }
-      if (url) {
-        const res = await fetch(url);
+      if (res) {
         const json = await res.json();
-        if (res.ok) {
+        if (res.ok && json.ok !== false) {
           setLogs(json.logs || 'No logs returned.');
         } else {
           setLogsError(json.error || 'Failed to fetch logs.');
@@ -1704,20 +1725,23 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     try {
       let url = '';
       let body: any = {};
-      
+      const d = selectedResource.data;
+      const h = resourceHost(d);
+      if (source === 'all' && !h) throw new Error('Could not tell which host this object is on.');
+      const remote = isRemoteHost(h);
+
       if (selectedResource.type === 'docker') {
-        url = '/api/docker/action';
-        body = { action: actionName, containerId: selectedResource.data.id };
+        url = remote ? '/api/vms/action' : '/api/docker/action';
+        body = remote
+          ? { name: h, kind: 'docker', action: actionName, id: d.id }
+          : { action: actionName, containerId: d.id };
       } else if (selectedResource.type === 'pod' || selectedResource.type === 'deployment') {
-        url = '/api/k8s/action';
-        body = {
-          action: actionName,
-          name: selectedResource.data.name,
-          namespace: selectedResource.data.namespace,
-          ...extraParams
-        };
+        url = remote ? '/api/vms/action' : '/api/k8s/action';
+        body = remote
+          ? { name: h, kind: 'k8s', action: actionName, id: d.name, namespace: d.namespace, ...extraParams }
+          : { action: actionName, name: d.name, namespace: d.namespace, ...extraParams };
       }
-      
+
       if (url) {
         const res = await fetch(url, {
           method: 'POST',
@@ -1725,8 +1749,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           body: JSON.stringify(body)
         });
         const json = await res.json();
-        if (res.ok) {
-          setActionResult(json.message || 'Action executed successfully.');
+        if (res.ok && json.ok !== false) {
+          setActionResult(json.message || json.output || `${actionName} sent${remote ? ` to ${h}` : ''}.`);
         } else {
           setActionError(json.error || json.details || 'Action failed.');
         }
