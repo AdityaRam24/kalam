@@ -23,7 +23,7 @@ import { fileURLToPath } from 'url';
 import type { ChangeEvent, Snapshot } from './model.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.KALAM_HISTORY_DIR || path.join(__dirname, 'data');
 
 /** Rotate once the log passes this; one archive is kept. */
 const MAX_LOG_BYTES = 16 * 1024 * 1024;

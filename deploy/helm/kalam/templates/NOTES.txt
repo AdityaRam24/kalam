@@ -1,0 +1,29 @@
+Kalam {{ .Chart.AppVersion }} is installed as {{ include "kalam.fullname" . }}.
+
+Reach it:
+{{- if .Values.ingress.enabled }}
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kalam.fullname" . }} 8080:{{ .Values.service.port }}
+  then open http://localhost:8080
+{{- end }}
+
+What this install can do:
+  Cluster access ... {{ if .Values.rbac.create }}{{ if .Values.rbac.allowWrite }}READ + WRITE (restart / scale / delete pods){{ else }}read-only{{ end }}{{ if .Values.rbac.clusterWide }}, all namespaces{{ else }}, namespace {{ .Release.Namespace }} only{{ end }}{{ else }}no RBAC created - the UI will show an empty cluster{{ end }}
+  Remote hosts ..... {{ if .Values.ssh.secretName }}SSH key from secret {{ .Values.ssh.secretName | quote }}{{ else }}none (cluster-only; set ssh.secretName to reach VMs){{ end }}
+  Saved state ...... {{ if .Values.persistence.enabled }}persistent volume{{ else }}emptyDir - the SSH inventory and change history RESET on restart{{ end }}
+  AI engine ........ {{ .Values.llm.provider }}{{ if eq .Values.llm.provider "local" }} at {{ .Values.llm.localUrl }} ({{ .Values.llm.localModel }}){{ end }}
+
+The AI call is made by this pod, not by your browser: the endpoint above has to
+be reachable from inside the cluster. Confirm it in the UI under
+Settings -> Test connection, which names exactly what failed.
+{{- if not .Values.persistence.enabled }}
+
+NOTE: persistence is off. Hosts added on the Virtual Machines tab are lost when
+the pod restarts. Set persistence.enabled=true to keep them.
+{{- end }}
+{{- if and .Values.ingress.enabled (not (include "kalam.allowedHosts" .)) }}
+
+WARNING: the ingress is enabled but no allowed host is set, so the API will
+refuse the browser origin. Set config.allowedHosts or ingress.host.
+{{- end }}

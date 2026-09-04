@@ -13,6 +13,7 @@ import { vmsRouter } from './vms.js';
 import { shellRouter } from './shell.js';
 import { graphRouter } from './graph/router.js';
 import { inspectRouter } from './k8s/inspect.js';
+import { normalizeClusterItems, parseReplicaSetOwners } from './k8s/workloads.js';
 import { historyRouter } from './history/router.js';
 import { pollerState, startHistoryPoller } from './history/poller.js';
 import { parseAllowedHosts, corsOriginCheck } from './cors.js';
@@ -368,107 +369,48 @@ app.post('/api/docker/apply-fix', async (req, res) => {
 
 // API: List Kubernetes Resources
 app.get('/api/k8s/resources', async (req, res) => {
-  // Query pods, services, deployments and nodes in one go
-  const { stdout, success, stderr } = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces');
-  if (!success) {
-    return res.status(500).json({ error: 'Failed to query Kubernetes resources', details: stderr });
+  // StatefulSets and DaemonSets are queried alongside the obvious kinds
+  // because the topology map is only as good as the relationships in this
+  // payload, and a cluster's databases and queues are StatefulSets whose pods
+  // would otherwise have no owner at all.
+  //
+  // ReplicaSets come from a separate PROJECTED query: they are needed only to
+  // follow a pod to its Deployment, and their full JSON is routinely the
+  // largest thing in a cluster (ten retained revisions per Deployment).
+  const [main, rs] = await Promise.all([
+    runCmd('kubectl get pods,svc,deploy,sts,ds,nodes -o json --all-namespaces', 25000),
+    runCmd(
+      'kubectl get rs --all-namespaces --no-headers -o custom-columns=' +
+      'NS:.metadata.namespace,NAME:.metadata.name,' +
+      'OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name',
+      25000,
+    ),
+  ]);
+  if (!main.success) {
+    return res.status(500).json({ error: 'Failed to query Kubernetes resources', details: main.stderr });
   }
 
   try {
-    const raw = JSON.parse(stdout);
-    const items = raw.items || [];
-
-    const pods: any[] = [];
-    const services: any[] = [];
-    const deployments: any[] = [];
-    const nodes: any[] = [];
-
-    items.forEach((item: any) => {
-      const kind = item.kind;
-      const metadata = item.metadata || {};
-      const status = item.status || {};
-      const spec = item.spec || {};
-
-      const name = metadata.name;
-      const namespace = metadata.namespace || 'default';
-      const age = metadata.creationTimestamp;
-
-      if (kind === 'Pod') {
-        const containerStatuses = status.containerStatuses || [];
-        const readyCount = containerStatuses.filter((c: any) => c.ready).length;
-        const totalCount = containerStatuses.length;
-
-        pods.push({
-          name,
-          namespace,
-          status: status.phase || 'Unknown',
-          ready: `${readyCount}/${totalCount}`,
-          ip: status.podIP || 'None',
-          node: spec.nodeName || 'None',
-          restarts: containerStatuses.reduce((acc: number, c: any) => acc + (c.restartCount || 0), 0),
-          labels: metadata.labels || {},
-          containers: (spec.containers || []).map((c: any) => {
-            const statusMatch = containerStatuses.find((cs: any) => cs.name === c.name) || {};
-            return {
-              name: c.name,
-              image: c.image,
-              ready: statusMatch.ready || false,
-              state: Object.keys(statusMatch.state || {})[0] || 'unknown',
-            };
-          }),
-          created: age
-        });
-      } else if (kind === 'Service') {
-        const ports = (spec.ports || []).map((p: any) => `${p.port}:${p.targetPort}/${p.protocol}`);
-        services.push({
-          name,
-          namespace,
-          type: spec.type || 'ClusterIP',
-          clusterIp: spec.clusterIP || 'None',
-          externalIp: (status.loadBalancer?.ingress || []).map((i: any) => i.ip || i.hostname).join(', ') || 'None',
-          ports: ports.join(', '),
-          selector: spec.selector ? JSON.stringify(spec.selector) : 'None',
-          created: age
-        });
-      } else if (kind === 'Deployment') {
-        deployments.push({
-          name,
-          namespace,
-          ready: `${status.readyReplicas || 0}/${spec.replicas || 0}`,
-          available: status.availableReplicas || 0,
-          updated: status.updatedReplicas || 0,
-          replicas: spec.replicas || 0,
-          created: age
-        });
-      } else if (kind === 'Node') {
-        const conds = status.conditions || [];
-        const readyCond = conds.find((c: any) => c.type === 'Ready');
-        const nodeStatus = readyCond ? (readyCond.status === 'True' ? 'Ready' : 'NotReady') : 'Unknown';
-        
-        const internalIPObj = (status.addresses || []).find((a: any) => a.type === 'InternalIP');
-        
-        nodes.push({
-          name,
-          status: nodeStatus,
-          role: metadata.labels?.['kubernetes.io/role'] || 'worker',
-          version: status.nodeInfo?.kubeletVersion || 'Unknown',
-          ip: internalIPObj ? internalIPObj.address : 'Unknown',
-          os: status.nodeInfo?.operatingSystem || 'Linux',
-          gpus: (status.capacity && status.capacity['nvidia.com/gpu']) || '0',
-          created: age
-        });
-      }
-    });
-
-    res.json({ pods, services, deployments, nodes });
-  } catch (e: any) {
-    res.status(500).json({ error: 'Failed to parse Kubernetes resource list JSON', details: e.message });
+    const raw = JSON.parse(main.stdout);
+    // A failed ReplicaSet query costs pod→Deployment edges, not the whole view.
+    const owners = rs.success ? parseReplicaSetOwners(rs.stdout) : undefined;
+    res.json(normalizeClusterItems(raw.items || [], owners));
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to parse Kubernetes JSON', details: err.message });
   }
 });
 
+// Which workload kinds may be acted on, and the resource prefix kubectl needs.
+// Anything not in this map is refused rather than guessed at.
+const WORKLOAD_TARGET: Record<string, string> = {
+  Deployment: 'deployment',
+  StatefulSet: 'statefulset',
+  DaemonSet: 'daemonset',
+};
+
 // API: Kubernetes Actions
 app.post('/api/k8s/action', async (req, res) => {
-  const { action, name, namespace = 'default', replicas } = req.body;
+  const { action, name, namespace = 'default', replicas, kind = 'Deployment' } = req.body;
 
   if (!name || !ALPHANUMERIC_DASH.test(name)) {
     return res.status(400).json({ error: 'Invalid resource name' });
@@ -476,17 +418,25 @@ app.post('/api/k8s/action', async (req, res) => {
   if (!namespace || !ALPHANUMERIC_DASH.test(namespace)) {
     return res.status(400).json({ error: 'Invalid namespace' });
   }
+  const target = WORKLOAD_TARGET[String(kind)];
+  if (!target) {
+    return res.status(400).json({ error: `Cannot act on kind "${kind}".` });
+  }
 
   let cmd = '';
   switch (action) {
     case 'restart_deploy':
-      cmd = `kubectl rollout restart deployment/${name} -n ${namespace}`;
+      cmd = `kubectl rollout restart ${target}/${name} -n ${namespace}`;
       break;
     case 'scale_deploy':
+      // A DaemonSet runs one pod per node; there is nothing to scale.
+      if (target === 'daemonset') {
+        return res.status(400).json({ error: 'A DaemonSet cannot be scaled — it runs one pod per node.' });
+      }
       if (replicas === undefined || isNaN(parseInt(replicas))) {
         return res.status(400).json({ error: 'Replicas count is required for scale action' });
       }
-      cmd = `kubectl scale deployment/${name} --replicas=${parseInt(replicas)} -n ${namespace}`;
+      cmd = `kubectl scale ${target}/${name} --replicas=${parseInt(replicas)} -n ${namespace}`;
       break;
     case 'delete_pod':
       cmd = `kubectl delete pod/${name} -n ${namespace}`;
@@ -495,7 +445,7 @@ app.post('/api/k8s/action', async (req, res) => {
       return res.status(400).json({ error: 'Invalid action type' });
   }
 
-  const { stdout, stderr, success } = await runCmd(cmd);
+  const { stdout, stderr, success } = await runCmd(cmd, 30000);
   if (!success) {
     return res.status(500).json({ error: `Failed to execute k8s action`, details: stderr });
   }

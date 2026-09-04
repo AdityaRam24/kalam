@@ -14,6 +14,7 @@
     "typecheck:server": "tsc -p tsconfig.server.json",
     "lint": "oxlint",
     "test": "vitest run",
+    "topology:check": "tsx scripts/topology-report.ts",
     "preview": "vite preview",
     "cli": "node bin/kalam.cjs",
     "cli:install": "npm link"

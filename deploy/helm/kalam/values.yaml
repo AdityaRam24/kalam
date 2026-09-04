@@ -1,0 +1,132 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Kalam — default values.
+#
+# Out of the box this installs a read-only console: it can SEE the cluster it
+# runs in and nothing else. Two things are deliberately opt-in because they
+# widen what the app can do, and both are called out where they appear:
+#   * rbac.allowWrite  — lets the UI restart/scale/delete workloads
+#   * ssh.secretName   — lets it reach machines outside this cluster
+# ─────────────────────────────────────────────────────────────────────────────
+
+image:
+  repository: kalam
+  tag: ""                 # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicaCount: 1           # see persistence.enabled before raising this
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3001
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # The hostname the browser uses. It is also added to the app's own allowlist
+  # (see config.allowedHosts) — without that the API refuses the origin.
+  host: kalam.example.com
+  path: /
+  pathType: Prefix
+  tls:
+    enabled: false
+    secretName: ""
+
+# ── What Kalam may do to the cluster it runs in ─────────────────────────────
+rbac:
+  create: true
+  # false → read-only (get/list/watch). The dashboard, topology map, inspect
+  # drawer and change history all work; the action buttons return "forbidden".
+  # true  → also permits the write verbs behind those buttons:
+  #         deployment restart/scale, pod delete.
+  allowWrite: false
+  # Cluster-wide read (all namespaces) vs a Role limited to this namespace.
+  clusterWide: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ── AI engine ───────────────────────────────────────────────────────────────
+# Kalam's backend makes the call, so THIS POD must be able to reach the
+# endpoint. For an in-cluster MLIS/vLLM service that is a Service DNS name; for
+# Gemini it needs egress to the internet.
+llm:
+  provider: local                       # local | gemini
+  localUrl: http://ollama.ai.svc.cluster.local:11434/v1
+  localModel: qwen2.5-coder:7b
+  # Bearer token / Gemini key. Supply EITHER existingSecret (recommended) or
+  # apiKey, which the chart puts into a Secret for you.
+  apiKey: ""
+  existingSecret: ""                    # keys: GEMINI_API_KEY, KALAM_AUTH_KEY
+  existingSecretKey: GEMINI_API_KEY
+
+config:
+  # Browser origins allowed to drive the API. "true" allows any — only sane
+  # when the ingress in front is already authenticated.
+  allowedHosts: ""                      # empty → chart uses ingress.host
+  # Opt-in periodic cluster fingerprinting for the change-history view.
+  history:
+    enabled: false
+    intervalSec: 300
+    retentionDays: 30
+    sources: local
+  extraEnv: []
+
+# ── SSH to machines outside the cluster ─────────────────────────────────────
+# Mounting a key is what turns Kalam from "this cluster" into "the estate".
+# Leave empty to run cluster-only.
+ssh:
+  secretName: ""        # Secret with an `id_rsa` (or set keyFile) private key
+  keyFile: id_rsa
+  knownHosts: ""        # optional Secret key holding a known_hosts file
+
+# ── Writable state ──────────────────────────────────────────────────────────
+# The SSH inventory, the learned knowledge base and the change history are
+# written to disk. Without a volume they reset on every restart.
+persistence:
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# Probes hit /api/status, which answers even with no runtime and no cluster —
+# so a healthy pod is not mistaken for an unhealthy one on a bare install.
+probes:
+  enabled: true
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false   # the app writes its inventory/history
+  capabilities:
+    drop: ["ALL"]

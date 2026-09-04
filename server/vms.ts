@@ -22,6 +22,7 @@
 // Interactive terminals against these hosts live in ./shell.ts.
 
 import { Router } from 'express';
+import { normalizeClusterItems, parseReplicaSetOwners } from './k8s/workloads.js';
 import { identifyComponent, type ComponentInfo } from './pcai/components.js';
 import { analyzeCauses, graphStats } from './graph/analyze.js';
 import { buildInfraGraph } from './graph/build.js';
@@ -35,7 +36,10 @@ import { fileURLToPath } from 'url';
 export const vmsRouter = Router();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const VMS_PATH = path.join(__dirname, 'vms.json');
+// Where the SSH inventory lives. Overridable because in a container the
+// image is read-only and this file has to land on a mounted volume, or every
+// host the user adds disappears on the next restart.
+const VMS_PATH = process.env.KALAM_VMS_PATH || path.join(__dirname, 'vms.json');
 
 const NAME_RE = /^[a-zA-Z0-9_.-]+$/;
 const HOST_RE = /^[a-zA-Z0-9_.:-]+$/; // hostname or IPv4/IPv6-ish
@@ -78,6 +82,9 @@ function publicVm(vm: VmEntry) {
 }
 
 async function saveVms(vms: VmEntry[]): Promise<void> {
+  // The inventory may point at a mounted volume whose directory does not exist
+  // yet on a first run, and losing every host to ENOENT is not an option.
+  await fs.mkdir(path.dirname(VMS_PATH), { recursive: true }).catch(() => {});
   await fs.writeFile(VMS_PATH, JSON.stringify(vms, null, 2), 'utf-8');
 }
 
@@ -747,6 +754,18 @@ const DISCOVER_CMD = [
   "(kubectl get nodes -o json 2>/dev/null || true)",
   "echo @@KDEPLOYS@@",
   "(kubectl get deploy -A -o json 2>/dev/null || true)",
+  // A pod's ownerReferences point at a ReplicaSet, and databases/queues are
+  // StatefulSets — without these the map cannot say what owns what.
+  // ReplicaSets are projected to four columns rather than fetched as JSON:
+  // only the owner mapping is used, and their full JSON is routinely the
+  // largest object in a cluster (ten retained revisions per Deployment), which
+  // is not something to pull through an SSH round trip.
+  "echo @@KRS@@",
+  "(kubectl get rs --all-namespaces --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name 2>/dev/null || true)",
+  "echo @@KSTS@@",
+  "(kubectl get sts -A -o json 2>/dev/null || true)",
+  "echo @@KDS@@",
+  "(kubectl get ds -A -o json 2>/dev/null || true)",
   // -a so exited containers are visible too, matching `docker ps -a` above.
   "echo @@CRICTL@@",
   "(sudo -n crictl ps -a -o json 2>/dev/null || crictl ps -a -o json 2>/dev/null || true)",
@@ -864,7 +883,7 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
     return res.status(200).json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'Host unreachable on SSH (port 22)' });
   }
 
-  const { stdout, stderr, ok } = await sshRun(vm, DISCOVER_CMD, 30000);
+  const { stdout, stderr, ok } = await sshRun(vm, DISCOVER_CMD, 60000);
   if (!ok && !stdout.trim()) {
     return res.status(200).json({ reachable: true, error: (stderr.split('\n')[0] || 'SSH failed').slice(0, 200) });
   }
@@ -874,30 +893,27 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
   // Containers, from whichever runtime the host actually has.
   const containers: any[] = parseContainers(stdout);
 
-  // Kubernetes pods (kubectl -o json).
-  const pods: any[] = [];
-  try {
-    const kraw = section(stdout, 'KPODS');
-    if (kraw.startsWith('{')) {
-      for (const it of JSON.parse(kraw).items || []) {
-        const cs = it.status?.containerStatuses || [];
-        pods.push({
-          name: it.metadata?.name, namespace: it.metadata?.namespace || 'default',
-          status: it.status?.phase || 'Unknown',
-          ready: `${cs.filter((c: any) => c.ready).length}/${cs.length}`,
-          node: it.spec?.nodeName || '', restarts: cs.reduce((a: number, c: any) => a + (c.restartCount || 0), 0),
-          // The extra fields the topology/detail views read on local pods.
-          ip: it.status?.podIP || 'None',
-          labels: it.metadata?.labels || {},
-          created: it.metadata?.creationTimestamp,
-          containers: (it.spec?.containers || []).map((c: any) => {
-            const st = cs.find((s: any) => s.name === c.name) || {};
-            return { name: c.name, image: c.image, ready: !!st.ready, state: Object.keys(st.state || {})[0] || 'unknown' };
-          }),
-        });
-      }
-    }
-  } catch { /* ignore parse errors */ }
+  // Kubernetes objects, normalized by exactly the same code the local endpoint
+  // uses (server/k8s/workloads.ts) so a VM source and this machine are
+  // indistinguishable downstream — selectors, pod owners and all.
+  const kitems = (tag: string): any[] => {
+    try {
+      const raw = section(stdout, tag);
+      return raw.startsWith('{') ? (JSON.parse(raw).items || []) : [];
+    } catch { return []; }
+  };
+  const cluster = normalizeClusterItems(
+    [
+      ...kitems('KPODS'),
+      ...kitems('KSVCS'),
+      ...kitems('KNODES'),
+      ...kitems('KDEPLOYS'),
+      ...kitems('KSTS'),
+      ...kitems('KDS'),
+    ],
+    parseReplicaSetOwners(section(stdout, 'KRS')),
+  );
+  const pods = cluster.pods;
 
   // containerd via crictl — the primary container view on a Kubernetes node,
   // which normally has no docker at all. Kept as its own `crictl` key for
@@ -905,65 +921,12 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
   // dashboard and topology see these hosts' workloads like any other.
   const crictl: any[] = parseCrictl(stdout);
 
-  // Kubernetes services (kubectl get svc -A -o json).
-  const services: any[] = [];
-  try {
-    const sraw = section(stdout, 'KSVCS');
-    if (sraw.startsWith('{')) {
-      for (const s of JSON.parse(sraw).items || []) {
-        services.push({
-          name: s.metadata?.name,
-          namespace: s.metadata?.namespace || 'default',
-          type: s.spec?.type || 'ClusterIP',
-          clusterIp: s.spec?.clusterIP || '—',
-          ports: (s.spec?.ports || []).map((p: any) => `${p.port}${p.nodePort ? `:${p.nodePort}` : ''}/${p.protocol || 'TCP'}`).join(', '),
-        });
-      }
-    }
-  } catch { /* ignore parse errors */ }
-
-  // Cluster nodes, in the same shape /api/k8s/resources returns for local.
-  const nodes: any[] = [];
-  try {
-    const nraw = section(stdout, 'KNODES');
-    if (nraw.startsWith('{')) {
-      for (const n of JSON.parse(nraw).items || []) {
-        const conds = n.status?.conditions || [];
-        const ready = conds.find((c: any) => c.type === 'Ready');
-        const ip = (n.status?.addresses || []).find((a: any) => a.type === 'InternalIP');
-        const labels = n.metadata?.labels || {};
-        nodes.push({
-          name: n.metadata?.name,
-          status: ready ? (ready.status === 'True' ? 'Ready' : 'NotReady') : 'Unknown',
-          role: 'node-role.kubernetes.io/control-plane' in labels || 'node-role.kubernetes.io/master' in labels ? 'control-plane' : (labels['kubernetes.io/role'] || 'worker'),
-          version: n.status?.nodeInfo?.kubeletVersion || 'Unknown',
-          ip: ip?.address || 'Unknown',
-          os: n.status?.nodeInfo?.operatingSystem || 'Linux',
-          gpus: n.status?.capacity?.['nvidia.com/gpu'] || '0',
-          created: n.metadata?.creationTimestamp,
-        });
-      }
-    }
-  } catch { /* ignore parse errors */ }
-
-  // Deployments.
-  const deployments: any[] = [];
-  try {
-    const draw = section(stdout, 'KDEPLOYS');
-    if (draw.startsWith('{')) {
-      for (const d of JSON.parse(draw).items || []) {
-        deployments.push({
-          name: d.metadata?.name,
-          namespace: d.metadata?.namespace || 'default',
-          ready: `${d.status?.readyReplicas || 0}/${d.spec?.replicas || 0}`,
-          available: d.status?.availableReplicas || 0,
-          updated: d.status?.updatedReplicas || 0,
-          replicas: d.spec?.replicas || 0,
-          created: d.metadata?.creationTimestamp,
-        });
-      }
-    }
-  } catch { /* ignore parse errors */ }
+  // Services, nodes and workloads all come from the shared normalizer above,
+  // so a remote host carries the same selectors and pod owners the local
+  // endpoint does — which is what the topology map draws its edges from.
+  const services = cluster.services;
+  const nodes = cluster.nodes;
+  const deployments = cluster.deployments;
 
   // Running systemd services (name + description).
   const systemServices: any[] = [];
@@ -1031,12 +994,18 @@ vmsRouter.post('/api/vms/action', async (req, res) => {
   } else if (kind === 'k8s') {
     if (!id || !NAME_RE.test(id)) return res.status(400).json({ error: 'Invalid resource name.' });
     if (!NAME_RE.test(namespace)) return res.status(400).json({ error: 'Invalid namespace.' });
+    // StatefulSets and DaemonSets are listed next to Deployments, so the verb
+    // has to name the right kind — `rollout restart deployment/pg` fails when
+    // pg is a StatefulSet.
+    const target = ({ Deployment: 'deployment', StatefulSet: 'statefulset', DaemonSet: 'daemonset' } as Record<string, string>)[String(req.body?.workloadKind || 'Deployment')];
+    if (!target) return res.status(400).json({ error: `Cannot act on kind "${req.body?.workloadKind}".` });
     if (action === 'restart_deploy') {
-      cmd = `kubectl rollout restart deployment/${shQuote(id)} -n ${shQuote(namespace)}`;
+      cmd = `kubectl rollout restart ${target}/${shQuote(id)} -n ${shQuote(namespace)}`;
     } else if (action === 'scale_deploy') {
+      if (target === 'daemonset') return res.status(400).json({ error: 'A DaemonSet cannot be scaled — it runs one pod per node.' });
       const n = parseInt(String(replicas), 10);
       if (isNaN(n) || n < 0) return res.status(400).json({ error: 'A replica count is required.' });
-      cmd = `kubectl scale deployment/${shQuote(id)} --replicas=${n} -n ${shQuote(namespace)}`;
+      cmd = `kubectl scale ${target}/${shQuote(id)} --replicas=${n} -n ${shQuote(namespace)}`;
     } else if (action === 'delete_pod') {
       cmd = `kubectl delete pod/${shQuote(id)} -n ${shQuote(namespace)}`;
     } else {

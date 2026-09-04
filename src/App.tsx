@@ -843,6 +843,11 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
   };
 
   // Trigger Kubernetes actions
+  // The workload list now holds StatefulSets and DaemonSets as well as
+  // Deployments, so an action has to say which kind it is aiming at.
+  const workloadKindOf = (name: string, namespace: string): string =>
+    (k8sResources.deployments.find((d: any) => d.name === name && d.namespace === namespace) as any)?.kind || 'Deployment';
+
   const triggerK8sAction = async (action: 'restart_deploy' | 'scale_deploy' | 'delete_pod', name: string, namespace: string, replicas?: number) => {
     setLoading(true);
     try {
@@ -851,12 +856,12 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
       const res = isRemote
         ? await fetch('/api/vms/action', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: host, kind: 'k8s', action, id: name, namespace, replicas }),
+            body: JSON.stringify({ name: host, kind: 'k8s', action, id: name, namespace, replicas, workloadKind: workloadKindOf(name, namespace) }),
           })
         : await fetch('/api/k8s/action', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action, name, namespace, replicas })
+            body: JSON.stringify({ action, name, namespace, replicas, kind: workloadKindOf(name, namespace) })
           });
       const data = await res.json();
       if (!res.ok || data.ok === false) {
@@ -1001,14 +1006,15 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
         const host = hostFor('k8s', action.name, action.namespace);
         if (isRemote) {
           url = '/api/vms/action';
-          body = { name: host, kind: 'k8s', action: actStr, id: action.name, namespace: action.namespace, replicas: action.replicas };
+          body = { name: host, kind: 'k8s', action: actStr, id: action.name, namespace: action.namespace, replicas: action.replicas, workloadKind: workloadKindOf(action.name, action.namespace) };
         } else {
           url = '/api/k8s/action';
           body = {
             action: actStr,
             name: action.name,
             namespace: action.namespace,
-            replicas: action.replicas
+            replicas: action.replicas,
+            kind: workloadKindOf(action.name, action.namespace),
           };
         }
       }

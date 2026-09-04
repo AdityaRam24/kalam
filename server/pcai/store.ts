@@ -71,7 +71,7 @@ export function chunkText(text: string, maxLen = 1200, overlap = 150): string[] 
 // and auto-captured solved cases. Kept in their own file so a full retrain
 // (which rebuilds kb.json from scratch) re-includes them instead of losing them.
 // ---------------------------------------------------------------------------
-export const LEARNED_PATH = path.join(__dirname, 'learned.json');
+export const LEARNED_PATH = process.env.KALAM_LEARNED_PATH || path.join(__dirname, 'learned.json');
 
 export interface LearnedDoc {
   title: string;
@@ -90,6 +90,8 @@ export async function loadLearned(): Promise<LearnedDoc[]> {
 }
 
 export async function saveLearned(docs: LearnedDoc[]): Promise<void> {
+  // May be a mounted volume that has no directory yet on a first run.
+  await fs.mkdir(path.dirname(LEARNED_PATH), { recursive: true }).catch(() => {});
   await fs.writeFile(LEARNED_PATH, JSON.stringify(docs, null, 1), 'utf-8');
 }
 

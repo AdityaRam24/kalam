@@ -80,6 +80,88 @@ async function jumpFor(vm: VmEntry): Promise<VmEntry | undefined> {
   return (await loadVms()).find((v) => v.name === vm.via && v.name !== vm.name);
 }
 
+// A shell asking for a password: "[sudo] password for steve:", "Password:",
+// "steve's Password:". Anchored to the end of the buffer because a prompt is
+// only a prompt when the shell has stopped and is waiting for input.
+const PASSWORD_PROMPT = /password[^\n]{0,60}:\s*$/i;
+
+// The shell telling us elevation did not work. The text is already on the
+// user's screen — this only stops us from feeding it more input.
+const ELEVATION_REFUSED = /(Sorry, try again|Authentication failure|is not in the sudoers file|incorrect password attempt)/i;
+
+// How long to keep watching for a prompt before giving up and leaving the
+// session to the user. Long enough for a slow link, short enough that a stored
+// password is never sent into an unrelated command later in the session.
+const ELEVATION_WINDOW_MS = 20_000;
+
+/**
+ * Elevate an open shell to root, driven by what the shell actually says.
+ *
+ * This must never write the password speculatively. A host with passwordless
+ * sudo prints no prompt at all, so a timer-based version types the password
+ * straight into the freshly-opened root shell — where it is echoed on screen
+ * and written to root's shell history. The password is only ever sent in
+ * response to a prompt that is genuinely waiting for one, once, and only
+ * inside the window below.
+ */
+export type ElevationStep = 'wait' | 'send-password' | 'stop';
+
+/**
+ * What to do with the elevation output seen so far. Pure, so the rule that
+ * guards the password is covered by tests rather than by hope.
+ */
+export function elevationStep(
+  buffer: string,
+  opts: { hasPassword: boolean; sentPassword: boolean },
+): ElevationStep {
+  if (ELEVATION_REFUSED.test(buffer)) return 'stop';
+  if (!opts.sentPassword && opts.hasPassword && PASSWORD_PROMPT.test(buffer)) return 'send-password';
+  return 'wait';
+}
+
+function beginElevation(s: Session, vm: VmEntry) {
+  const mode = vm.elevate === 'su' ? 'su' : 'sudo';
+  const password = vm.elevatePassword ?? vm.password;
+  let buffer = '';
+  let sentPassword = false;
+  let done = false;
+
+  const stop = () => {
+    if (done) return;
+    done = true;
+    s.stream.removeListener('data', onData);
+    clearTimeout(timer);
+  };
+
+  const onData = (chunk: Buffer) => {
+    if (done) return;
+    // A bounded tail is all a prompt check needs, and it keeps a chatty MOTD
+    // from growing this buffer without limit.
+    buffer = (buffer + chunk.toString('utf8')).slice(-2048);
+
+    const step = elevationStep(buffer, { hasPassword: !!password, sentPassword });
+    if (step === 'stop') { stop(); return; }
+    if (step === 'send-password') {
+      sentPassword = true;
+      buffer = '';
+      try { s.stream.write(`${password}\n`); } catch { /* session closed */ }
+      // Stop watching shortly after: from here on the session belongs to the
+      // user, and anything that looks like a prompt is their own command.
+      setTimeout(stop, 3000).unref?.();
+    }
+  };
+
+  const timer = setTimeout(stop, ELEVATION_WINDOW_MS);
+  timer.unref?.();
+  s.stream.on('data', onData);
+
+  // Give the login shell a moment to finish printing its banner, then ask.
+  setTimeout(() => {
+    if (done) return;
+    try { s.stream.write(mode === 'su' ? 'su - root\n' : 'sudo -i\n'); } catch { stop(); }
+  }, 400).unref?.();
+}
+
 shellRouter.post('/api/vms/shell/open', async (req, res) => {
   const { name, cols, rows, asRoot } = req.body || {};
   const vm = (await loadVms()).find((v) => v.name === name);
@@ -109,19 +191,9 @@ shellRouter.post('/api/vms/shell/open', async (req, res) => {
     conn.on('error', (e: any) => destroy(s, friendly(e)));
 
     // "Open as root" types the elevation the same way a person would, so the
-    // password prompt (if any) is answered in-band and the rest of the session
-    // simply IS root — no per-command wrapping.
+    // rest of the session simply IS root — no per-command wrapping.
     const wantRoot = !!asRoot && vm.user !== 'root';
-    if (wantRoot) {
-      const pw = vm.elevatePassword ?? vm.password;
-      const mode = vm.elevate === 'su' ? 'su' : 'sudo';
-      setTimeout(() => {
-        try {
-          stream.write(mode === 'su' ? 'su - root\n' : 'sudo -i\n');
-          if (pw) setTimeout(() => { try { stream.write(`${pw}\n`); } catch { /* closed */ } }, 700);
-        } catch { /* closed */ }
-      }, 400);
-    }
+    if (wantRoot) beginElevation(s, vm);
 
     res.json({
       id: s.id,

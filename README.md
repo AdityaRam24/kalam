@@ -33,6 +33,16 @@ Please refer to the [REQUIREMENTS.md](file:///c:/Users/Steve/Desktop/kalam/REQUI
 
 ## 🚀 How to Setup & Run
 
+### In a Kubernetes cluster — use the Helm chart in [`deploy/helm/kalam`](deploy/helm/kalam/README.md)
+
+```bash
+docker build -t <registry>/kalam:0.1.0 .   &&   docker push <registry>/kalam:0.1.0
+helm upgrade --install kalam deploy/helm/kalam -n kalam --create-namespace   --set image.repository=<registry>/kalam --set image.tag=0.1.0
+```
+
+Read-only by default (`rbac.allowWrite=false`) and cluster-only until you give
+it an SSH key. See the chart README for the four values that matter.
+
 ### On Linux / macOS — use the scripts in [`scripts/`](scripts/README.md)
 
 ```bash
