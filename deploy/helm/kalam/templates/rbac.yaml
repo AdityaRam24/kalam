@@ -1,0 +1,62 @@
+{{- if .Values.rbac.create }}
+{{- $write := .Values.rbac.allowWrite }}
+{{- $kind := ternary "ClusterRole" "Role" .Values.rbac.clusterWide }}
+{{- $bindKind := ternary "ClusterRoleBinding" "RoleBinding" .Values.rbac.clusterWide }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ $kind }}
+metadata:
+  name: {{ include "kalam.fullname" . }}
+  labels: {{- include "kalam.labels" . | nindent 4 }}
+  {{- if not .Values.rbac.clusterWide }}
+  namespace: {{ .Release.Namespace }}
+  {{- end }}
+rules:
+  # Read-only: everything the dashboard, topology map, inspect drawer and
+  # change history draw. ReplicaSets are included because a pod's owner is a
+  # ReplicaSet that must be followed to name the Deployment behind it.
+  - apiGroups: [""]
+    resources: [pods, services, nodes, namespaces, endpoints, persistentvolumeclaims, configmaps, events, serviceaccounts]
+    verbs: [get, list, watch]
+  - apiGroups: ["apps"]
+    resources: [deployments, statefulsets, daemonsets, replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: [pods, nodes]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get, list]
+  {{- if $write }}
+  # Opt-in (rbac.allowWrite): the verbs behind the UI's action buttons.
+  # Secrets are never granted — Kalam does not read secret contents.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]
+  - apiGroups: ["apps"]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [update, patch]
+  - apiGroups: ["apps"]
+    resources: [deployments/scale, statefulsets/scale]
+    verbs: [update, patch]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ $bindKind }}
+metadata:
+  name: {{ include "kalam.fullname" . }}
+  labels: {{- include "kalam.labels" . | nindent 4 }}
+  {{- if not .Values.rbac.clusterWide }}
+  namespace: {{ .Release.Namespace }}
+  {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: {{ $kind }}
+  name: {{ include "kalam.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kalam.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

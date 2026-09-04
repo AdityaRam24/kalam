@@ -85,9 +85,15 @@ else
 fi
 
 # ------------------------------------------------------ 6. optional tools --
-step "[6/6] Optional cluster tools"
-have docker  && ok "docker  $(docker --version 2>/dev/null | head -n1)"  || info "docker not found — needed only for container features."
-have kubectl && ok "kubectl present"                                     || info "kubectl not found — needed only for Kubernetes features."
+step "[6/6] Optional cluster tools (all optional)"
+# Kalam reads containers from whichever runtime a machine has, and a machine
+# with none still shows every VM in the SSH inventory.
+runtime_found=0
+for r in docker crictl nerdctl podman; do
+    have "$r" && { ok "$r present"; runtime_found=1; }
+done
+[ "$runtime_found" -eq 1 ] || info "No container runtime here — fine: add VMs on the Virtual Machines tab and they are read over SSH."
+have kubectl && ok "kubectl present" || info "kubectl not found — needed only to read a cluster from THIS machine; VM clusters are read over SSH."
 have curl    || warn "curl not found — health checks and browser auto-open will be skipped. (sudo apt install -y curl)"
 
 printf '\n'

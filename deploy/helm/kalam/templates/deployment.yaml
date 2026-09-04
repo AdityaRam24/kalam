@@ -1,0 +1,141 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kalam.fullname" . }}
+  labels: {{- include "kalam.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if .Values.persistence.enabled }}
+  # A ReadWriteOnce volume cannot be shared, and two replicas would each keep
+  # their own inventory anyway — roll one pod at a time onto the same disk.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels: {{- include "kalam.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kalam.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+        {{- if and .Values.llm.apiKey (not .Values.llm.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "kalam.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: kalam
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 3001
+              protocol: TCP
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "3001"
+            {{- with (include "kalam.allowedHosts" .) }}
+            - name: ALLOWED_HOSTS
+              value: {{ . | quote }}
+            {{- end }}
+            # State that must survive a restart lives on the mounted volume.
+            - name: KALAM_VMS_PATH
+              value: /data/inventory/vms.json
+            - name: KALAM_LEARNED_PATH
+              value: /data/inventory/learned.json
+            - name: KALAM_HISTORY_DIR
+              value: /data/history
+            - name: KALAM_PROVIDER
+              value: {{ .Values.llm.provider | quote }}
+            - name: KALAM_LOCAL_URL
+              value: {{ .Values.llm.localUrl | quote }}
+            - name: KALAM_LOCAL_MODEL
+              value: {{ .Values.llm.localModel | quote }}
+            {{- if or .Values.llm.apiKey .Values.llm.existingSecret }}
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kalam.secretName" . }}
+                  key: {{ .Values.llm.existingSecretKey }}
+                  optional: true
+            {{- end }}
+            {{- if .Values.config.history.enabled }}
+            - name: KALAM_HISTORY
+              value: "true"
+            - name: KALAM_HISTORY_INTERVAL_SEC
+              value: {{ .Values.config.history.intervalSec | quote }}
+            - name: KALAM_HISTORY_RETENTION_DAYS
+              value: {{ .Values.config.history.retentionDays | quote }}
+            - name: KALAM_HISTORY_SOURCES
+              value: {{ .Values.config.history.sources | quote }}
+            {{- end }}
+            {{- with .Values.config.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.probes.enabled }}
+          # /api/status answers even with no runtime and no cluster, so a
+          # healthy pod on a bare install is never mistaken for a broken one.
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: http
+            initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            timeoutSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: http
+            initialDelaySeconds: {{ add .Values.probes.initialDelaySeconds 15 }}
+            periodSeconds: {{ .Values.probes.periodSeconds }}
+            timeoutSeconds: 10
+            failureThreshold: 6
+          {{- end }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if .Values.ssh.secretName }}
+            - name: ssh-key
+              mountPath: /home/kalam/.ssh
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "kalam.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.ssh.secretName }}
+        - name: ssh-key
+          secret:
+            secretName: {{ .Values.ssh.secretName }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.ssh.keyFile }}
+                path: id_rsa
+              {{- with .Values.ssh.knownHosts }}
+              - key: {{ . }}
+                path: known_hosts
+              {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

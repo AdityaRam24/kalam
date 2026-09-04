@@ -12,14 +12,15 @@ To run Kalam locally, you need the following system tools installed and running:
    - **Recommended Version**: Node.js `v18.x` or higher (tested on `v20+` / `v22+`).
    - **Package Manager**: `npm` (packaged with Node.js) or `yarn` / `pnpm`.
 
-2. **Docker Desktop / Daemon**
-   - **Daemon State**: Docker must be running to enable container management, listings, security scans, and auto-hardening features.
-   - **Commands**: Kalam runs `docker ps`, `docker scout`, `docker pull`, `docker stop`, `docker rm`, and `docker run` directly via local subprocesses.
+2. **Container runtime — optional**
+   - Kalam does **not** depend on Docker. It discovers containers from whichever runtime a machine has: Docker, containerd (via `crictl`), nerdctl or podman, and merges them into one list tagged by runtime.
+   - A machine with no runtime at all is a normal case: add your VMs on the Virtual Machines tab and the dashboard, topology map and container views read them over SSH ("All hosts" merges every VM into one view).
+   - Docker-only extras: image security scans and auto-hardening use `docker scout` / `docker pull` / `docker run` and need a Docker daemon on the machine running Kalam.
+   - Every local probe has a timeout, so an installed-but-stopped Docker Desktop cannot stall the dashboard.
 
-3. **Kubernetes (kubectl)**
-   - **kubectl CLI**: Must be installed and configured on the system path.
-   - **Active Cluster**: A running local Kubernetes cluster (such as Docker Desktop's built-in Kubernetes, Minikube, or Kind).
-   - **Kubeconfig**: Your local context (`~/.kube/config`) must point to the active cluster.
+3. **Kubernetes (kubectl) — optional on this machine**
+   - **kubectl CLI**: needed only to read a cluster from *this* machine. Clusters on VMs are read over SSH using the VM's own `kubectl`.
+   - **Kubeconfig**: if you do use a local cluster, `~/.kube/config` must point to it (Docker Desktop's Kubernetes, Minikube, Kind, or a real cluster).
 
 ---
 

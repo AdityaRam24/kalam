@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { diagnoseReason, section, humanAge, matchNode, parseContainers, parseCrictl } from '../vms.js';
+import { describeConnectError } from '../llm.js';
 import { identifyComponent } from '../pcai/components.js';
 import { chunkText, tokenize, searchKB, KnowledgeBase } from '../pcai/store.js';
 import { guessKind } from '../pcai/router.js';
@@ -262,5 +263,51 @@ describe('parseContainers (runtime-agnostic container discovery)', () => {
     expect(raw).toHaveLength(2);
     expect(raw[0].state).toBe('RUNNING');
     expect(raw[0].pod).toBe('coredns-1');
+  });
+});
+
+// The model endpoint is usually on a network the user has to join first, so a
+// failed test must say whether it is the VPN, the port, the cert, or the URL.
+describe('describeConnectError (hosted endpoint diagnosis)', () => {
+  const remote = 'https://mlis.pcai.example.com/v1';
+  const local = 'http://localhost:11434/v1';
+  const err = (code: string, message = code) => Object.assign(new Error('fetch failed'), { cause: { code, message } });
+
+  it('blames the network, not the server, when the host cannot be resolved', () => {
+    const d = describeConnectError(remote, err('ENOTFOUND'));
+    expect(d.error).toContain('mlis.pcai.example.com');
+    expect(d.hint).toMatch(/VPN/);
+    expect(d.hint).not.toMatch(/ollama serve/);
+  });
+
+  it('points at the VPN/firewall on a timeout to a remote host', () => {
+    expect(describeConnectError(remote, err('ETIMEDOUT')).hint).toMatch(/network|VPN/);
+    expect(describeConnectError(remote, Object.assign(new Error('aborted'), { name: 'AbortError' })).hint).toMatch(/VPN/);
+  });
+
+  it('distinguishes reachable-but-wrong-port from off-network', () => {
+    const d = describeConnectError(remote, err('ECONNREFUSED'));
+    expect(d.hint).toMatch(/port/);
+    expect(d.hint).not.toMatch(/VPN/);
+  });
+
+  it('still gives the ollama hint for a local refused connection', () => {
+    expect(describeConnectError(local, err('ECONNREFUSED')).hint).toMatch(/ollama serve/);
+  });
+
+  it('recognises an untrusted internal certificate', () => {
+    const d = describeConnectError(remote, err('SELF_SIGNED_CERT_IN_CHAIN'));
+    expect(d.error).toMatch(/certificate/i);
+    expect(d.hint).toMatch(/NODE_EXTRA_CA_CERTS/);
+  });
+
+  it('spots https answered on an http URL', () => {
+    const d = describeConnectError('http://mlis.pcai.example.com/v1', err('EPROTO', 'wrong version number'));
+    expect(d.hint).toMatch(/https:\/\//);
+  });
+
+  it('falls back to a network hint for unknown failures on a remote host', () => {
+    const d = describeConnectError(remote, new Error('fetch failed'));
+    expect(d.hint).toMatch(/VPN/);
   });
 });

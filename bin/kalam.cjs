@@ -751,7 +751,10 @@ async function showStatus() {
   try {
     const status = await getJSON('/api/status');
     const d = status.docker, k = status.kubernetes;
-    console.log(`${colors.bold}🐳 Docker:${colors.reset}     ${d.running ? `${colors.green}🟢 running${colors.reset}` : `${colors.red}🔴 stopped${colors.reset}`}  ${colors.gray}${d.installed ? d.version : 'not installed'}${colors.reset}`);
+    // Docker is one optional runtime among several; say which ones answered.
+    const runtimes = Array.isArray(status.runtimes) ? status.runtimes : (d.installed ? ['docker'] : []);
+    console.log(`${colors.bold}📦 Runtimes:${colors.reset}   ${runtimes.length ? `${colors.green}${runtimes.join(', ')}${colors.reset}` : `${colors.gray}none on this machine (VMs are still read over SSH)${colors.reset}`}`);
+    console.log(`${colors.bold}🐳 Docker:${colors.reset}     ${d.running ? `${colors.green}🟢 running${colors.reset}` : `${colors.gray}⚪ ${d.installed ? 'stopped' : 'not installed'} (optional)${colors.reset}`}  ${colors.gray}${d.installed ? d.version : ''}${colors.reset}`);
     console.log(`${colors.bold}☸️  Kubernetes:${colors.reset} ${k.running ? `${colors.green}🟢 running${colors.reset}` : `${colors.red}🔴 stopped${colors.reset}`}  ${colors.gray}${k.installed ? `${k.version.split('\n')[0]} · ${k.context}` : 'not installed'}${colors.reset}`);
   } catch (err) {
     console.log(`${colors.yellow}⚠️ Server offline. Querying local shells directly...${colors.reset}`);
@@ -985,7 +988,7 @@ async function vmDiscover(name) {
     stopSpinner(spin);
     if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
     console.log(`\n${colors.bold}📦 Workloads on ${name}${colors.reset}  ${colors.gray}runtimes: ${(d.engines || []).join(', ') || 'none'}${colors.reset}`);
-    (d.containers || []).forEach((c) => console.log(`  🐳 ${c.name.padEnd(28)} ${c.state === 'running' ? colors.green : colors.red}${c.state}${colors.reset} ${colors.gray}${c.image}${colors.reset}`));
+    (d.containers || []).forEach((c) => console.log(`  📦 ${(c.name || c.id || '').padEnd(28)} ${c.state === 'running' ? colors.green : colors.red}${c.state}${colors.reset} ${colors.gray}${c.runtime ? `[${c.runtime}] ` : ''}${c.image}${colors.reset}`));
     (d.pods || []).forEach((p) => console.log(`  ☸️  ${(p.namespace + '/' + p.name).slice(0, 52).padEnd(54)} ${p.status === 'Running' ? colors.green : colors.yellow}${p.status}${colors.reset} ${colors.gray}${p.ready}${colors.reset}`));
     (d.services || []).forEach((s) => console.log(`  ⚡ svc ${(s.namespace + '/' + s.name).slice(0, 48).padEnd(50)} ${colors.gray}${s.type} ${s.ports}${colors.reset}`));
     if (d.systemServices && d.systemServices.length) {

@@ -25,6 +25,7 @@ interface AgentTeamworkProps {
   containers: any[];
   k8sResources: any;
   localUrl: string;
+  authKey?: string; // bearer token for custom OpenAI-compatible endpoints
   localModel: string;
   apiKey: string;
   provider: string;
@@ -42,6 +43,7 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
   containers: _containers,
   k8sResources: _k8sResources,
   localUrl,
+  authKey,
   localModel,
   apiKey,
   provider
@@ -99,7 +101,8 @@ export const AgentTeamwork: React.FC<AgentTeamworkProps> = ({
           provider,
           localUrl,
           localModel,
-          apiKey
+          apiKey,
+          authKey
         })
       });
 

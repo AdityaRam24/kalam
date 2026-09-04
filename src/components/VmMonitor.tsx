@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Server, RefreshCw, Plus, Trash2, Terminal, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, ShieldAlert, Network, Brain, History, Info, Share2, KeyRound } from 'lucide-react';
+import { Server, RefreshCw, Plus, Trash2, Terminal, TerminalSquare, Copy, Play, X, Cpu, Check, Boxes, Database, Layers, Activity, AlertTriangle, ShieldCheck, ShieldAlert, Network, Brain, History, Info, Share2, KeyRound } from 'lucide-react';
 import VmTopology from './VmTopology';
 import RemoteTerminal from './RemoteTerminal';
 
@@ -88,7 +88,7 @@ export const VmMonitor: React.FC = () => {
       probe(rootFor);
       // The point of getting root is seeing what was hidden before, so refresh
       // discovery straight away rather than making the user ask again.
-      if (mode !== 'none') discover(rootFor);
+      if (mode !== 'none') { discover(rootFor); exploreVm(rootFor); }
     } catch (e: any) {
       setRootMsg({ ok: false, text: `Network error: ${e.message}` });
     } finally {
@@ -126,6 +126,9 @@ export const VmMonitor: React.FC = () => {
 
   // Which VM has an interactive terminal open (see RemoteTerminal).
   const [execFor, setExecFor] = useState<string | null>(null);
+  // Whether the next terminal opens elevated. Explicit, so "Root terminal"
+  // means root even on a host that has no elevation configured yet.
+  const [execRoot, setExecRoot] = useState(false);
 
   // Remote workload discovery (containers + pods running ON the VM)
   interface Discovery {
@@ -239,6 +242,9 @@ export const VmMonitor: React.FC = () => {
 
   useEffect(() => { loadVms(); }, [loadVms]);
 
+  const [exploring, setExploring] = useState<Record<string, boolean>>({});
+  const [explored, setExplored] = useState<Record<string, { ok: boolean; text: string }>>({});
+
   const probe = useCallback(async (name: string) => {
     setProbing((p) => ({ ...p, [name]: true }));
     try {
@@ -256,6 +262,44 @@ export const VmMonitor: React.FC = () => {
 
   // Auto-probe whenever the inventory changes
   useEffect(() => { vms.forEach((v) => probe(v.name)); }, [vms, probe]);
+
+  // A host that has just been added is immediately explored: its containers,
+  // pods, services, nodes and deployments are read once so the dashboard and
+  // topology map have something to draw the moment the user switches to it,
+  // and so an unreachable or root-only host says so here rather than looking
+  // like an empty cluster later.
+  const exploreVm = useCallback(async (name: string) => {
+    setExploring((e) => ({ ...e, [name]: true }));
+    try {
+      const res = await fetch('/api/vms/discover', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+      });
+      const d = await res.json();
+      if (d.error || d.reachable === false) {
+        setExplored((m) => ({ ...m, [name]: { ok: false, text: d.error || 'unreachable over SSH' } }));
+        return;
+      }
+      const counts = [
+        [(d.containers || []).length, 'container'],
+        [(d.pods || []).length, 'pod'],
+        [(d.services || []).length, 'service'],
+        [(d.deployments || []).length, 'workload'],
+        [(d.nodes || []).length, 'node'],
+      ] as Array<[number, string]>;
+      const found = counts.filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}${n === 1 ? '' : 's'}`);
+      const engines = (d.engines || []).join(', ');
+      setExplored((m) => ({
+        ...m,
+        [name]: found.length
+          ? { ok: true, text: `Mapped: ${found.join(', ')}${engines ? ` · ${engines}` : ''}` }
+          : { ok: false, text: 'Reachable, but nothing was visible — this login may need root (shield icon) to see containerd and the kubeconfig.' },
+      }));
+    } catch (e: any) {
+      setExplored((m) => ({ ...m, [name]: { ok: false, text: `Scan failed: ${e.message}` } }));
+    } finally {
+      setExploring((e) => ({ ...e, [name]: false }));
+    }
+  }, []);
 
   const addVm = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -275,13 +319,18 @@ export const VmMonitor: React.FC = () => {
         loadVms();
         return;
       }
+      const addedName = data.vm?.name || form.name;
       setForm(blankForm);
       setShowAdd(false);
       loadVms();
+      // Explore it straight away, and take a first metrics reading, so the row
+      // is populated without the user having to press anything.
+      exploreVm(addedName);
+      probe(addedName);
       // A freshly connected host is exactly when root matters: offer it now,
       // instead of leaving the user to discover later that half the machine
       // was invisible to their login.
-      if (form.user !== 'root') openRoot(data.vm?.name || form.name);
+      if (form.user !== 'root') openRoot(addedName);
     } catch (e: any) { setFormErr(`Network error: ${e.message}`); }
   };
 
@@ -431,7 +480,24 @@ export const VmMonitor: React.FC = () => {
                 return (
                   <tr key={v.name}>
                     <td><span className={`status-dot-pill ${d.cls === 'online' ? 'online' : 'offline'}`} style={{ fontSize: 11 }}><span className="dot" style={d.cls === 'warn' ? { background: 'var(--status-warn, #E5A50A)' } : undefined}></span>{busy ? 'Probing' : d.label}</span></td>
-                    <td><strong>{v.name}</strong></td>
+                    <td>
+                      <strong>{v.name}</strong>
+                      {/* What the automatic first scan found on this host. */}
+                      {exploring[v.name] && (
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>exploring…</div>
+                      )}
+                      {!exploring[v.name] && explored[v.name] && (
+                        <div
+                          style={{
+                            fontSize: 10, marginTop: 2, maxWidth: 260, lineHeight: 1.4,
+                            color: explored[v.name].ok ? 'var(--hpe-green)' : 'var(--text-muted)',
+                          }}
+                          title={explored[v.name].text}
+                        >
+                          {explored[v.name].text}
+                        </div>
+                      )}
+                    </td>
                     <td>
                       <span className="code-id">{v.user}@{v.host}</span>
                       {v.runsAsRoot && (
@@ -455,7 +521,14 @@ export const VmMonitor: React.FC = () => {
                         <button className="icon-btn primary" title="Explain this node — what it is, why each component runs here, what changed" onClick={() => explain(v.name)}><Brain size={14} className={brainBusy[v.name] ? 'loader' : ''} /></button>
                         <button className="icon-btn secondary" title="Find peer VMs visible from this host" onClick={() => findNeighbors(v.name)}><Network size={14} className={neighborsBusy && neighborsFor === v.name ? 'loader' : ''} /></button>
                         <button className="icon-btn warning" title="Diagnose cluster (read-only kubectl checks)" onClick={() => diagnose(v.name)}><Activity size={14} className={diagBusy[v.name] ? 'loader' : ''} /></button>
-                        <button className="icon-btn secondary" title="Open an interactive terminal" onClick={() => setExecFor(v.name)}><Play size={14} /></button>
+                        <button className="icon-btn secondary" title="Open an interactive terminal as this login" onClick={() => { setExecRoot(false); setExecFor(v.name); }}><Play size={14} /></button>
+                        <button
+                          className="icon-btn warning"
+                          title={v.user === 'root' ? 'Already root — opens a login shell' : 'Open a ROOT terminal (sudo -i / su -) for administrative work'}
+                          onClick={() => { setExecRoot(true); setExecFor(v.name); }}
+                        >
+                          <TerminalSquare size={14} />
+                        </button>
                         <button className={`icon-btn ${v.runsAsRoot ? 'success' : 'warning'}`} title={v.runsAsRoot ? 'Root access — change or revert' : 'Switch this host to root (sudo / su / root login)'} onClick={() => openRoot(v.name)}><ShieldAlert size={14} className={rootBusy && rootFor === v.name ? 'loader' : ''} /></button>
                         <button className="icon-btn secondary" title="Change login / password" onClick={() => { setCredsFor(v.name); setCreds({ user: v.user, password: '' }); setCredsMsg(null); }}><KeyRound size={14} /></button>
                         <button className="icon-btn secondary" title="Copy SSH command" onClick={() => copySsh(v.name)}>{copied === v.name ? <Check size={14} /> : <Copy size={14} />}</button>
@@ -1124,9 +1197,9 @@ export const VmMonitor: React.FC = () => {
       {/* Interactive terminal (persistent login shell over SSH) */}
       {execFor && (
         <RemoteTerminal
-          key={execFor}
+          key={`${execFor}:${execRoot ? 'root' : 'user'}`}
           vm={execFor}
-          asRoot={!!vms.find((v) => v.name === execFor)?.runsAsRoot && vms.find((v) => v.name === execFor)?.user !== 'root'}
+          asRoot={execRoot && vms.find((v) => v.name === execFor)?.user !== 'root'}
           onClose={() => setExecFor(null)}
         />
       )}

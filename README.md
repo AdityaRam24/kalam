@@ -1,22 +1,22 @@
 # Kalam: Agentic DevOps & Cluster Console
 
-Kalam is an **Agentic DevOps Dashboard & Chatbot** that captures locally running Docker containers and Kubernetes clusters, auto-generates visual topology graphs (using Mermaid), and integrates a conversational AI agent to analyze cluster states and run approved maintenance operations.
+Kalam is an **Agentic DevOps Dashboard & Chatbot** that captures containers and Kubernetes clusters — on this machine or on any host reachable over SSH — auto-generates visual topology graphs (using Mermaid), and integrates a conversational AI agent to analyze cluster states and run approved maintenance operations. It has no dependency on Docker: containers are read from whichever runtime a host actually has (Docker, containerd, nerdctl, podman).
 
 ---
 
 ## ⚡ Core Features
 
-* **🎨 Auto-Generated Mermaid Graphs**: Instantly parses active Docker containers, host ports, Kubernetes nodes, deployments, services, namespaces, and pods, rendering them in a beautiful, reactive SVG map.
-* **🐳 Docker Collection Manager**: View properties of all containers, execute standard commands (start, stop, restart, delete), and stream live stdout/stderr logs.
+* **🎨 Auto-Generated Mermaid Graphs**: Instantly parses active containers, host ports, Kubernetes nodes, deployments, services, namespaces, and pods, rendering them in a beautiful, reactive SVG map. The map draws whatever exists — nodes and services alone are enough; it never waits for Docker.
+* **📦 Container Manager (any runtime)**: View properties of all containers, execute standard commands (start, stop, restart, delete), and stream live stdout/stderr logs. Docker, containerd (`crictl`), nerdctl and podman are all discovered and merged into one list, each tagged with its runtime.
 * **🛡️ Container Vulnerability Scanner & Hardener**: Scans container images for CVE vulnerabilities and offers a one-click automated patch/upgrade to minimal Alpine/slim base images.
 * **☸️ Kubernetes Explorer**: Sectioned view of nodes, deployments, services, and pods. Restarts rollouts, deletes pods, and scales deployment replica counts.
 * **📖 Kubectl Reference Guide & Tools**: A searchable catalog of ~90 commands where every entry is labelled by what it can do to your cluster (read-only / changes state / destructive), fills in its own `<placeholders>`, and — when it is read-only — runs against a connected VM with the output inline. Plus a validating command builder, eight diagnostic runbooks, and a practice quiz.
 * **🕸️ Dependency Graph & Root-Cause Analysis**: Builds a typed graph of what depends on what (VMs → nodes → pods → services/PVCs, plus platform dependencies like SPIRE, CNI and CSI drivers) from one read-only SSH pass. Turns fourteen red pods into one cause with thirteen casualties, and answers "what breaks if I stop this?" before you stop it.
 * **🕓 Cluster Change History**: Answers "what changed, when, and who did it" — the question Kubernetes itself cannot, since its events expire after about an hour. Kalam fingerprints the cluster (workloads, pods, nodes, networking, storage, config and RBAC), diffs each capture against the last, and keeps a durable changelog with field-level before→after values, the writer named from `managedFields`, and Deployment rollout revisions. Read-only, opt-in, and it never stores secret contents.
-* **🖥️ View any connected host, not just this machine**: A source picker in the header switches every cluster view — dashboard, topology map, Docker and Kubernetes tabs — between this machine and any VM or cluster node in the SSH inventory. Containers, pods, services, nodes and deployments are read over one SSH round trip, and logs, restarts, scaling and pod deletion act on the host you are looking at.
+* **🖥️ View any connected host, not just this machine**: A source picker in the header switches every cluster view — dashboard, topology map, Containers and Kubernetes tabs — between this machine, any VM or cluster node in the SSH inventory, or **All hosts** merged into one view. Containers, pods, services, nodes and deployments are read over one SSH round trip, and logs, restarts, scaling and pod deletion act on the host each object came from. When this machine has no runtime and no cluster of its own, Kalam points itself at the VMs automatically.
 * **🛡️ Root access for connected hosts**: After a host is added or its credentials change, Kalam offers to elevate it — `sudo`, `su - root`, or a direct root login — probing first for what that host actually allows and verifying the choice (`id -un` must answer `root`) before saving it. This matters because containerd (`crictl`), kubelet config and service logs are root-only: an unprivileged login makes a busy machine look empty.
 * **⌨️ Real remote terminal**: A persistent login shell on a PTY per session, so `cd`, exported variables, `sudo` prompts, Ctrl+C, tab completion and full-screen tools all behave as they do in MobaXterm — instead of each command starting from scratch in a non-interactive shell.
-* **💬 Agentic Chat Console**: Injects active cluster details into the prompt context of Google Gemini (`gemini-3-flash-preview`) or Local LLMs (Ollama, LM Studio), draws customized mermaid charts dynamically, and recommends action triggers that execute upon user approval.
+* **💬 Agentic Chat Console**: Injects active cluster details into the prompt context of Google Gemini (`gemini-3-flash-preview`), Local LLMs (Ollama, LM Studio) or any OpenAI-compatible endpoint (vLLM, HPE MLIS, OpenAI…), draws customized mermaid charts dynamically, and recommends action triggers that execute upon user approval. **Test connection** in Settings runs a real completion against the configured engine and says exactly what is wrong when it fails — off the VPN, wrong port, token rejected, untrusted certificate, model not served.
 
 ---
 
@@ -25,13 +25,23 @@ Kalam is an **Agentic DevOps Dashboard & Chatbot** that captures locally running
 Please refer to the [REQUIREMENTS.md](file:///c:/Users/Steve/Desktop/kalam/REQUIREMENTS.md) file for complete prerequisite details.
 
 * **Node.js**: `v20.x` or higher (Vite 8 / TypeScript 6)
-* **Docker Desktop**: Active/Running daemon
-* **Kubernetes (kubectl)**: Connected local cluster context
-* **Google Gemini API Key** or **Local LLM Server (Ollama)**
+* **Optional — a container runtime on this machine**: Docker, containerd (`crictl`), nerdctl or podman. Not needed at all if your workloads live on VMs.
+* **Optional — kubectl**: only to read a cluster from *this* machine; VM clusters are read over SSH.
+* **Google Gemini API Key**, **Local LLM Server (Ollama)** or an **OpenAI-compatible endpoint** (e.g. HPE MLIS — this machine must be on its network)
 
 ---
 
 ## 🚀 How to Setup & Run
+
+### In a Kubernetes cluster — use the Helm chart in [`deploy/helm/kalam`](deploy/helm/kalam/README.md)
+
+```bash
+docker build -t <registry>/kalam:0.1.0 .   &&   docker push <registry>/kalam:0.1.0
+helm upgrade --install kalam deploy/helm/kalam -n kalam --create-namespace   --set image.repository=<registry>/kalam --set image.tag=0.1.0
+```
+
+Read-only by default (`rbac.allowWrite=false`) and cluster-only until you give
+it an SSH key. See the chart README for the four values that matter.
 
 ### On Linux / macOS — use the scripts in [`scripts/`](scripts/README.md)
 
@@ -154,7 +164,7 @@ Type naturally — Kalam auto-routes each message to the right engine (PCAI answ
 | `/mode <auto\|ask\|diagnose\|devops>` | Force how messages are routed (default `auto`) |
 | `/train [--offline]` | Build / refresh the HPE knowledge base |
 | `/kb` | Knowledge-base status |
-| `/status` | Local Docker & Kubernetes health |
+| `/status` | Local container runtime & Kubernetes health |
 | `/run <n>` | Execute suggested action #n from the last reply |
 | `/key <api-key>` | Save your Gemini API key and switch to Gemini |
 | `/clear` | Clear the screen & conversation memory |
@@ -196,7 +206,7 @@ Run a single task without entering the REPL:
 * `kalam vm history <name>` — the same timeline for a VM's cluster.
 
 **Local DevOps**
-* `kalam status` — check local Docker and Kubernetes daemons.
+* `kalam status` — check which container runtimes and Kubernetes are available on this machine.
 * `kalam list <docker|k8s>` — print active containers or Kubernetes pods (`kalam ps` also works).
 * `kalam scan <container-id>` — scan a container image for CVEs.
 * `kalam fix <container-id>` — rebuild the container on a secure base image (asks for confirmation).

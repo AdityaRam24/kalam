@@ -1,0 +1,13 @@
+node_modules
+dist
+.git
+.github
+offline-packages
+dataset-generation
+*.log
+.env
+.env.*
+server/vms.json
+server/history/data
+deploy
+*.ipynb
