@@ -806,7 +806,7 @@ export const DISCOVER_K8S_CMD = [
 
 /** Bulk cluster JSON needs far more than sshRun's 4 MB default. */
 export const K8S_MAX_BUFFER = 96 * 1024 * 1024;
-export const K8S_TIMEOUT_MS = 120_000;
+export const K8S_TIMEOUT_MS = Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000);
 
 export function section(text: string, tag: string): string {
   const start = text.indexOf(`@@${tag}@@`);

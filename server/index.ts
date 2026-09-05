@@ -80,8 +80,15 @@ async function runCmd(
 // Cluster JSON is not a probe. Pods on a multi-node cluster run to tens of
 // megabytes, and every kind is fetched separately so that one oversized kind
 // cannot take the rest of the view down with it.
+//
+// The timeout must be GENEROUS. runCmd's 8 s default exists to stop a stopped
+// Docker Desktop from hanging a status probe on Windows; applying that same
+// default to a bulk cluster read is what made a real multi-node cluster report
+// itself as empty — the query was killed mid-flight and the failure surfaced as
+// "no pods". A small cluster answers in well under a second, so a long ceiling
+// costs nothing and only ever helps a large one.
 const K8S_KIND_BUFFER = 256 * 1024 * 1024;
-const K8S_KIND_TIMEOUT = 60_000;
+const K8S_KIND_TIMEOUT = Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000);
 
 /** One `kubectl get -o json`, reporting WHY it returned nothing. */
 async function kubectlKind(
@@ -405,17 +412,17 @@ app.get('/api/k8s/resources', async (req, res) => {
   // come from a PROJECTED query: only the owner mapping is used, and their full
   // JSON is routinely the largest object in a cluster.
   const [nodes, daemonsets, statefulsets, services, deployments, pods, rs] = await Promise.all([
-    kubectlKind('get nodes', 30000),
-    kubectlKind('get ds -A', 30000),
-    kubectlKind('get sts -A', 30000),
-    kubectlKind('get svc -A', 30000),
-    kubectlKind('get deploy -A', 30000),
+    kubectlKind('get nodes'),
+    kubectlKind('get ds -A'),
+    kubectlKind('get sts -A'),
+    kubectlKind('get svc -A'),
+    kubectlKind('get deploy -A'),
     kubectlKind('get pods -A'),
     runCmd(
       'kubectl get rs --all-namespaces --no-headers -o custom-columns=' +
       'NS:.metadata.namespace,NAME:.metadata.name,' +
       'OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name',
-      30000,
+      K8S_KIND_TIMEOUT,
       K8S_KIND_BUFFER,
     ),
   ]);
@@ -548,7 +555,7 @@ async function gatherClusterState() {
   }
 
   let k8sStateStr = 'Kubernetes status: Not running or failed to list resources.';
-  const k8sRes = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces');
+  const k8sRes = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces', K8S_KIND_TIMEOUT, K8S_KIND_BUFFER);
   if (k8sRes.success) {
     try {
       const parsed = JSON.parse(k8sRes.stdout);
@@ -845,7 +852,7 @@ app.post('/api/agent/orchestrate', async (req, res) => {
   const dockerVer = await runCmd('docker --version');
   const k8sVer = await runCmd('kubectl version --client');
   const dockerRes = await runCmd('docker ps -a --format "{{json .}}"');
-  const k8sRes = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces');
+  const k8sRes = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces', K8S_KIND_TIMEOUT, K8S_KIND_BUFFER);
   
   const stateSummary = `
   Docker version: ${dockerVer.stdout.trim()}
