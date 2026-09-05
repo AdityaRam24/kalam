@@ -110,3 +110,27 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload && sudo systemctl enable --now kalam
 journalctl -u kalam -f
 ```
+
+## Checking the topology map
+
+`npm run topology:check` computes the exact positions the topology canvas will
+draw, prints them as an ASCII map, and asserts the properties that make it
+readable: no card overlaps another, each stage keeps its own column range,
+every namespace gets its own band and its cards stay inside it, no stage
+collapses into a single column, and the aspect ratio is usable. It exits
+non-zero on failure, so it can gate a release.
+
+```bash
+npm run topology:check                                             # live cluster (kubectl)
+npm run topology:check -- http://localhost:3001/api/k8s/resources  # what the browser is served
+npm run topology:check -- snapshot.json                            # a saved kubectl dump
+```
+
+A VM's topology is served by `POST /api/vms/discover`, not by a GET, so it
+cannot be checked through the URL form directly. Save that host's payload first
+and check the file:
+
+```bash
+curl -s -X POST http://localhost:3001/api/vms/discover   -H 'Content-Type: application/json' -d '{"name":"<vm>"}' > vm.json
+npm run topology:check -- vm.json
+```

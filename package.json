@@ -15,6 +15,7 @@
     "lint": "oxlint",
     "test": "vitest run",
     "topology:check": "tsx scripts/topology-report.ts",
+    "diagnose": "tsx scripts/diagnose-host.ts",
     "preview": "vite preview",
     "cli": "node bin/kalam.cjs",
     "cli:install": "npm link"

@@ -290,9 +290,14 @@ export const VmMonitor: React.FC = () => {
       const engines = (d.engines || []).join(', ');
       setExplored((m) => ({
         ...m,
-        [name]: found.length
-          ? { ok: true, text: `Mapped: ${found.join(', ')}${engines ? ` · ${engines}` : ''}` }
-          : { ok: false, text: 'Reachable, but nothing was visible — this login may need root (shield icon) to see containerd and the kubeconfig.' },
+        [name]: d.warning
+          // The backend names the actual obstacle (read cut short, kubectl
+          // missing, API unreachable, no permission) — repeat it rather than
+          // reporting a bare count that hides it.
+          ? { ok: false, text: found.length ? `Mapped: ${found.join(', ')} — but ${d.warning}` : d.warning }
+          : found.length
+            ? { ok: true, text: `Mapped: ${found.join(', ')}${engines ? ` · ${engines}` : ''}` }
+            : { ok: false, text: 'Reachable, but nothing was visible — this login may need root (shield icon) to see containerd and the kubeconfig.' },
       }));
     } catch (e: any) {
       setExplored((m) => ({ ...m, [name]: { ok: false, text: `Scan failed: ${e.message}` } }));

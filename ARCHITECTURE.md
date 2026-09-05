@@ -79,10 +79,18 @@ sequenceDiagram
     V-->>S: KEY:value lines
     S-->>U: reachable, load, mem, disk, gpu, uptime
     U->>S: POST /api/vms/discover
-    S->>V: ssh docker ps + crictl ps + nerdctl ps + podman ps + kubectl pods/svc/nodes/deploy + systemctl + ss
+    S->>V: ssh docker ps + crictl ps + nerdctl ps + podman ps
+    S->>V: ssh kubectl pods/svc/nodes/deploy/sts/ds + rs (projected) + systemctl + ss
     V-->>S: sectioned output
-    S-->>U: containers, pods, K8s services, systemd services, listening ports
+    S-->>U: containers, pods, services, workloads, nodes, systemd units, ports
 ```
+
+A host added on the Virtual Machines tab is **explored immediately**: Kalam runs
+that discovery once and reports what it found ("Mapped: 12 containers, 30 pods,
+8 services") in the row, so an unreachable host or a login that cannot see
+containerd says so at the moment it is added rather than looking like an empty
+cluster later. Granting root re-runs it, because that is exactly when the
+previously invisible half of the machine appears.
 
 ### 2.1a Node Brain — explaining a discovered node
 
@@ -425,21 +433,128 @@ flowchart LR
 
 ### 2.6 Topology map
 
-The Topology view (`src/components/TopologyGraph.tsx`, React Flow) renders ports →
-containers and services → deployments → pods → nodes with live status LEDs,
-namespace grouping, search, heatmaps, and a details drawer (logs / actions /
-CVE scan for local resources).
+The Topology view (`src/components/TopologyGraph.tsx`, React Flow) draws the
+cluster as a left-to-right pipeline banded by namespace: containers on the left,
+then Services → Workloads → Pods, with cluster Nodes on the right.
 
-- **Source selector** — view this machine's topology or any SSH-connected VM's
-  (fetched via `/api/vms/discover`, jump hosts included).
+It is built from three **pure modules**, none of which import React. That split
+is deliberate: a map is either correct or it is not, and correctness here means
+properties that can be asserted rather than eyeballed.
+
+```
+kubectl / ssh  ─►  server/k8s/workloads.ts   normalize: owners, selectors, kinds
+                        │
+                        ▼
+                   src/lib/relations.ts      which cards connect, and why
+                        │
+                        ▼
+                   src/lib/layout.ts         where every card sits
+                        │
+                        ▼
+               TopologyGraph.tsx             React Flow rendering only
+```
+
+**`server/k8s/workloads.ts` — the data a topology needs.** Feeds both the local
+endpoint and the SSH path, so a VM and this machine produce identical shapes.
+It carries the two fields every edge depends on and which were previously
+dropped: a Service's `spec.selector`, and a Pod's owner resolved *through* its
+ReplicaSet to the Deployment a human would name. StatefulSets and DaemonSets are
+first-class workloads here — a map that knows only Deployments leaves every
+database and queue pod unattached.
+
+ReplicaSets are fetched as four projected columns
+(`-o custom-columns=NS,NAME,OKIND,ONAME`), never as JSON. They are consulted
+only for owner resolution, and Kubernetes retains ten revisions per Deployment
+by default, which makes their full JSON routinely the largest object in a
+cluster — 246 KB on a 33-pod laptop cluster versus 3 KB projected, and far wider
+apart on a real one. Pulling that through an SSH round trip is not viable.
+
+**`src/lib/relations.ts` — edges from Kubernetes semantics, not from names.**
+
+| Edge | Derived from |
+|---|---|
+| Workload → Pod (`manages`) | `ownerReferences`, resolved through the ReplicaSet |
+| Service → Pod (`routes`) | label selector matched against pod labels |
+| Pod → Node (`runs-on`) | `spec.nodeName` |
+| Pod → Container (`backs`) | crictl's pod field, or the `k8s_…` Docker name |
+| Node → Container (`hosts`) | only for containers not already inside a pod |
+
+Name matching survives *only* as a clearly-marked fallback for payloads that
+carry nothing better, and such edges are drawn fainter and labelled with a `?`.
+A pod whose owner is known but has no card (a static control-plane pod owned by
+its Node) gets no edge at all — a known owner is an answer, not a gap, and
+guessing a different parent would invent a relationship the cluster does not
+have.
+
+**`src/lib/layout.ts` — geometry with checkable properties.** Stages wrap into
+balanced, top-aligned grids rather than growing into one endless column, and
+blocks are biased ~1.6x wider than tall because the canvas is scaled to fit a
+wide dashboard panel: height is what forces every card to shrink past
+readability. Pods are ordered by owning workload so a workload's edges leave as
+one bundle. Each namespace gets its own band; each stage owns its own column
+range across every band.
+
+**`npm run topology:check`** (`scripts/topology-report.ts`) computes the real
+positions, prints the canvas as an ASCII map, and **asserts**: no card overlaps
+another, stage column ranges never interleave, namespace bands never overlap, no
+card escapes its band, no stage collapses to a single column, and the aspect
+ratio is usable. It exits non-zero on failure, so it can gate a release. It runs
+against live `kubectl`, a JSON snapshot, or a running Kalam — including a remote
+source:
+
+```bash
+npm run topology:check                                             # live kubectl
+npm run topology:check -- http://localhost:3001/api/k8s/resources  # what the browser gets
+npm run topology:check -- snapshot.json
+```
+
+Everything above is unit-tested from fixtures (`src/lib/__tests__/relations.test.ts`,
+`src/lib/__tests__/layout.test.ts`, `server/__tests__/workloads.test.ts`).
+
+Around that core the view adds:
+
+- **Source selector** — this machine, any SSH-connected VM, or **All hosts**,
+  which fans discovery across the inventory and merges the results. Each merged
+  resource carries the host it came from, so the drawer's logs and actions still
+  reach the right machine.
 - **Live mode** — re-polls the active source every 8 s; LEDs and edges update in
   place.
 - **Problems-only focus** — hides healthy resources; shows failures plus
-  everything they connect to (with a live problem count badge).
-- **Layouts** — grouped columns, or "Auto Flow" computed from the real edges with
-  `@dagrejs/dagre`.
-- **Accurate routing edges** — Service→Pod edges match real Kubernetes labels
-  against the service selector (name matching only as a fallback).
+  everything they connect to.
+- **Layouts** — the banded pipeline above, or "Auto Flow" computed from the same
+  edges with `@dagrejs/dagre`.
+
+### 2.7 The remote terminal and root
+
+`/api/vms/exec` runs one command per connection in a non-interactive shell,
+which is why so much of what people typed did not work: `cd` was forgotten,
+exported variables vanished, anything that prompted hung, and tools needing a
+TTY refused to start. `server/shell.ts` keeps **one real login shell open per
+session on a PTY** instead, streamed to the browser over SSE:
+
+```
+POST /api/vms/shell/open   { name, cols, rows, asRoot } -> { id }
+GET  /api/vms/shell/:id/stream    server-sent raw output (with scrollback replay)
+POST /api/vms/shell/:id/input     keystrokes, control characters included
+POST /api/vms/shell/:id/resize | /close
+```
+
+Sessions are in-memory, capped, and reaped after 30 minutes idle.
+
+The Virtual Machines tab offers **two** terminal buttons: a normal shell, and a
+**Root terminal** that elevates on any host whether or not elevation is
+configured for it.
+
+**Elevation is driven by what the shell says, never by a timer.** An earlier
+version wrote the stored password on a fixed delay; on a host with passwordless
+sudo there is no prompt at all, so the password was typed into the freshly
+opened root shell as a command — echoed on screen and recorded in root's shell
+history. `elevationStep()` is a pure function over the output seen so far: it
+sends the password only in response to a prompt genuinely waiting for one, once,
+inside a bounded window, and stops on `Sorry, try again` / `not in the sudoers
+file` / `su: Authentication failure`. If no password is stored, nothing is sent
+and the user simply types it — which is the point of a real terminal.
+`server/__tests__/shell.test.ts` pins every one of those cases.
 
 ---
 
@@ -486,7 +601,47 @@ CVE scan for local resources).
 
 ---
 
-## 4. Deployment / handoff flow
+## 4. Deployment
+
+### 4a. In a cluster — container image + Helm chart
+
+`Dockerfile` builds one image that serves the built UI and the API from a single
+port. It is multi-stage and runs `npm run build && npx vitest run` in the build
+stage, so a type error or a failing test fails the image rather than shipping.
+The runtime layer carries **kubectl** (the in-cluster read path, via the
+ServiceAccount token) and an **SSH client** (hosts outside the cluster); no
+container runtime is installed, because in a cluster the interesting data comes
+from kubectl and SSH. It runs as non-root UID 10001 under `tini`.
+
+`deploy/helm/kalam` installs it. Four values decide what the install can do —
+see `deploy/helm/kalam/README.md`:
+
+| Value | Default | Effect |
+|---|---|---|
+| `rbac.allowWrite` | `false` | read-only; `true` adds pod delete and workload restart/scale |
+| `rbac.clusterWide` | `true` | all namespaces (ClusterRole) vs this one (Role) |
+| `ssh.secretName` | `""` | cluster-only until you mount a key |
+| `persistence.enabled` | `false` | without it the SSH inventory and history reset on restart |
+
+Secrets are never granted in RBAC: Kalam does not read secret contents.
+
+Because the image is read-only and its writable state must land on a volume,
+three paths are environment-configurable:
+
+| Variable | Default | Holds |
+|---|---|---|
+| `KALAM_VMS_PATH` | `server/vms.json` | the SSH inventory |
+| `KALAM_LEARNED_PATH` | `server/pcai/learned.json` | the learned knowledge base |
+| `KALAM_HISTORY_DIR` | `server/history/data` | change-history snapshots and changelog |
+
+Validate before installing:
+
+```bash
+helm lint deploy/helm/kalam
+helm template kalam deploy/helm/kalam | kubectl apply --dry-run=server -f -
+```
+
+### 4b. On a machine — scripts
 
 ```mermaid
 flowchart LR
@@ -494,6 +649,9 @@ flowchart LR
     B --> C["setup.bat: install Node, npm install, create .env, link CLI"]
     C --> D["start.bat: build frontend, start server on 3001, open browser"]
 ```
+
+On Linux/macOS the equivalents live in `scripts/` (`setup.sh`, `start.sh`,
+`dev.sh`, `doctor.sh`).
 
 ---
 

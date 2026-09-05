@@ -58,20 +58,46 @@ app.use(historyRouter);
 async function runCmd(
   cmd: string,
   timeout = 8000,
-): Promise<{ stdout: string; stderr: string; success: boolean }> {
+  maxBuffer = 1024 * 1024 * 10, // 10 MB — fine for probes, NOT for cluster JSON
+): Promise<{ stdout: string; stderr: string; success: boolean; reason?: 'too-large' | 'timed-out' | 'failed' }> {
   try {
-    const { stdout, stderr } = await execAsync(cmd, {
-      maxBuffer: 1024 * 1024 * 10, // 10MB buffer
-      timeout,
-      killSignal: 'SIGKILL',
-    });
+    const { stdout, stderr } = await execAsync(cmd, { maxBuffer, timeout, killSignal: 'SIGKILL' });
     return { stdout, stderr, success: true };
   } catch (error: any) {
-    return {
-      stdout: error.stdout || '',
-      stderr: error.stderr || error.message || '',
-      success: false,
-    };
+    // Why it failed decides what the user is told. "Too large" and "timed out"
+    // both arrive as a killed child with partial output, and reporting either
+    // as an empty result is how a full cluster came to look like an empty one.
+    const code = String(error?.code || '');
+    const text = `${error?.stderr || ''} ${error?.message || ''}`;
+    const reason: 'too-large' | 'timed-out' | 'failed' =
+      code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || /maxBuffer/i.test(text) ? 'too-large'
+        : error?.killed || code === 'ETIMEDOUT' || /SIGKILL|timed out/i.test(text) ? 'timed-out'
+          : 'failed';
+    return { stdout: error.stdout || '', stderr: error.stderr || error.message || '', success: false, reason };
+  }
+}
+
+// Cluster JSON is not a probe. Pods on a multi-node cluster run to tens of
+// megabytes, and every kind is fetched separately so that one oversized kind
+// cannot take the rest of the view down with it.
+const K8S_KIND_BUFFER = 256 * 1024 * 1024;
+const K8S_KIND_TIMEOUT = 60_000;
+
+/** One `kubectl get -o json`, reporting WHY it returned nothing. */
+async function kubectlKind(
+  args: string,
+  timeout = K8S_KIND_TIMEOUT,
+): Promise<{ items: any[]; status: string }> {
+  const r = await runCmd(`kubectl ${args} -o json`, timeout, K8S_KIND_BUFFER);
+  if (!r.success) {
+    if (r.reason === 'too-large') return { items: [], status: 'too-large' };
+    if (r.reason === 'timed-out') return { items: [], status: 'timed-out' };
+    return { items: [], status: (r.stderr.split('\n')[0] || 'failed').slice(0, 140) };
+  }
+  try {
+    return { items: JSON.parse(r.stdout).items || [], status: 'ok' };
+  } catch {
+    return { items: [], status: 'unparsable' };
   }
 }
 
@@ -369,35 +395,61 @@ app.post('/api/docker/apply-fix', async (req, res) => {
 
 // API: List Kubernetes Resources
 app.get('/api/k8s/resources', async (req, res) => {
-  // StatefulSets and DaemonSets are queried alongside the obvious kinds
-  // because the topology map is only as good as the relationships in this
-  // payload, and a cluster's databases and queues are StatefulSets whose pods
-  // would otherwise have no owner at all.
+  // Every kind is fetched on its own. Previously all six came back through one
+  // command into a 10 MB buffer: on a multi-node cluster that overflowed, the
+  // endpoint answered 500, and the UI turned that into empty arrays with no
+  // explanation — so the dashboard showed containers and nothing else.
   //
-  // ReplicaSets come from a separate PROJECTED query: they are needed only to
-  // follow a pod to its Deployment, and their full JSON is routinely the
-  // largest thing in a cluster (ten retained revisions per Deployment).
-  const [main, rs] = await Promise.all([
-    runCmd('kubectl get pods,svc,deploy,sts,ds,nodes -o json --all-namespaces', 25000),
+  // StatefulSets and DaemonSets are included because a cluster's databases and
+  // queues live there, and their pods would otherwise have no owner. ReplicaSets
+  // come from a PROJECTED query: only the owner mapping is used, and their full
+  // JSON is routinely the largest object in a cluster.
+  const [nodes, daemonsets, statefulsets, services, deployments, pods, rs] = await Promise.all([
+    kubectlKind('get nodes', 30000),
+    kubectlKind('get ds -A', 30000),
+    kubectlKind('get sts -A', 30000),
+    kubectlKind('get svc -A', 30000),
+    kubectlKind('get deploy -A', 30000),
+    kubectlKind('get pods -A'),
     runCmd(
       'kubectl get rs --all-namespaces --no-headers -o custom-columns=' +
       'NS:.metadata.namespace,NAME:.metadata.name,' +
       'OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name',
-      25000,
+      30000,
+      K8S_KIND_BUFFER,
     ),
   ]);
-  if (!main.success) {
-    return res.status(500).json({ error: 'Failed to query Kubernetes resources', details: main.stderr });
+
+  const kinds: Record<string, string> = {
+    nodes: nodes.status, daemonsets: daemonsets.status, statefulsets: statefulsets.status,
+    services: services.status, deployments: deployments.status, pods: pods.status,
+  };
+  const failed = Object.entries(kinds).filter(([, v]) => v !== 'ok');
+
+  // A failed ReplicaSet query costs pod→Deployment edges, not the whole view.
+  const owners = rs.success ? parseReplicaSetOwners(rs.stdout) : undefined;
+  const result = normalizeClusterItems(
+    [...nodes.items, ...daemonsets.items, ...statefulsets.items,
+     ...services.items, ...deployments.items, ...pods.items],
+    owners,
+  );
+
+  // Partial data plus the reason beats an error that renders as an empty
+  // cluster. Only a total failure is worth a non-200.
+  let warning: string | undefined;
+  if (failed.length) {
+    const describe = ([kind, status]: [string, string]) =>
+      status === 'too-large' ? `${kind} exceeded the ${Math.round(K8S_KIND_BUFFER / 1024 / 1024)} MB read limit`
+        : status === 'timed-out' ? `${kind} timed out`
+          : status === 'unparsable' ? `${kind} returned output that could not be parsed`
+            : `${kind}: ${status}`;
+    warning = `Could not read ${failed.length} of ${Object.keys(kinds).length} resource kinds — ${failed.map(describe).join('; ')}.`;
+  }
+  if (failed.length === Object.keys(kinds).length) {
+    return res.status(500).json({ error: 'Failed to query Kubernetes resources', details: warning, kinds });
   }
 
-  try {
-    const raw = JSON.parse(main.stdout);
-    // A failed ReplicaSet query costs pod→Deployment edges, not the whole view.
-    const owners = rs.success ? parseReplicaSetOwners(rs.stdout) : undefined;
-    res.json(normalizeClusterItems(raw.items || [], owners));
-  } catch (err: any) {
-    res.status(500).json({ error: 'Failed to parse Kubernetes JSON', details: err.message });
-  }
+  res.json({ ...result, warning, diagnostics: { kinds } });
 });
 
 // Which workload kinds may be acted on, and the resource prefix kubectl needs.
