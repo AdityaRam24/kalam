@@ -619,6 +619,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           const { vm, d } = r.value;
           if (d.error || d.reachable === false) { failures.push(`${vm.name}: ${d.error || 'unreachable over SSH'}`); continue; }
           for (const e of d.engines || []) engines.add(e);
+          if (d.warning) failures.push(`${vm.name}: ${d.warning}`);
           // `host` is what makes a merged resource actionable and keeps two VMs
           // with identically-named namespaces from colliding downstream.
           for (const k of ['containers', 'pods', 'services', 'deployments', 'nodes'] as const) {
@@ -632,7 +633,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
         });
         setDockerContainers(merged.containers);
         setK8sResources({ pods: merged.pods, services: merged.services, deployments: merged.deployments, nodes: merged.nodes });
-        if (failures.length) setErrorMsg(`${failures.length} of ${vmList.length} hosts could not be read — ${failures.join('; ')}`);
+        if (failures.length) setErrorMsg(`${failures.length} of ${vmList.length} hosts reported a problem — ${failures.join('; ')}`);
       } catch (e: any) {
         setErrorMsg(`Failed to read the VM inventory: ${e.message}`);
       } finally {
@@ -677,9 +678,12 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           pods: d.pods || [], services: d.services || [],
           deployments: d.deployments || [], nodes: d.nodes || [],
         });
-        // Nothing at all usually means the login cannot see it: crictl, the
-        // kubeconfig and most of /var/log are root-only.
-        if (!(d.containers || []).length && !(d.pods || []).length && !engines.length) {
+        // The backend now says WHY a view is thin — cluster read cut short,
+        // kubectl missing, API unreachable, no permission to list pods. Show
+        // that instead of leaving the user to guess from an empty canvas.
+        if (d.warning) {
+          setErrorMsg(`${source}: ${d.warning}`);
+        } else if (!(d.containers || []).length && !(d.pods || []).length && !engines.length) {
           setErrorMsg(`No container runtime was visible on ${source}. If this host does run containers (Docker, containerd, podman) or Kubernetes, give Kalam root there (Virtual Machines tab → shield icon) and re-scan — crictl and the kubeconfig are root-only.`);
         }
       } catch (e: any) {
@@ -738,6 +742,10 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           deployments: Array.isArray(k8sData?.deployments) ? k8sData.deployments : [],
           nodes: Array.isArray(k8sData?.nodes) ? k8sData.nodes : [],
         });
+        // A kind that could not be read must say so. Reporting it as "no pods"
+        // is what made a full cluster look like a cluster with only containers.
+        if (k8sData?.warning) setErrorMsg(k8sData.warning);
+        else if (!k8sRes.ok) setErrorMsg('The Kubernetes query failed on this machine. Run "npm run diagnose -- --local" for the reason.');
       } else {
         setK8sResources({ pods: [], services: [], deployments: [], nodes: [] });
       }

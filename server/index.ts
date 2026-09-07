@@ -58,20 +58,68 @@ app.use(historyRouter);
 async function runCmd(
   cmd: string,
   timeout = 8000,
-): Promise<{ stdout: string; stderr: string; success: boolean }> {
+  maxBuffer = 1024 * 1024 * 10, // 10 MB — fine for probes, NOT for cluster JSON
+): Promise<{ stdout: string; stderr: string; success: boolean; reason?: 'too-large' | 'timed-out' | 'failed' }> {
   try {
-    const { stdout, stderr } = await execAsync(cmd, {
-      maxBuffer: 1024 * 1024 * 10, // 10MB buffer
-      timeout,
-      killSignal: 'SIGKILL',
-    });
+    const { stdout, stderr } = await execAsync(cmd, { maxBuffer, timeout, killSignal: 'SIGKILL' });
     return { stdout, stderr, success: true };
   } catch (error: any) {
-    return {
-      stdout: error.stdout || '',
-      stderr: error.stderr || error.message || '',
-      success: false,
-    };
+    // Why it failed decides what the user is told. "Too large" and "timed out"
+    // both arrive as a killed child with partial output, and reporting either
+    // as an empty result is how a full cluster came to look like an empty one.
+    const code = String(error?.code || '');
+    const text = `${error?.stderr || ''} ${error?.message || ''}`;
+    const reason: 'too-large' | 'timed-out' | 'failed' =
+      code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || /maxBuffer/i.test(text) ? 'too-large'
+        : error?.killed || code === 'ETIMEDOUT' || /SIGKILL|timed out/i.test(text) ? 'timed-out'
+          : 'failed';
+    return { stdout: error.stdout || '', stderr: error.stderr || error.message || '', success: false, reason };
+  }
+}
+
+// Cluster JSON is not a probe. Pods on a multi-node cluster run to tens of
+// megabytes, and every kind is fetched separately so that one oversized kind
+// cannot take the rest of the view down with it.
+//
+// The timeout must be GENEROUS. runCmd's 8 s default exists to stop a stopped
+// Docker Desktop from hanging a status probe on Windows; applying that same
+// default to a bulk cluster read is what made a real multi-node cluster report
+// itself as empty — the query was killed mid-flight and the failure surfaced as
+// "no pods". A small cluster answers in well under a second, so a long ceiling
+// costs nothing and only ever helps a large one.
+const K8S_KIND_BUFFER = 256 * 1024 * 1024;
+const K8S_KIND_TIMEOUT = Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000);
+
+// Two layers, because they guard different failures.
+//
+// INNER (`--request-timeout`): kubectl's own bound on the API call. It defaults
+// to 0 — no timeout — so an unresponsive API server leaves kubectl waiting
+// forever. Setting it means a slow or dead API server comes back as a readable
+// kubectl error ("context deadline exceeded") that Kalam can show, instead of
+// the process being killed and the failure looking like an empty cluster.
+//
+// OUTER (K8S_KIND_TIMEOUT, above): a backstop on the child process itself, for
+// when kubectl is wedged rather than waiting — it cannot be the primary
+// mechanism, because killing a process tells you nothing about why. It sits
+// above the inner bound so kubectl always gets to explain itself first, and is
+// generous enough never to fire on a merely large cluster.
+const K8S_REQUEST_TIMEOUT = `--request-timeout=${Math.max(5, Math.floor((K8S_KIND_TIMEOUT * 0.75) / 1000))}s`;
+
+/** One `kubectl get -o json`, reporting WHY it returned nothing. */
+async function kubectlKind(
+  args: string,
+  timeout = K8S_KIND_TIMEOUT,
+): Promise<{ items: any[]; status: string }> {
+  const r = await runCmd(`kubectl ${args} -o json ${K8S_REQUEST_TIMEOUT}`, timeout, K8S_KIND_BUFFER);
+  if (!r.success) {
+    if (r.reason === 'too-large') return { items: [], status: 'too-large' };
+    if (r.reason === 'timed-out') return { items: [], status: 'timed-out' };
+    return { items: [], status: (r.stderr.split('\n')[0] || 'failed').slice(0, 140) };
+  }
+  try {
+    return { items: JSON.parse(r.stdout).items || [], status: 'ok' };
+  } catch {
+    return { items: [], status: 'unparsable' };
   }
 }
 
@@ -369,35 +417,61 @@ app.post('/api/docker/apply-fix', async (req, res) => {
 
 // API: List Kubernetes Resources
 app.get('/api/k8s/resources', async (req, res) => {
-  // StatefulSets and DaemonSets are queried alongside the obvious kinds
-  // because the topology map is only as good as the relationships in this
-  // payload, and a cluster's databases and queues are StatefulSets whose pods
-  // would otherwise have no owner at all.
+  // Every kind is fetched on its own. Previously all six came back through one
+  // command into a 10 MB buffer: on a multi-node cluster that overflowed, the
+  // endpoint answered 500, and the UI turned that into empty arrays with no
+  // explanation — so the dashboard showed containers and nothing else.
   //
-  // ReplicaSets come from a separate PROJECTED query: they are needed only to
-  // follow a pod to its Deployment, and their full JSON is routinely the
-  // largest thing in a cluster (ten retained revisions per Deployment).
-  const [main, rs] = await Promise.all([
-    runCmd('kubectl get pods,svc,deploy,sts,ds,nodes -o json --all-namespaces', 25000),
+  // StatefulSets and DaemonSets are included because a cluster's databases and
+  // queues live there, and their pods would otherwise have no owner. ReplicaSets
+  // come from a PROJECTED query: only the owner mapping is used, and their full
+  // JSON is routinely the largest object in a cluster.
+  const [nodes, daemonsets, statefulsets, services, deployments, pods, rs] = await Promise.all([
+    kubectlKind('get nodes'),
+    kubectlKind('get ds -A'),
+    kubectlKind('get sts -A'),
+    kubectlKind('get svc -A'),
+    kubectlKind('get deploy -A'),
+    kubectlKind('get pods -A'),
     runCmd(
       'kubectl get rs --all-namespaces --no-headers -o custom-columns=' +
       'NS:.metadata.namespace,NAME:.metadata.name,' +
-      'OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name',
-      25000,
+      `OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name ${K8S_REQUEST_TIMEOUT}`,
+      K8S_KIND_TIMEOUT,
+      K8S_KIND_BUFFER,
     ),
   ]);
-  if (!main.success) {
-    return res.status(500).json({ error: 'Failed to query Kubernetes resources', details: main.stderr });
+
+  const kinds: Record<string, string> = {
+    nodes: nodes.status, daemonsets: daemonsets.status, statefulsets: statefulsets.status,
+    services: services.status, deployments: deployments.status, pods: pods.status,
+  };
+  const failed = Object.entries(kinds).filter(([, v]) => v !== 'ok');
+
+  // A failed ReplicaSet query costs pod→Deployment edges, not the whole view.
+  const owners = rs.success ? parseReplicaSetOwners(rs.stdout) : undefined;
+  const result = normalizeClusterItems(
+    [...nodes.items, ...daemonsets.items, ...statefulsets.items,
+     ...services.items, ...deployments.items, ...pods.items],
+    owners,
+  );
+
+  // Partial data plus the reason beats an error that renders as an empty
+  // cluster. Only a total failure is worth a non-200.
+  let warning: string | undefined;
+  if (failed.length) {
+    const describe = ([kind, status]: [string, string]) =>
+      status === 'too-large' ? `${kind} exceeded the ${Math.round(K8S_KIND_BUFFER / 1024 / 1024)} MB read limit`
+        : status === 'timed-out' ? `${kind} timed out`
+          : status === 'unparsable' ? `${kind} returned output that could not be parsed`
+            : `${kind}: ${status}`;
+    warning = `Could not read ${failed.length} of ${Object.keys(kinds).length} resource kinds — ${failed.map(describe).join('; ')}.`;
+  }
+  if (failed.length === Object.keys(kinds).length) {
+    return res.status(500).json({ error: 'Failed to query Kubernetes resources', details: warning, kinds });
   }
 
-  try {
-    const raw = JSON.parse(main.stdout);
-    // A failed ReplicaSet query costs pod→Deployment edges, not the whole view.
-    const owners = rs.success ? parseReplicaSetOwners(rs.stdout) : undefined;
-    res.json(normalizeClusterItems(raw.items || [], owners));
-  } catch (err: any) {
-    res.status(500).json({ error: 'Failed to parse Kubernetes JSON', details: err.message });
-  }
+  res.json({ ...result, warning, diagnostics: { kinds } });
 });
 
 // Which workload kinds may be acted on, and the resource prefix kubectl needs.
@@ -496,7 +570,7 @@ async function gatherClusterState() {
   }
 
   let k8sStateStr = 'Kubernetes status: Not running or failed to list resources.';
-  const k8sRes = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces');
+  const k8sRes = await runCmd(`kubectl get pods,svc,deploy,nodes -o json --all-namespaces ${K8S_REQUEST_TIMEOUT}`, K8S_KIND_TIMEOUT, K8S_KIND_BUFFER);
   if (k8sRes.success) {
     try {
       const parsed = JSON.parse(k8sRes.stdout);
@@ -793,7 +867,7 @@ app.post('/api/agent/orchestrate', async (req, res) => {
   const dockerVer = await runCmd('docker --version');
   const k8sVer = await runCmd('kubectl version --client');
   const dockerRes = await runCmd('docker ps -a --format "{{json .}}"');
-  const k8sRes = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces');
+  const k8sRes = await runCmd(`kubectl get pods,svc,deploy,nodes -o json --all-namespaces ${K8S_REQUEST_TIMEOUT}`, K8S_KIND_TIMEOUT, K8S_KIND_BUFFER);
   
   const stateSummary = `
   Docker version: ${dockerVer.stdout.trim()}

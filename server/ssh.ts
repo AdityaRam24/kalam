@@ -47,6 +47,14 @@ export interface SshResult {
   stdout: string;
   stderr: string;
   ok: boolean;
+  /**
+   * Output hit the buffer cap and was cut short.
+   *
+   * This must be reported, never inferred. Truncated JSON does not fail loudly
+   * — it fails as a parse error that a caller swallows into an empty array, so
+   * a cluster full of pods reads as a cluster with none.
+   */
+  truncated?: boolean;
 }
 
 export interface ExecOptions {
@@ -210,8 +218,16 @@ export async function sshExec(
     conn = await connect(cfg);
 
     return await new Promise<SshResult>((resolve) => {
-      let stdout = '';
-      let stderr = '';
+      // Chunks are collected and joined once. Repeatedly concatenating a
+      // string that reaches tens of megabytes is quadratic, and bulk cluster
+      // JSON reaches exactly that.
+      const outChunks: string[] = [];
+      const errChunks: string[] = [];
+      let outLen = 0;
+      let errLen = 0;
+      let truncated = false;
+      const stdoutText = () => outChunks.join('');
+      const stderrText = () => errChunks.join('');
       let done = false;
       const finish = (r: SshResult) => {
         if (done) return;
@@ -220,20 +236,36 @@ export async function sshExec(
         resolve(r);
       };
       const timer = setTimeout(
-        () => finish({ stdout, stderr: stderr || `Timed out after ${timeoutMs}ms`, ok: false }),
+        () => finish({ stdout: stdoutText(), stderr: stderrText() || `Timed out after ${timeoutMs}ms`, ok: false, truncated }),
         timeoutMs
       );
 
       const execOpts = usePty ? { pty: { term: 'xterm-256color', cols: 200, rows: 50 } } : {};
       conn!.exec(wrapped.command, execOpts as any, (err, stream) => {
         if (err) return finish({ stdout: '', stderr: err.message, ok: false });
-        // Truncated output parses as "these objects are gone", so stop reading
-        // at the cap rather than letting the buffer grow without bound.
-        stream.on('data', (d: Buffer) => { if (stdout.length < maxBuffer) stdout += d.toString('utf8'); });
-        stream.stderr.on('data', (d: Buffer) => { if (stderr.length < maxBuffer) stderr += d.toString('utf8'); });
-        stream.on('close', (code: number) => finish(
-          usePty ? { stdout: cleanPty(stdout), stderr: cleanPty(stderr), ok: code === 0 } : { stdout, stderr, ok: code === 0 }
-        ));
+        // Stop reading at the cap rather than letting the buffer grow without
+        // bound — but record that it happened, so the caller can say "this was
+        // cut short" instead of reporting an empty cluster.
+        stream.on('data', (d: Buffer) => {
+          if (outLen >= maxBuffer) { truncated = true; return; }
+          const text = d.toString('utf8');
+          outLen += text.length;
+          outChunks.push(text);
+          if (outLen >= maxBuffer) truncated = true;
+        });
+        stream.stderr.on('data', (d: Buffer) => {
+          if (errLen >= maxBuffer) return;
+          const text = d.toString('utf8');
+          errLen += text.length;
+          errChunks.push(text);
+        });
+        stream.on('close', (code: number) => {
+          const out = stdoutText();
+          const errText = stderrText();
+          finish(usePty
+            ? { stdout: cleanPty(out), stderr: cleanPty(errText), ok: code === 0, truncated }
+            : { stdout: out, stderr: errText, ok: code === 0, truncated });
+        });
         // Elevation passwords are typed, not passed as arguments — an argument
         // would be visible to every user in `ps` on the remote host.
         if (wrapped.stdin) stream.write(wrapped.stdin);

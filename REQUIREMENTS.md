@@ -24,6 +24,35 @@ To run Kalam locally, you need the following system tools installed and running:
 
 ---
 
+## 📁 Where Kalam writes state
+
+Three files/directories are written at runtime. Each path is overridable, which
+is what lets the container image stay read-only and keep its state on a mounted
+volume — without this, every host added on the Virtual Machines tab is lost on
+restart.
+
+| Variable | Default | Holds |
+| --- | --- | --- |
+| `KALAM_VMS_PATH` | `server/vms.json` | the SSH inventory (hosts, users, credentials) |
+| `KALAM_LEARNED_PATH` | `server/pcai/learned.json` | the learned knowledge base |
+| `KALAM_HISTORY_DIR` | `server/history/data` | change-history snapshots and changelog |
+
+All three are git-ignored at their defaults. The Helm chart sets them to a
+volume automatically when `persistence.enabled=true`.
+
+## ⏱️ Reading a large cluster
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `KALAM_KUBECTL_TIMEOUT_MS` | `120000` | Ceiling on a bulk cluster read. `kubectl` gets its own `--request-timeout` derived from this and set below it, so a slow or unreachable API server returns a readable error instead of being killed. Raise it if a very large cluster reports `timed-out`. |
+
+This is deliberately separate from the 8-second probe timeout used for
+`docker`/`kubectl` version checks. That short bound exists because a stopped
+Docker Desktop on Windows blocks forever with no error of its own; applying it
+to a bulk cluster read is what once made a large cluster report itself empty.
+
+---
+
 ## 🔑 AI LLM Provider Configuration
 
 Kalam requires one of the following to activate its agentic DevOps Chatbot:

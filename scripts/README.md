@@ -110,3 +110,57 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload && sudo systemctl enable --now kalam
 journalctl -u kalam -f
 ```
+
+## Diagnosing a host that shows nothing
+
+`npm run diagnose` runs the real discovery pipeline — the same commands, buffers
+and parsers the server uses — and reports every stage. Use it whenever the
+dashboard or topology map is emptier than the cluster is.
+
+```bash
+npm run diagnose -- --local                 # this machine (Kalam on a cluster node)
+npm run diagnose -- <name-from-inventory>   # a host reached over SSH
+npm run diagnose -- --host 10.1.2.3 --user ubuntu --key ~/.ssh/id_rsa
+KALAM_SSH_PASSWORD=... npm run diagnose -- --host 10.1.2.3 --user ubuntu
+```
+
+Add `--root` to elevate, `--via <name>` for a jump host, `--json` to dump the
+raw payload. It prints the kubeconfig context in use, whether that identity may
+list pods, per-kind object counts with sizes and timings, the exact kubectl
+error for anything that failed, and the resulting edge and canvas counts. It
+exits non-zero when something is wrong.
+
+The four failures it exists to name, all of which used to render as an empty
+map with no explanation:
+
+| What it prints | What it means |
+| --- | --- |
+| `The connection to the server localhost:8080 was refused` | no kubeconfig for the user Kalam runs as |
+| `You must be logged in to the server (Unauthorized)` | credentials expired or wrong context |
+| `Forbidden: pods is forbidden: User "system:serviceaccount:..."` | the identity may not list that kind |
+| `sh: kubectl: command not found` | not on the non-interactive SSH `PATH` |
+| `too-large` / `timed-out` / `cut-short` | the read exceeded a limit — raise `KALAM_KUBECTL_TIMEOUT_MS` |
+
+## Checking the topology map
+
+`npm run topology:check` computes the exact positions the topology canvas will
+draw, prints them as an ASCII map, and asserts the properties that make it
+readable: no card overlaps another, each stage keeps its own column range,
+every namespace gets its own band and its cards stay inside it, no stage
+collapses into a single column, and the aspect ratio is usable. It exits
+non-zero on failure, so it can gate a release.
+
+```bash
+npm run topology:check                                             # live cluster (kubectl)
+npm run topology:check -- http://localhost:3001/api/k8s/resources  # what the browser is served
+npm run topology:check -- snapshot.json                            # a saved kubectl dump
+```
+
+A VM's topology is served by `POST /api/vms/discover`, not by a GET, so it
+cannot be checked through the URL form directly. Save that host's payload first
+and check the file:
+
+```bash
+curl -s -X POST http://localhost:3001/api/vms/discover   -H 'Content-Type: application/json' -d '{"name":"<vm>"}' > vm.json
+npm run topology:check -- vm.json
+```

@@ -29,6 +29,13 @@ rules:
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get, list]
+  {{- if .Values.rbac.clusterWide }}
+  # Health endpoints are not resources, so they need their own grant. Without
+  # it a reachability probe reports "cannot reach the cluster" on a cluster
+  # whose objects read perfectly well.
+  - nonResourceURLs: ["/readyz", "/livez", "/healthz", "/version"]
+    verbs: [get]
+  {{- end }}
   {{- if $write }}
   # Opt-in (rbac.allowWrite): the verbs behind the UI's action buttons.
   # Secrets are never granted — Kalam does not read secret contents.

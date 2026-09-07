@@ -27,7 +27,7 @@ import { identifyComponent, type ComponentInfo } from './pcai/components.js';
 import { analyzeCauses, graphStats } from './graph/analyze.js';
 import { buildInfraGraph } from './graph/build.js';
 import { nodeId as gid } from './graph/model.js';
-import { sshExec, sshCheck, sshWhoami, shQuote, SSH_PORT, type Elevation, type ExecOptions } from './ssh.js';
+import { sshExec, sshCheck, sshWhoami, shQuote, SSH_PORT, type Elevation, type ExecOptions, type SshResult } from './ssh.js';
 import { promises as fs } from 'fs';
 import net from 'net';
 import path from 'path';
@@ -137,7 +137,7 @@ export async function sshRun(
   command: string,
   timeoutMs = 20000,
   options: number | ExecOptions = {}
-): Promise<{ stdout: string; stderr: string; ok: boolean }> {
+): Promise<SshResult> {
   const jump = await getJump(vm);
   return sshExec(vm, command, timeoutMs, jump, options);
 }
@@ -738,34 +738,17 @@ vmsRouter.post('/api/vms/diagnose', async (req, res) => {
 // Discover the container/pod workloads actually running ON a VM, over SSH.
 // Probes Docker, Kubernetes (kubectl), and containerd (crictl) — whichever the
 // host has — in a single SSH round trip using section delimiters.
-const DISCOVER_CMD = [
+// Host-level facts: which runtimes exist, their containers, systemd units and
+// listening ports. Small, fast, and deliberately in its OWN SSH round trip so
+// that reading a large cluster can never starve it. Previously both lived in
+// one command, and on a real multi-node cluster the pod JSON overran the
+// buffer — which cut off every section after it, leaving a host that showed
+// its containers and nothing else.
+export const DISCOVER_HOST_CMD = [
   "echo @@ENGINES@@",
   "for b in docker kubectl crictl nerdctl podman; do command -v $b >/dev/null 2>&1 && echo $b; done",
   "echo @@DOCKER@@",
   "(docker ps -a --format '{{json .}}' 2>/dev/null || true)",
-  "echo @@KPODS@@",
-  "(kubectl get pods -A -o json 2>/dev/null || true)",
-  "echo @@KSVCS@@",
-  "(kubectl get svc -A -o json 2>/dev/null || true)",
-  // Nodes and deployments so a remote source fills the same views as the local
-  // one — without them the visualizer showed a VM's pods floating with no
-  // cluster around them.
-  "echo @@KNODES@@",
-  "(kubectl get nodes -o json 2>/dev/null || true)",
-  "echo @@KDEPLOYS@@",
-  "(kubectl get deploy -A -o json 2>/dev/null || true)",
-  // A pod's ownerReferences point at a ReplicaSet, and databases/queues are
-  // StatefulSets — without these the map cannot say what owns what.
-  // ReplicaSets are projected to four columns rather than fetched as JSON:
-  // only the owner mapping is used, and their full JSON is routinely the
-  // largest object in a cluster (ten retained revisions per Deployment), which
-  // is not something to pull through an SSH round trip.
-  "echo @@KRS@@",
-  "(kubectl get rs --all-namespaces --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name 2>/dev/null || true)",
-  "echo @@KSTS@@",
-  "(kubectl get sts -A -o json 2>/dev/null || true)",
-  "echo @@KDS@@",
-  "(kubectl get ds -A -o json 2>/dev/null || true)",
   // -a so exited containers are visible too, matching `docker ps -a` above.
   "echo @@CRICTL@@",
   "(sudo -n crictl ps -a -o json 2>/dev/null || crictl ps -a -o json 2>/dev/null || true)",
@@ -773,12 +756,62 @@ const DISCOVER_CMD = [
   "(nerdctl ps -a --format '{{json .}}' 2>/dev/null || true)",
   "echo @@PODMAN@@",
   "(podman ps -a --format json 2>/dev/null || true)",
+  // Why the cluster sections are empty, when they are: no kubeconfig, no
+  // permission, API unreachable. Without this the UI can only say "nothing
+  // here", which is indistinguishable from an idle cluster.
+  //
+  // `get nodes` rather than `--raw=/readyz`: the raw endpoints need a
+  // nonResourceURLs grant that a least-privilege ServiceAccount does not have,
+  // so probing them reports "cannot reach the cluster" on a cluster that reads
+  // perfectly well.
+  "echo @@KUBECHECK@@",
+  "(kubectl get nodes -o name --request-timeout=10s 2>&1 | head -c 300 || true)",
+  // Which kubeconfig and identity are in play — the usual cause of "works in
+  // my shell, empty in Kalam" is a different HOME or a service account.
+  "echo @@KUBECTX@@",
+  "(kubectl config current-context 2>&1 | head -c 160 || true)",
+  "echo @@KUBEAUTH@@",
+  "(kubectl auth can-i list pods --all-namespaces 2>&1 | head -c 160 || true)",
   "echo @@SYSTEMD@@",
   "(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | head -50 || true)",
   "echo @@PORTS@@",
   "(ss -tulnp 2>/dev/null | tail -n +2 | head -50 || netstat -tulnp 2>/dev/null | tail -n +3 | head -50 || true)",
   "echo @@END@@",
 ].join('; ');
+
+// kubectl's own bound on each API call, set below the outer SSH timeout so a
+// slow or dead API server returns a readable error instead of the whole round
+// trip being killed. kubectl defaults this to 0, meaning it waits forever.
+const K8S_REQ = `--request-timeout=${Math.max(5, Math.floor((Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000) * 0.6) / 1000))}s`;
+
+// Cluster objects, in their own round trip with a buffer sized for a real
+// cluster. Ordered SMALLEST FIRST on purpose: if an unusually large cluster
+// still overruns the cap, the kinds already read are intact and only the last
+// one is lost, instead of everything after the first bulky read.
+export const DISCOVER_K8S_CMD = [
+  "echo @@KNODES@@",
+  `(kubectl get nodes -o json ${K8S_REQ} 2>/dev/null || kubectl get nodes ${K8S_REQ} 2>&1 | head -c 300)`,
+  "echo @@KDS@@",
+  `(kubectl get ds -A -o json ${K8S_REQ} 2>/dev/null || kubectl get ds -A ${K8S_REQ} 2>&1 | head -c 300)`,
+  "echo @@KSTS@@",
+  `(kubectl get sts -A -o json ${K8S_REQ} 2>/dev/null || kubectl get sts -A ${K8S_REQ} 2>&1 | head -c 300)`,
+  "echo @@KSVCS@@",
+  `(kubectl get svc -A -o json ${K8S_REQ} 2>/dev/null || kubectl get svc -A ${K8S_REQ} 2>&1 | head -c 300)`,
+  "echo @@KDEPLOYS@@",
+  `(kubectl get deploy -A -o json ${K8S_REQ} 2>/dev/null || kubectl get deploy -A ${K8S_REQ} 2>&1 | head -c 300)`,
+  // ReplicaSets are projected to four columns rather than fetched as JSON:
+  // only the owner mapping is used, and their full JSON is routinely the
+  // largest object in a cluster (ten retained revisions per Deployment).
+  "echo @@KRS@@",
+  "(kubectl get rs --all-namespaces --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name 2>/dev/null || true)",
+  "echo @@KPODS@@",
+  `(kubectl get pods -A -o json ${K8S_REQ} 2>/dev/null || kubectl get pods -A ${K8S_REQ} 2>&1 | head -c 300)`,
+  "echo @@END@@",
+].join('; ');
+
+/** Bulk cluster JSON needs far more than sshRun's 4 MB default. */
+export const K8S_MAX_BUFFER = 96 * 1024 * 1024;
+export const K8S_TIMEOUT_MS = Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000);
 
 export function section(text: string, tag: string): string {
   const start = text.indexOf(`@@${tag}@@`);
@@ -874,6 +907,26 @@ export function parseContainers(stdout: string): any[] {
   return containers;
 }
 
+/**
+ * Read one `kubectl get ... -o json` section, reporting WHY it yielded nothing.
+ *
+ * The distinction is the whole point. A section that arrived cut in half is
+ * still valid-looking text that `JSON.parse` rejects, and swallowing that into
+ * an empty array reports a cluster full of pods as a cluster with none — which
+ * is exactly how a buffer overrun stayed invisible.
+ */
+export function readKindItems(text: string): { items: any[]; status: string } {
+  const raw = (text || '').trim();
+  if (!raw) return { items: [], status: 'empty' };
+  if (!raw.startsWith('{')) return { items: [], status: 'unreadable' };
+  try {
+    const items = JSON.parse(raw).items || [];
+    return { items, status: String(items.length) };
+  } catch {
+    return { items: [], status: 'cut-short' };
+  }
+}
+
 vmsRouter.post('/api/vms/discover', async (req, res) => {
   const { name } = req.body || {};
   const vm = (await loadVms()).find((v) => v.name === name);
@@ -883,37 +936,78 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
     return res.status(200).json({ reachable: false, error: vm.via ? `Jump host "${vm.via}" unreachable` : 'Host unreachable on SSH (port 22)' });
   }
 
-  const { stdout, stderr, ok } = await sshRun(vm, DISCOVER_CMD, 60000);
-  if (!ok && !stdout.trim()) {
-    return res.status(200).json({ reachable: true, error: (stderr.split('\n')[0] || 'SSH failed').slice(0, 200) });
+  const host = await sshRun(vm, DISCOVER_HOST_CMD, 45000);
+  if (!host.ok && !host.stdout.trim()) {
+    return res.status(200).json({ reachable: true, error: (host.stderr.split('\n')[0] || 'SSH failed').slice(0, 200) });
   }
+  const stdout = host.stdout;
 
   const engines = section(stdout, 'ENGINES').split('\n').map((s) => s.trim()).filter(Boolean);
 
   // Containers, from whichever runtime the host actually has.
   const containers: any[] = parseContainers(stdout);
 
-  // Kubernetes objects, normalized by exactly the same code the local endpoint
-  // uses (server/k8s/workloads.ts) so a VM source and this machine are
-  // indistinguishable downstream — selectors, pod owners and all.
-  const kitems = (tag: string): any[] => {
-    try {
-      const raw = section(stdout, tag);
-      return raw.startsWith('{') ? (JSON.parse(raw).items || []) : [];
-    } catch { return []; }
+  // Per-kind outcome, so "no pods here" can never be confused with "we could
+  // not read the pods". An empty map with no explanation is the failure this
+  // whole block exists to prevent.
+  const kinds: Record<string, string> = {};
+  const kitems = (raw: string, tag: string): any[] => {
+    const { items, status } = readKindItems(section(raw, tag));
+    kinds[tag] = status;
+    return items;
   };
+
+  // Cluster objects come from a second round trip with a much larger buffer.
+  let k8sOut = '';
+  let truncated = false;
+  const hasKubectl = engines.includes('kubectl');
+  if (hasKubectl) {
+    const k8s = await sshRun(vm, DISCOVER_K8S_CMD, K8S_TIMEOUT_MS, { maxBuffer: K8S_MAX_BUFFER });
+    k8sOut = k8s.stdout;
+    truncated = !!k8s.truncated;
+  }
+
   const cluster = normalizeClusterItems(
     [
-      ...kitems('KPODS'),
-      ...kitems('KSVCS'),
-      ...kitems('KNODES'),
-      ...kitems('KDEPLOYS'),
-      ...kitems('KSTS'),
-      ...kitems('KDS'),
+      ...kitems(k8sOut, 'KNODES'),
+      ...kitems(k8sOut, 'KDS'),
+      ...kitems(k8sOut, 'KSTS'),
+      ...kitems(k8sOut, 'KSVCS'),
+      ...kitems(k8sOut, 'KDEPLOYS'),
+      ...kitems(k8sOut, 'KPODS'),
     ],
-    parseReplicaSetOwners(section(stdout, 'KRS')),
+    parseReplicaSetOwners(section(k8sOut, 'KRS')),
   );
   const pods = cluster.pods;
+
+  // One sentence the UI can show verbatim, naming the actual obstacle.
+  //
+  // The verdict is driven by what was actually READ, never by the probe alone:
+  // a probe can be denied on a cluster whose objects read perfectly, and
+  // warning about that would send someone chasing a problem they do not have.
+  const kubeCheck = section(stdout, 'KUBECHECK').trim();
+  const kubeContext = section(stdout, 'KUBECTX').trim();
+  const kubeAuth = section(stdout, 'KUBEAUTH').trim();
+  const readCount = cluster.pods.length + cluster.services.length
+    + cluster.deployments.length + cluster.nodes.length;
+  // A status that is not a number is a failure: 'cut-short', 'unreadable', or
+  // kubectl's own message.
+  const firstFailure = Object.entries(kinds)
+    .find(([, v]) => v !== 'empty' && Number.isNaN(Number(v)))?.[1];
+
+  let warning: string | undefined;
+  if (truncated) {
+    warning = `This cluster is larger than the ${Math.round(K8S_MAX_BUFFER / (1024 * 1024))} MB read limit, so the last kinds were cut short. Per kind: ${JSON.stringify(kinds)}.`;
+  } else if (!hasKubectl) {
+    warning = 'kubectl was not found on this host (a non-interactive SSH shell does not read ~/.bashrc, so /usr/local/bin may be missing from PATH). No Kubernetes objects could be read.';
+  } else if (readCount === 0) {
+    const detail = firstFailure || kubeCheck || 'kubectl produced no output';
+    warning = `kubectl is installed but read nothing: ${String(detail).slice(0, 220)}`
+      + (kubeContext ? ` · context: ${kubeContext.slice(0, 60)}` : '')
+      + (/^no\b/i.test(kubeAuth) ? ' · this identity may not list pods (try the shield icon to run as root)' : '');
+  } else if (firstFailure) {
+    warning = `Some resource kinds could not be read: ${JSON.stringify(kinds)}.`;
+  }
 
   // containerd via crictl — the primary container view on a Kubernetes node,
   // which normally has no docker at all. Kept as its own `crictl` key for
@@ -947,7 +1041,13 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
     listeningPorts.push({ proto, local, process: procMatch ? procMatch[1] : '' });
   }
 
-  res.json({ reachable: true, engines, containers, pods, services, nodes, deployments, crictl, systemServices, listeningPorts });
+  res.json({
+    reachable: true, engines, containers, pods, services, nodes, deployments,
+    crictl, systemServices, listeningPorts,
+    warning,
+    // Everything needed to explain an empty view without guessing.
+    diagnostics: { truncated, kubectl: kubeCheck || null, context: kubeContext || null, canListPods: kubeAuth || null, kinds },
+  });
 });
 
 // ---------------------------------------------------------------------------
