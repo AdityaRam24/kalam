@@ -90,12 +90,27 @@ async function runCmd(
 const K8S_KIND_BUFFER = 256 * 1024 * 1024;
 const K8S_KIND_TIMEOUT = Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000);
 
+// Two layers, because they guard different failures.
+//
+// INNER (`--request-timeout`): kubectl's own bound on the API call. It defaults
+// to 0 — no timeout — so an unresponsive API server leaves kubectl waiting
+// forever. Setting it means a slow or dead API server comes back as a readable
+// kubectl error ("context deadline exceeded") that Kalam can show, instead of
+// the process being killed and the failure looking like an empty cluster.
+//
+// OUTER (K8S_KIND_TIMEOUT, above): a backstop on the child process itself, for
+// when kubectl is wedged rather than waiting — it cannot be the primary
+// mechanism, because killing a process tells you nothing about why. It sits
+// above the inner bound so kubectl always gets to explain itself first, and is
+// generous enough never to fire on a merely large cluster.
+const K8S_REQUEST_TIMEOUT = `--request-timeout=${Math.max(5, Math.floor((K8S_KIND_TIMEOUT * 0.75) / 1000))}s`;
+
 /** One `kubectl get -o json`, reporting WHY it returned nothing. */
 async function kubectlKind(
   args: string,
   timeout = K8S_KIND_TIMEOUT,
 ): Promise<{ items: any[]; status: string }> {
-  const r = await runCmd(`kubectl ${args} -o json`, timeout, K8S_KIND_BUFFER);
+  const r = await runCmd(`kubectl ${args} -o json ${K8S_REQUEST_TIMEOUT}`, timeout, K8S_KIND_BUFFER);
   if (!r.success) {
     if (r.reason === 'too-large') return { items: [], status: 'too-large' };
     if (r.reason === 'timed-out') return { items: [], status: 'timed-out' };
@@ -421,7 +436,7 @@ app.get('/api/k8s/resources', async (req, res) => {
     runCmd(
       'kubectl get rs --all-namespaces --no-headers -o custom-columns=' +
       'NS:.metadata.namespace,NAME:.metadata.name,' +
-      'OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name',
+      `OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name ${K8S_REQUEST_TIMEOUT}`,
       K8S_KIND_TIMEOUT,
       K8S_KIND_BUFFER,
     ),
@@ -555,7 +570,7 @@ async function gatherClusterState() {
   }
 
   let k8sStateStr = 'Kubernetes status: Not running or failed to list resources.';
-  const k8sRes = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces', K8S_KIND_TIMEOUT, K8S_KIND_BUFFER);
+  const k8sRes = await runCmd(`kubectl get pods,svc,deploy,nodes -o json --all-namespaces ${K8S_REQUEST_TIMEOUT}`, K8S_KIND_TIMEOUT, K8S_KIND_BUFFER);
   if (k8sRes.success) {
     try {
       const parsed = JSON.parse(k8sRes.stdout);
@@ -852,7 +867,7 @@ app.post('/api/agent/orchestrate', async (req, res) => {
   const dockerVer = await runCmd('docker --version');
   const k8sVer = await runCmd('kubectl version --client');
   const dockerRes = await runCmd('docker ps -a --format "{{json .}}"');
-  const k8sRes = await runCmd('kubectl get pods,svc,deploy,nodes -o json --all-namespaces', K8S_KIND_TIMEOUT, K8S_KIND_BUFFER);
+  const k8sRes = await runCmd(`kubectl get pods,svc,deploy,nodes -o json --all-namespaces ${K8S_REQUEST_TIMEOUT}`, K8S_KIND_TIMEOUT, K8S_KIND_BUFFER);
   
   const stateSummary = `
   Docker version: ${dockerVer.stdout.trim()}

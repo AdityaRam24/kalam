@@ -779,28 +779,33 @@ export const DISCOVER_HOST_CMD = [
   "echo @@END@@",
 ].join('; ');
 
+// kubectl's own bound on each API call, set below the outer SSH timeout so a
+// slow or dead API server returns a readable error instead of the whole round
+// trip being killed. kubectl defaults this to 0, meaning it waits forever.
+const K8S_REQ = `--request-timeout=${Math.max(5, Math.floor((Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000) * 0.6) / 1000))}s`;
+
 // Cluster objects, in their own round trip with a buffer sized for a real
 // cluster. Ordered SMALLEST FIRST on purpose: if an unusually large cluster
 // still overruns the cap, the kinds already read are intact and only the last
 // one is lost, instead of everything after the first bulky read.
 export const DISCOVER_K8S_CMD = [
   "echo @@KNODES@@",
-  "(kubectl get nodes -o json 2>/dev/null || kubectl get nodes 2>&1 | head -c 300)",
+  `(kubectl get nodes -o json ${K8S_REQ} 2>/dev/null || kubectl get nodes ${K8S_REQ} 2>&1 | head -c 300)`,
   "echo @@KDS@@",
-  "(kubectl get ds -A -o json 2>/dev/null || kubectl get ds -A 2>&1 | head -c 300)",
+  `(kubectl get ds -A -o json ${K8S_REQ} 2>/dev/null || kubectl get ds -A ${K8S_REQ} 2>&1 | head -c 300)`,
   "echo @@KSTS@@",
-  "(kubectl get sts -A -o json 2>/dev/null || kubectl get sts -A 2>&1 | head -c 300)",
+  `(kubectl get sts -A -o json ${K8S_REQ} 2>/dev/null || kubectl get sts -A ${K8S_REQ} 2>&1 | head -c 300)`,
   "echo @@KSVCS@@",
-  "(kubectl get svc -A -o json 2>/dev/null || kubectl get svc -A 2>&1 | head -c 300)",
+  `(kubectl get svc -A -o json ${K8S_REQ} 2>/dev/null || kubectl get svc -A ${K8S_REQ} 2>&1 | head -c 300)`,
   "echo @@KDEPLOYS@@",
-  "(kubectl get deploy -A -o json 2>/dev/null || kubectl get deploy -A 2>&1 | head -c 300)",
+  `(kubectl get deploy -A -o json ${K8S_REQ} 2>/dev/null || kubectl get deploy -A ${K8S_REQ} 2>&1 | head -c 300)`,
   // ReplicaSets are projected to four columns rather than fetched as JSON:
   // only the owner mapping is used, and their full JSON is routinely the
   // largest object in a cluster (ten retained revisions per Deployment).
   "echo @@KRS@@",
   "(kubectl get rs --all-namespaces --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name 2>/dev/null || true)",
   "echo @@KPODS@@",
-  "(kubectl get pods -A -o json 2>/dev/null || kubectl get pods -A 2>&1 | head -c 300)",
+  `(kubectl get pods -A -o json ${K8S_REQ} 2>/dev/null || kubectl get pods -A ${K8S_REQ} 2>&1 | head -c 300)`,
   "echo @@END@@",
 ].join('; ');
 
