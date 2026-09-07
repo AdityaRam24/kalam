@@ -494,6 +494,24 @@ readability. Pods are ordered by owning workload so a workload's edges leave as
 one bundle. Each namespace gets its own band; each stage owns its own column
 range across every band.
 
+**Timeouts are two-layered, on purpose.** `kubectl --request-timeout` defaults
+to `0` — it waits on an unresponsive API server forever — and the dashboard
+polls every 10 s, so an unbounded read accumulates stuck processes. But an outer
+process kill cannot be the primary bound: `SIGKILL` destroys the reason, which
+is how a merely slow cluster once reported itself as empty. kubectl therefore
+carries its own `--request-timeout`, derived from `KALAM_KUBECTL_TIMEOUT_MS`
+(default 120 s) and set below it, so it always gets to explain itself; the
+process timeout remains only as a backstop for a genuinely wedged kubectl. The
+separate 8 s probe timeout stays short, because a stopped Docker Desktop on
+Windows blocks with no error of its own and the only cure is to stop waiting.
+
+**`npm run diagnose`** (`scripts/diagnose-host.ts`) runs this whole pipeline
+against a real host — or `--local`, this machine — and reports every stage:
+login identity, runtimes, kubeconfig context, whether the identity may list
+pods, per-kind counts with sizes and timings, the exact kubectl error for
+anything that failed, and the resulting relations and canvas. It is the first
+thing to run when a view is emptier than the cluster.
+
 **`npm run topology:check`** (`scripts/topology-report.ts`) computes the real
 positions, prints the canvas as an ASCII map, and **asserts**: no card overlaps
 another, stage column ranges never interleave, namespace bands never overlap, no

@@ -40,6 +40,17 @@ restart.
 All three are git-ignored at their defaults. The Helm chart sets them to a
 volume automatically when `persistence.enabled=true`.
 
+## ⏱️ Reading a large cluster
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `KALAM_KUBECTL_TIMEOUT_MS` | `120000` | Ceiling on a bulk cluster read. `kubectl` gets its own `--request-timeout` derived from this and set below it, so a slow or unreachable API server returns a readable error instead of being killed. Raise it if a very large cluster reports `timed-out`. |
+
+This is deliberately separate from the 8-second probe timeout used for
+`docker`/`kubectl` version checks. That short bound exists because a stopped
+Docker Desktop on Windows blocks forever with no error of its own; applying it
+to a bulk cluster read is what once made a large cluster report itself empty.
+
 ---
 
 ## 🔑 AI LLM Provider Configuration
