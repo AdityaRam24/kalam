@@ -501,7 +501,8 @@ ${colors.bold}Commands${colors.reset} ${colors.gray}(everything else is sent to 
   ${colors.green}/learn${colors.reset} <file>     Teach the KB a runbook / log / diagram / doc
   ${colors.green}/learned${colors.reset}          List learned docs + auto-captured solved cases
   ${colors.green}/vms${colors.reset}              VM inventory with live SSH status
-  ${colors.green}/vm${colors.reset} <sub> <name>  diagnose · discover · peers · graph · impact (read-only)
+  ${colors.green}/vm${colors.reset} <sub> <name>  diagnose · discover · peers · graph · impact · health · logs · journal (read-only)
+  ${colors.green}/vm service${colors.reset} <name> <unit> [status|start|restart --yes]  systemd service status / restart
   ${colors.green}/status${colors.reset}           Local Docker & Kubernetes health
   ${colors.green}/run${colors.reset} <n>          Execute suggested action #n from the last reply
   ${colors.green}/key${colors.reset} <api-key>    Set your Gemini API key (and switch to Gemini)
@@ -654,6 +655,17 @@ async function startRepl(initialMode) {
           else if (sub === 'graph') await vmGraph(vmName);
           else if (sub === 'impact' || sub === 'blast') await vmImpact(vmName, subRest[0]);
           else if (sub === 'history' || sub === 'changes') await historyCli(['--source', vmName || 'local', ...subRest]);
+          else if (sub === 'health') await vmHealth(vmName);
+          else if (sub === 'logs' || sub === 'scan') await vmLogs(vmName, subRest);
+          else if (sub === 'journal' || sub === 'journalctl') {
+            if (subRest.includes('-f') || subRest.includes('--follow')) console.log(`${colors.yellow}Follow mode needs its own terminal — run: ${colors.bold}kalam vm journal ${vmName || '<name>'} ${subRest.join(' ')}${colors.reset}`);
+            else await vmJournal(vmName, subRest);
+          }
+          else if (sub === 'service' || sub === 'svc') {
+            const extra = subRest.filter((a) => a !== '--yes' && a !== '-y');
+            // The REPL owns stdin, so a y/N prompt can't be asked here — require --yes instead.
+            await vmService(vmName, extra[0], (extra[1] || 'status').toLowerCase(), { yes: subRest.includes('--yes') || subRest.includes('-y'), interactive: false });
+          }
           else if (sub === 'ssh') console.log(`${colors.yellow}Interactive SSH doesn't fit inside the REPL — run: ${colors.bold}kalam vm ssh ${vmName || '<name>'}${colors.reset}${colors.yellow} in its own terminal.${colors.reset}`);
           else await listVmsCli();
           return reprompt();
@@ -1167,6 +1179,222 @@ async function vmPeers(name) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Host Logs: health, /var/log scan, journal and systemd services on a VM.
+// Same endpoints as the UI's Host Logs tab (server/hostlogs).
+// ---------------------------------------------------------------------------
+
+const SEV_COLOR = { critical: colors.red, warning: colors.yellow, info: colors.cyan, ok: colors.green };
+
+async function vmHealth(name) {
+  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm health <name>${colors.reset}\n`); return; }
+  if (!(await ensureServer())) return;
+  const spin = startSpinner(`Collecting system facts from ${name}…`);
+  try {
+    const d = await postJSON('/api/logs/overview', { name }, 120000);
+    stopSpinner(spin);
+    if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
+    const gb = (b) => `${(b / 1024 ** 3).toFixed(1)} GB`;
+    const m = d.memory || {};
+    console.log(`\n${colors.bold}🖥️  ${d.hostname}${colors.reset}  ${colors.gray}${d.os} · kernel ${d.kernel} · up ${d.uptime || '—'}${d.runsAsRoot ? '' : ' · not root'}${colors.reset}`);
+    console.log(`   load ${d.load.map((x) => x.toFixed(2)).join(' / ')} on ${d.cpus} CPUs · memory ${gb(m.total - m.available)} / ${gb(m.total)} used`);
+    (d.filesystems || []).forEach((f) => {
+      const c = f.usePct >= 90 ? colors.red : f.usePct >= 80 ? colors.yellow : colors.gray;
+      console.log(`   ${c}${String(f.usePct).padStart(3)}%${colors.reset} ${f.mount} ${colors.gray}(${gb(f.avail)} free${f.inodesPct !== undefined ? `, inodes ${f.inodesPct}%` : ''})${colors.reset}`);
+    });
+    console.log(`\n${colors.bold}Health checks${colors.reset}`);
+    (d.health || []).forEach((h) => {
+      console.log(`   ${SEV_COLOR[h.status] || ''}${h.status.toUpperCase().padEnd(8)}${colors.reset} ${colors.bold}${h.title}${colors.reset} ${colors.gray}— ${h.detail}${colors.reset}`);
+      if (h.unit) console.log(`            ${colors.green}→${colors.reset} kalam vm service ${name} ${h.unit} status|restart`);
+    });
+    const bad = (d.services || []).filter((s) => s.active === 'failed' || s.sub === 'auto-restart');
+    if (bad.length) {
+      console.log(`\n${colors.bold}Services needing attention${colors.reset}`);
+      bad.forEach((s) => console.log(`   ${colors.red}${s.active}/${s.sub}${colors.reset} ${s.unit} ${colors.gray}${s.description}${colors.reset}`));
+    }
+    console.log();
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+async function vmLogs(name, args = []) {
+  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm logs <name> [--hours 1|6|24|72|168|720] [--all]${colors.reset}\n`); return; }
+  if (!(await ensureServer())) return;
+  const hi = args.indexOf('--hours');
+  const hours = hi >= 0 ? Number(args[hi + 1]) : 24;
+  const showAll = args.includes('--all');
+  const spin = startSpinner(`Scanning /var/log, journal and dmesg on ${name} (last ${hours}h)…`);
+  try {
+    const d = await postJSON('/api/logs/scan', { name, hours }, 180000);
+    stopSpinner(spin);
+    if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
+    const c = d.counts || {};
+    console.log(`\n${colors.bold}📜 Log scan · ${name}${colors.reset}  ${colors.gray}last ${d.hours}h · ${d.scannedFiles.length} sources · ${(d.durationMs / 1000).toFixed(1)}s${colors.reset}`);
+    console.log(`   ${colors.red}${c.critical || 0} critical${colors.reset} · ${colors.yellow}${c.warning || 0} warning${colors.reset} · ${colors.cyan}${c.info || 0} info${colors.reset}`);
+    if (d.hint) console.log(`   ${colors.yellow}${d.hint}${colors.reset}`);
+    if (d.truncated) console.log(`   ${colors.yellow}Output hit the size cap — results are partial.${colors.reset}`);
+    const list = (d.findings || []).filter((f) => showAll || f.severity !== 'info').slice(0, showAll ? 200 : 25);
+    if (!list.length) console.log(`\n${colors.green}✅ No warnings or errors in this window.${colors.reset}`);
+    list.forEach((f, i) => {
+      console.log(`\n ${colors.bold}${i + 1}.${colors.reset} ${SEV_COLOR[f.severity]}${f.severity.toUpperCase()}${colors.reset} ${colors.bold}${f.title}${colors.reset} ×${f.count} ${colors.gray}${f.files.join(', ')}${f.lastSeen ? ` · last ${f.lastSeen}` : ''}${colors.reset}`);
+      console.log(`    ${colors.cyan}${(f.samples[f.samples.length - 1] || f.message).slice(0, 200)}${colors.reset}`);
+      console.log(`    ${colors.gray}${f.explain}${colors.reset}`);
+      (f.checks || []).slice(0, 3).forEach((ch) => console.log(`    ${colors.green}check →${colors.reset} ${ch}`));
+      (f.units || []).forEach((u) => console.log(`    ${colors.green}service →${colors.reset} kalam vm service ${name} ${u} status|restart`));
+    });
+    const hidden = (d.findings || []).length - list.length;
+    if (hidden > 0) console.log(`\n${colors.gray}${hidden} more finding(s) — use --all to list them.${colors.reset}`);
+    console.log();
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
+// journalctl-style flags → the structured query the server validates.
+function parseJournalArgs(args) {
+  const q = { units: [], identifiers: [], fields: [] };
+  let follow = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const next = () => args[++i];
+    const [flag, inline] = a.startsWith('--') && a.includes('=') ? [a.slice(0, a.indexOf('=')), a.slice(a.indexOf('=') + 1)] : [a, undefined];
+    const val = () => (inline !== undefined ? inline : next());
+    switch (flag) {
+      case '-u': case '--unit': q.units.push(val()); break;
+      case '-t': case '--identifier': q.identifiers.push(val()); break;
+      case '-k': case '--dmesg': q.kernel = true; break;
+      case '-p': case '--priority': {
+        const [from, to] = String(val()).split('..');
+        q.priority = from; if (to) q.priorityTo = to; break;
+      }
+      case '-b': case '--boot': {
+        const v = inline !== undefined ? inline : args[i + 1];
+        if (v !== undefined && /^([+-]?\d+|[0-9a-f]{32})$/.test(v)) { q.boot = v; if (inline === undefined) i++; } else q.boot = '0';
+        break;
+      }
+      case '-S': case '--since': q.since = val(); break;
+      case '-U': case '--until': q.until = val(); break;
+      case '-g': case '--grep': q.grep = val(); q.grepMode = 'regex'; break;
+      case '--text': q.grep = val(); q.grepMode = 'fixed'; break;
+      case '--case-sensitive': q.caseSensitive = true; break;
+      case '-o': case '--output': q.output = val(); break;
+      case '--output-fields': q.outputFields = String(val()).split(','); break;
+      case '-n': case '--lines': q.lines = Number(val()); break;
+      case '-r': case '--reverse': q.reverse = true; break;
+      case '-x': case '--catalog': q.catalog = true; break;
+      case '--utc': q.utc = true; break;
+      case '--no-hostname': q.noHostname = true; break;
+      case '-f': case '--follow': follow = true; break;
+      default:
+        if (/^_{0,2}[A-Z0-9][A-Z0-9_]*=/.test(a)) {
+          const eq = a.indexOf('=');
+          q.fields.push({ key: a.slice(0, eq), value: a.slice(eq + 1) });
+        } else {
+          return { error: `Unknown journal option "${a}".` };
+        }
+    }
+  }
+  return { query: q, follow };
+}
+
+async function vmJournal(name, args = []) {
+  if (!name) {
+    console.log(`\n${colors.yellow}Usage: kalam vm journal <name> [-u unit] [-t ident] [-k] [-p err|err..warning] [-b [-1|id]]
+       [-S since] [-U until] [-g regex | --text str] [--case-sensitive] [FIELD=value]
+       [-o short-iso|verbose|json|cat|...] [--output-fields A,B] [-n lines] [-r] [-x] [--utc] [--no-hostname] [-f]${colors.reset}\n`);
+    return;
+  }
+  const parsed = parseJournalArgs(args);
+  if (parsed.error) { console.log(`${colors.red}❌ ${parsed.error}${colors.reset}`); return; }
+  if (!(await ensureServer())) return;
+  const { query, follow } = parsed;
+
+  if (!follow) {
+    const spin = startSpinner(`Reading the journal on ${name}…`);
+    try {
+      const d = await postJSON('/api/logs/journal', { name, query }, 120000);
+      stopSpinner(spin);
+      console.log(`${colors.gray}$ ${d.command}${colors.reset}`);
+      if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); return; }
+      if (d.empty) console.log(`${colors.gray}-- No entries --${colors.reset}`);
+      (d.lines || []).forEach((l) => console.log(l));
+      if (d.truncated) console.log(`${colors.yellow}Output hit the size cap — narrow the query.${colors.reset}`);
+    } catch (e) {
+      stopSpinner(spin);
+      console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+    }
+    return;
+  }
+
+  // -f: poll with --after-cursor until Ctrl+C.
+  let cursor = '';
+  let stopped = false;
+  const onSig = () => { stopped = true; };
+  process.once('SIGINT', onSig);
+  console.log(`${colors.gray}Following the journal on ${name} (Ctrl+C to stop)…${colors.reset}`);
+  let shownCommand = false;
+  while (!stopped) {
+    try {
+      const d = await postJSON('/api/logs/journal', { name, query: { ...query, reverse: false, afterCursor: cursor } }, 60000);
+      if (!shownCommand) { console.log(`${colors.gray}$ ${d.command}${colors.reset}`); shownCommand = true; }
+      if (d.error) { console.log(`${colors.red}❌ ${d.error}${colors.reset}`); break; }
+      (d.lines || []).forEach((l) => console.log(l));
+      if (d.cursor) cursor = d.cursor;
+    } catch (e) {
+      console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+      break;
+    }
+    for (let t = 0; t < 30 && !stopped; t++) await new Promise((r) => setTimeout(r, 100));
+  }
+  process.removeListener('SIGINT', onSig);
+}
+
+function confirmPrompt(question) {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) { resolve(false); return; }
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => { rl.close(); resolve(/^y(es)?$/i.test(answer.trim())); });
+  });
+}
+
+async function vmService(name, unit, action = 'status', { yes = false, interactive = true } = {}) {
+  if (!name || !unit) { console.log(`\n${colors.yellow}Usage: kalam vm service <name> <unit> [status|start|restart] [--yes]${colors.reset}\n`); return; }
+  if (!['status', 'start', 'restart'].includes(action)) {
+    console.log(`${colors.red}❌ action must be status, start or restart (stop is deliberately not offered).${colors.reset}`);
+    return;
+  }
+  if (!(await ensureServer())) return;
+  if (action !== 'status' && !yes) {
+    if (!interactive) { console.log(`${colors.yellow}This changes the host. Re-run with --yes to confirm: /vm service ${name} ${unit} ${action} --yes${colors.reset}`); return; }
+    const ok = await confirmPrompt(`${colors.bold}Run "systemctl ${action} ${unit}" on ${name}?${colors.reset} ${colors.gray}[y/N]${colors.reset} `);
+    if (!ok) { console.log(`${colors.gray}Cancelled.${colors.reset}`); return; }
+  }
+  const spin = startSpinner(action === 'status' ? `Reading ${unit} on ${name}…` : `systemctl ${action} ${unit} on ${name}…`);
+  try {
+    const d = await postJSON('/api/logs/service', { name, unit, action, confirm: action !== 'status' }, 180000);
+    stopSpinner(spin);
+    if (d.error) console.log(`${colors.red}❌ ${d.error}${colors.reset}`);
+    else if (action !== 'status') console.log(`${colors.green}✅ systemctl ${action} ${d.unit} succeeded.${colors.reset}`);
+    if (d.state) {
+      const st = d.state;
+      const c = st.active === 'active' ? colors.green : st.active === 'failed' ? colors.red : colors.yellow;
+      console.log(`\n${colors.bold}${d.unit}${colors.reset} ${c}${st.active}/${st.sub}${colors.reset} ${colors.gray}${st.description}${st.since ? ` · since ${st.since}` : ''}${st.restarts ? ` · ${st.restarts} auto-restarts` : ''}${colors.reset}`);
+    }
+    if (d.status) console.log(`${colors.gray}${d.status}${colors.reset}`);
+    if ((d.journal || []).length) {
+      console.log(`\n${colors.bold}journalctl -u ${d.unit}${colors.reset} ${colors.gray}(last ${d.journal.length})${colors.reset}`);
+      d.journal.slice(-30).forEach((l) => console.log(`  ${l}`));
+    }
+    console.log();
+  } catch (e) {
+    stopSpinner(spin);
+    console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
+  }
+}
+
 function readStdin() {
   return new Promise((resolve) => {
     if (process.stdin.isTTY) { resolve(''); return; }
@@ -1211,6 +1439,16 @@ ${colors.bold}VMs (SSH):${colors.reset}
   ${colors.green}vm impact <name> <id>${colors.reset} Blast radius: what breaks if that resource stops.
   ${colors.green}vm history <name>${colors.reset}    What changed on that cluster, when, and who did it.
 
+${colors.bold}HOST LOGS (on a VM):${colors.reset}
+  ${colors.green}vm health <name>${colors.reset}     Health checks: disks, memory, load, failed services, clock.
+  ${colors.green}vm logs <name> [--hours 24] [--all]${colors.reset}
+                         Scan /var/log, journal and dmesg for issues, with explanations.
+  ${colors.green}vm journal <name> [opts]${colors.reset}
+                         journalctl on the host: -u -t -k -p -b -S -U -g/--text FIELD=value
+                         -o -n -r -x --utc --no-hostname -f (follow).
+  ${colors.green}vm service <name> <unit> [status|start|restart] [--yes]${colors.reset}
+                         Service state + its journal; start/restart ask to confirm.
+
 ${colors.bold}CHANGE HISTORY:${colors.reset}
   ${colors.green}history [--since 7d]${colors.reset} Cluster changelog: what changed, when, and who did it.
   ${colors.green}history capture${colors.reset}      Capture now (read-only); the next one can show changes.
@@ -1225,6 +1463,8 @@ ${colors.bold}EXAMPLES:${colors.reset}
   ${colors.gray}kalam${colors.reset}
   ${colors.gray}kalam ask "how do I connect an external S3 bucket to the lakehouse?"${colors.reset}
   ${colors.gray}kubectl logs mypod | kalam solve${colors.reset}
+  ${colors.gray}kalam vm journal node1 -b -1 -p err -n 200${colors.reset}
+  ${colors.gray}kalam vm service node1 kubelet restart${colors.reset}
   ${colors.gray}kalam model${colors.reset}
 
 ${colors.gray}Local by default (Ollama). Add GEMINI_API_KEY to .env or run '/key' for Gemini.${colors.reset}
@@ -1297,8 +1537,15 @@ async function main() {
       else if (sub === 'peers' || sub === 'neighbors') await vmPeers(vmName);
       else if (sub === 'graph') await vmGraph(vmName);
       else if (sub === 'impact' || sub === 'blast') await vmImpact(vmName, rest[2]);
+      else if (sub === 'health') await vmHealth(vmName);
+      else if (sub === 'logs' || sub === 'scan') await vmLogs(vmName, rest.slice(2));
+      else if (sub === 'journal' || sub === 'journalctl') await vmJournal(vmName, rest.slice(2));
+      else if (sub === 'service' || sub === 'svc') {
+        const extra = rest.slice(2).filter((a) => a !== '--yes' && a !== '-y');
+        await vmService(vmName, extra[0], (extra[1] || 'status').toLowerCase(), { yes: rest.includes('--yes') || rest.includes('-y') });
+      }
       else if (sub === 'list' || sub === '') await listVmsCli();
-      else console.log(`\n${colors.yellow}Usage: kalam vm <list|ssh|diagnose|discover|peers|graph|impact> [name]${colors.reset}\n`);
+      else console.log(`\n${colors.yellow}Usage: kalam vm <list|ssh|diagnose|discover|peers|graph|impact|health|logs|journal|service> [name]${colors.reset}\n`);
       break;
     }
     case 'history': case 'changes': await historyCli(rest); break;

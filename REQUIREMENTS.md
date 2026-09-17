@@ -51,6 +51,29 @@ This is deliberately separate from the 8-second probe timeout used for
 Docker Desktop on Windows blocks forever with no error of its own; applying it
 to a bulk cluster read is what once made a large cluster report itself empty.
 
+## 📜 Host Logs — what the remote hosts need
+
+The Host Logs tab runs standard Linux tools on the VM over SSH. Nothing is
+installed on the host, and every tool is optional — a missing one empties only
+the panel that uses it.
+
+| Panel | Uses on the host | Without it |
+| --- | --- | --- |
+| System overview | `free`, `df`, `ps`, `ss`, `systemctl`, `timedatectl`, `last`, `/proc` | that tile/section shows "no data" |
+| Scan / file list | GNU `find` (`-printf`), `tail`, `grep` | BusyBox `find` still lists files, but the scan reads only the journal and `dmesg` |
+| Viewer | `tail`, `grep`, `zcat` / `xzcat` / `bzcat` / `zstdcat` for rotated files | that compression format can't be opened |
+| Downloads | `tar`, `gzip`, `base64`, `head` | download fails with a readable error |
+| Services | `systemctl`, `journalctl` | service buttons unavailable (non-systemd host) |
+| Journal explorer | `journalctl` (regex search and `--case-sensitive` need systemd ≥ 246) | explorer says journalctl is missing / too old for that option |
+
+**Root matters.** Most of `/var/log` is root-only and every `systemctl start` /
+`restart` needs root. Enable root access for the VM (sudo, su, or a root login)
+on the Virtual Machines tab; the page says so whenever it is not running as root.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `KALAM_LOG_BUNDLE_MAX_MB` | `50` | Cap on a `/var/log` bundle, single-file or journal download. A download that hits it is flagged as incomplete, never silently cut. |
+
 ---
 
 ## 🔑 AI LLM Provider Configuration
