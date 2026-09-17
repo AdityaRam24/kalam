@@ -10,6 +10,7 @@ import { GoogleGenAI } from '@google/genai';
 import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
 import { llmRouter } from './llm.js';
 import { vmsRouter } from './vms.js';
+import { logsRouter } from './hostlogs/router.js';
 import { shellRouter } from './shell.js';
 import { graphRouter } from './graph/router.js';
 import { inspectRouter } from './k8s/inspect.js';
@@ -41,6 +42,8 @@ app.use(pcaiRouter);
 app.use(llmRouter);
 // Virtual Machine monitoring + SSH (manual inventory).
 app.use(vmsRouter);
+// Host Logs: browse, scan for warnings and download /var/log on inventory VMs.
+app.use(logsRouter);
 // Persistent interactive SSH terminals (one real login shell per session).
 app.use(shellRouter);
 // Infrastructure dependency graph: root-cause ranking + blast radius.
