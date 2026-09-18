@@ -17,6 +17,9 @@ import { inspectRouter } from './k8s/inspect.js';
 import { normalizeClusterItems, parseReplicaSetOwners } from './k8s/workloads.js';
 import { historyRouter } from './history/router.js';
 import { pollerState, startHistoryPoller } from './history/poller.js';
+import { metricsRouter } from './metrics/router.js';
+import { insightRouter } from './insight/router.js';
+import { metricsPollerState, startMetricsPoller } from './metrics/poller.js';
 import { parseAllowedHosts, corsOriginCheck } from './cors.js';
 
 dotenv.config();
@@ -53,6 +56,13 @@ app.use(graphRouter);
 app.use(inspectRouter);
 // Cluster change history: what changed, when, and who did it.
 app.use(historyRouter);
+
+// Host telemetry: numeric samples over SSH, for the Observability page.
+app.use(metricsRouter);
+
+// Fuses host health, log findings, metrics and the dependency graph into one
+// ranked understanding rather than four separate lists.
+app.use(insightRouter);
 
 // Helper for safe command execution.
 // A timeout is mandatory, not a nicety: on Windows a `docker` CLI whose daemon
@@ -1050,6 +1060,11 @@ const server = app.listen(Number(PORT), HOST, () => {
   if (startHistoryPoller()) {
     const p = pollerState();
     console.log(`🕓 Change history: capturing ${p.sources.join(', ') || 'local'} every ${p.intervalSec}s`);
+  }
+  // Opt-in for the same reason: KALAM_METRICS=1 before anything is sampled.
+  if (startMetricsPoller()) {
+    const m = metricsPollerState();
+    console.log(`📈 Metrics: sampling every ${m.intervalSec}s (retention ${process.env.KALAM_METRICS_RETENTION_HOURS || 48}h)`);
   }
 });
 

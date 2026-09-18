@@ -21,6 +21,7 @@ server/vms.json
 
 # Captured cluster change history (snapshots + changelog, per source)
 server/history/data/
+server/metrics/data/
 
 # Editor directories and files
 .vscode/*

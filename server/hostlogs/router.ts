@@ -74,7 +74,7 @@ export function splitMarked(stdout: string): Array<{ tag: string; arg: string; b
   return out;
 }
 
-const mark = (tag: string, arg?: string) => `echo ${shQuote(`${MARK}${tag}${arg !== undefined ? ':' + arg : ''}===`)}`;
+export const mark = (tag: string, arg?: string) => `echo ${shQuote(`${MARK}${tag}${arg !== undefined ? ':' + arg : ''}===`)}`;
 
 // Remote shell snippet that streams a log file, decompressing by extension.
 function catCmd(file: string): string {
@@ -109,11 +109,16 @@ const UNITS_CMD = 'systemctl list-units --type=service --all --no-legend --plain
 // ---- overview --------------------------------------------------------------
 // One round-trip for "what is this machine and is it healthy?".
 
-logsRouter.post('/api/logs/overview', async (req, res) => {
-  const vm = await findVm(req.body?.name);
-  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+/**
+ * The whole-host system picture, in one SSH round trip.
+ *
+ * Exported as a function rather than living only inside the route so the
+ * insight engine can fuse it with log findings and metrics without
+ * re-implementing the command or opening a second connection.
+ */
+export async function collectOverview(vm: VmEntry) {
   const down = await unreachable(vm);
-  if (down) return res.json({ reachable: false, error: down });
+  if (down) return { reachable: false as const, error: down };
 
   const cmd = [
     mark('SELF'),
@@ -134,7 +139,7 @@ logsRouter.post('/api/logs/overview', async (req, res) => {
   ].join('; ');
 
   const { stdout, stderr, ok } = await sshRun(vm, cmd, 60000, { maxBuffer: 8 * MB });
-  if (!ok && !stdout.includes(MARK)) return res.json({ reachable: true, error: firstLine(stderr, 'SSH failed') });
+  if (!ok && !stdout.includes(MARK)) return { reachable: true as const, error: firstLine(stderr, 'SSH failed') };
 
   const blocks = splitMarked(stdout);
   const get = (tag: string) => blocks.find((b) => b.tag === tag)?.body.filter((l) => l.trim()) || [];
@@ -165,7 +170,13 @@ logsRouter.post('/api/logs/overview', async (req, res) => {
     reboots: get('REBOOTS').filter((l) => l.startsWith('reboot')),
     runsAsRoot: self.UID === '0',
   };
-  res.json({ reachable: true, ...base, health: buildHealth(base), hint: permissionHint(vm, self.UID || '') });
+  return { reachable: true as const, ...base, health: buildHealth(base), hint: permissionHint(vm, self.UID || '') };
+}
+
+logsRouter.post('/api/logs/overview', async (req, res) => {
+  const vm = await findVm(req.body?.name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+  res.json(await collectOverview(vm));
 });
 
 // ---- service status / restart / start --------------------------------------
@@ -484,13 +495,17 @@ logsRouter.post('/api/logs/read', async (req, res) => {
 
 // ---- scan ------------------------------------------------------------------
 
-logsRouter.post('/api/logs/scan', async (req, res) => {
-  const { name, hours: reqHours = 168 } = req.body || {};
-  const vm = await findVm(name);
-  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+/**
+ * The deterministic /var/log + journal + dmesg scan.
+ *
+ * Exported for the same reason as collectOverview: this is a 120s, 48MB
+ * operation, so the insight engine must be able to reuse one run of it rather
+ * than trigger a second.
+ */
+export async function collectScan(vm: VmEntry, reqHours: number = 168) {
   const hours = WINDOWS_HOURS.has(Number(reqHours)) ? Number(reqHours) : 168;
   const down = await unreachable(vm);
-  if (down) return res.json({ reachable: false, error: down });
+  if (down) return { reachable: false as const, error: down };
 
   const pre = shQuote(PREFILTER);
   const exclude = [
@@ -513,7 +528,7 @@ logsRouter.post('/api/logs/scan', async (req, res) => {
 
   const started = Date.now();
   const { stdout, stderr, ok, truncated } = await sshRun(vm, cmd, 120000, { maxBuffer: 48 * MB });
-  if (!ok && !stdout.includes(MARK)) return res.json({ reachable: true, error: firstLine(stderr, 'SSH failed') });
+  if (!ok && !stdout.includes(MARK)) return { reachable: true as const, error: firstLine(stderr, 'SSH failed') };
 
   const blocks = splitMarked(stdout);
   const uid = (blocks.find((b) => b.tag === 'UID')?.body[0] || '').trim();
@@ -534,8 +549,8 @@ logsRouter.post('/api/logs/scan', async (req, res) => {
   for (const f of findings) counts[f.severity] += f.count;
 
   const deniedFiles = sources.filter((s) => s.denied).map((s) => s.file);
-  res.json({
-    reachable: true,
+  return {
+    reachable: true as const,
     hours,
     runsAsRoot: uid === '0',
     scannedFiles: sources.map((s) => s.file),
@@ -547,7 +562,13 @@ logsRouter.post('/api/logs/scan', async (req, res) => {
     truncated: !!truncated,
     durationMs: Date.now() - started,
     hint: permissionHint(vm, uid),
-  });
+  };
+}
+
+logsRouter.post('/api/logs/scan', async (req, res) => {
+  const vm = await findVm(req.body?.name);
+  if (!vm) return res.status(404).json({ error: 'VM not found.' });
+  res.json(await collectScan(vm, Number(req.body?.hours ?? 168)));
 });
 
 // ---- download --------------------------------------------------------------

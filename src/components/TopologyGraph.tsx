@@ -15,7 +15,7 @@ import ReactFlow, {
 } from 'reactflow';
 import type { NodeProps, Node, NodeChange, Edge, EdgeProps } from 'reactflow';
 import 'reactflow/dist/style.css';
-import dagre from '@dagrejs/dagre';
+import { autoFlowLayout } from '../lib/autoflow';
 import {
   Search,
   X,
@@ -1099,26 +1099,58 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     };
   }, [effContainers, effK8s, selectedNamespace, selectedType]);
 
-  // ── Auto layout (dagre): a clean left-to-right flow computed from the real
-  // edges. Group boxes are hidden in this mode — the structure IS the layout.
+  // ── Auto layout: a left-to-right flow computed from the real edges.
+  //
+  // This used to drop every group box on the theory that "the structure IS the
+  // layout". It does read that way on a small cluster — but on a real one the
+  // cards lose the only thing that makes them attributable, and you are left
+  // looking at a correct graph of pods you cannot place. So namespaces are fed
+  // to dagre as clusters and come back as bands (src/lib/autoflow.ts), which
+  // keeps the flow AND the context. The geometry is asserted in
+  // src/lib/__tests__/autoflow.test.ts rather than eyeballed.
   const layoutedNodes = useMemo(() => {
     if (layoutMode !== 'auto') return rawNodes;
-    const g = new dagre.graphlib.Graph();
-    g.setGraph({ rankdir: 'LR', nodesep: 26, ranksep: 130, marginx: 40, marginy: 40 });
-    g.setDefaultEdgeLabel(() => ({}));
     const resource = rawNodes.filter(n => n.type === 'devopsNode');
-    // Dagre's result depends on insertion order, so feed it in a fixed order —
-    // otherwise a poll that merely reorders the API response reshuffles the
-    // whole layout and every card jumps to a new place.
-    [...resource].sort((a, b) => a.id.localeCompare(b.id))
-      .forEach(n => g.setNode(n.id, { width: n.data?.type === 'port' ? 90 : 190, height: n.data?.type === 'port' ? 44 : 74 }));
-    [...rawEdges].sort((a, b) => a.id.localeCompare(b.id))
-      .forEach(e => { if (g.hasNode(e.source) && g.hasNode(e.target)) g.setEdge(e.source, e.target); });
-    dagre.layout(g);
-    return resource.map(n => {
-      const pos = g.node(n.id);
-      return pos ? { ...n, position: { x: pos.x - pos.width / 2, y: pos.y - pos.height / 2 } } : n;
-    });
+    const isPort = (n: Node) => (n.data as any)?.type === 'port';
+    const isContainerSide = (n: Node) => {
+      const t = (n.data as any)?.type;
+      return t === 'docker' || t === 'port';
+    };
+
+    const flow = autoFlowLayout(
+      resource.map(n => ({
+        id: n.id,
+        namespace: (n.data as any)?.namespace || undefined,
+        panel: isContainerSide(n) ? 'Containers' : undefined,
+        w: isPort(n) ? 90 : 190,
+        h: isPort(n) ? 44 : 74,
+      })),
+      rawEdges.map(e => ({ source: e.source, target: e.target })),
+    );
+
+    // Rebuild the panels dagre gave us, styled exactly as the columns mode
+    // styles them — the two layouts should feel like one product.
+    const groupNodes: Node[] = flow.groups.map(g => ({
+      id: g.id,
+      type: 'groupNode',
+      draggable: false,
+      selectable: false,
+      position: { x: g.x, y: g.y },
+      style: { width: g.w, height: g.h },
+      data: g.kind === 'containers'
+        ? { label: g.label, icon: Container, textColor: '#38bdf8' }
+        : g.kind === 'k8s'
+          ? { label: g.label, icon: Network, textColor: '#a78bfa' }
+          : { label: g.label, textColor: '#93c5fd' },
+    }));
+
+    return [
+      ...groupNodes,
+      ...resource.map(n => {
+        const pos = flow.positions.get(n.id);
+        return pos ? { ...n, position: { x: pos.x, y: pos.y } } : n;
+      }),
+    ];
   }, [layoutMode, rawNodes, rawEdges]);
 
   // ── Problems-only focus: unhealthy resources plus everything they touch ──
@@ -1834,7 +1866,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           </button>
           <button
             onClick={() => setLayoutMode('auto')}
-            title="Automatic flow layout computed from the connections (dagre)"
+            title="Automatic flow layout computed from the real connections, with namespaces kept as bands"
             style={{
               background: layoutMode === 'auto' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
               color: layoutMode === 'auto' ? '#38bdf8' : '#94a3b8',

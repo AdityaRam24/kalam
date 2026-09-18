@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ScrollText, RefreshCw, Search, Download, FileText, FileArchive, AlertTriangle, ShieldAlert,
-  ChevronDown, ChevronRight, Copy, Check, Lightbulb, RotateCcw, Info, X,
+  ChevronDown, ChevronRight, Copy, Check, Lightbulb, RotateCcw, Info, X, Brain, CheckCircle2,
 } from 'lucide-react';
 import HostOverview, { type Overview, type ServiceAction } from './HostOverview';
 import { unitBadge } from '../lib/hostlogs';
@@ -18,6 +18,24 @@ import JournalExplorer, { type JournalPreset } from './JournalExplorer';
 
 interface VmEntry { name: string; host: string; user: string; runsAsRoot?: boolean }
 type Severity = 'critical' | 'warning' | 'info';
+
+interface Evidence {
+  kind: 'log' | 'health' | 'metric' | 'graph';
+  severity: Severity; summary: string; detail?: string; count?: number;
+}
+interface Issue {
+  id: string; concern: string; severity: Severity; title: string; subject: string;
+  confidence: 'confirmed' | 'likely'; why: string; evidence: Evidence[];
+  checks: string[]; units: string[];
+}
+interface InsightResult {
+  subject: string;
+  issues: Issue[];
+  verdict: { severity: Severity | 'ok'; summary: string };
+  gathered: { overview: boolean; scan: boolean; scanReused: boolean; metrics: boolean; graph: boolean };
+  error?: string;
+  durationMs?: number;
+}
 
 interface LogFile {
   path: string; size: number; mtime: string; owner: string;
@@ -129,6 +147,9 @@ export const HostLogs: React.FC = () => {
   const [busyUnit, setBusyUnit] = useState('');
   const [svcResult, setSvcResult] = useState<ServiceResult | null>(null);
   const [journalPreset, setJournalPreset] = useState<JournalPreset | null>(null);
+
+  const [insight, setInsight] = useState<InsightResult | null>(null);
+  const [insightBusy, setInsightBusy] = useState(false);
   const openJournal = (query: JournalPreset['query']) => setJournalPreset({ query, nonce: Date.now() });
 
   useEffect(() => {
@@ -197,6 +218,29 @@ export const HostLogs: React.FC = () => {
     } catch (e: any) { setScan({ reachable: false, error: e.message } as ScanResult); }
     finally { setScanning(false); }
   }, [vm, hours]);
+
+  // Fuse everything Kalam knows about this host into one ranked answer.
+  //
+  // Findings already on screen are handed to the server rather than re-scanned:
+  // a scan is a two-minute SSH read, and paying for it twice to learn what is
+  // already rendered would make this button useless.
+  const runInsight = useCallback(async () => {
+    if (!vm) return;
+    setInsightBusy(true);
+    try {
+      const body: Record<string, unknown> = { name: vm, hours };
+      if (scan?.reachable && Array.isArray(scan.findings)) body.findings = scan.findings;
+      else body.deep = true;
+      setInsight(await (await post('/api/insight/host', body)).json());
+    } catch (e: any) {
+      setInsight({ subject: vm, issues: [], verdict: { severity: 'ok', summary: '' },
+        gathered: { overview: false, scan: false, scanReused: false, metrics: false, graph: false },
+        error: e.message });
+    } finally { setInsightBusy(false); }
+  }, [vm, hours, scan]);
+
+  // A host switch invalidates the previous host's answer.
+  useEffect(() => { setInsight(null); }, [vm]);
 
   const openFile = useCallback(async (p: string, grep = viewGrep, count = viewCount) => {
     if (!vm) return;
@@ -293,6 +337,12 @@ export const HostLogs: React.FC = () => {
             <button className="btn primary" onClick={runScan} disabled={scanning || !vm} style={small}>
               {scanning ? <RefreshCw size={13} className="animate-spin" /> : <AlertTriangle size={13} />} Scan for issues
             </button>
+            <button className="btn secondary" onClick={runInsight} disabled={insightBusy || !vm} style={small}
+              title={scan?.reachable
+                ? 'Merge the findings above with health checks, metrics and the dependency graph'
+                : 'Runs a log scan first, then merges it with health checks, metrics and the dependency graph'}>
+              {insightBusy ? <RefreshCw size={13} className="animate-spin" /> : <Brain size={13} />} Understand this host
+            </button>
             <button className="btn secondary" onClick={() => loadFiles(vm)} disabled={listing} style={small}>
               <RefreshCw size={13} className={listing ? 'animate-spin' : ''} /> Refresh files
             </button>
@@ -377,6 +427,129 @@ export const HostLogs: React.FC = () => {
                   </pre>
                 </>
               )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─── System understanding ─── */}
+      {(insight || insightBusy) && (
+        <div className="panel-card">
+          <div className="panel-card-title">
+            <h3><Brain size={15} /> What this host is telling us</h3>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              {/* Naming the sources matters: "nothing wrong" means nothing
+                  wrong IN WHAT WAS READ, and the user has to be able to see
+                  which of the four eyes were actually open. */}
+              {insight && (
+                <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                  merged from {[
+                    insight.gathered.overview && 'health checks',
+                    insight.gathered.scan && `/var/log${insight.gathered.scanReused ? ' (reused)' : ''}`,
+                    insight.gathered.metrics && 'metrics',
+                    insight.gathered.graph && 'dependency graph',
+                  ].filter(Boolean).join(' · ') || 'nothing'}
+                </span>
+              )}
+              {insight && !insightBusy && (
+                <button className="btn secondary" onClick={() => setInsight(null)} style={{ padding: '3px 8px', fontSize: 11 }}>
+                  <X size={12} /> Close
+                </button>
+              )}
+            </div>
+          </div>
+
+          {insightBusy ? (
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted)' }}>
+              <span className="loader" />{' '}
+              {scan?.reachable
+                ? 'Merging the findings above with health checks, metrics and the dependency graph…'
+                : 'No scan has been run yet, so this is reading /var/log first — that can take up to two minutes.'}
+            </p>
+          ) : !insight ? null : insight.error ? (
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--status-error)' }}>{insight.error}</p>
+          ) : insight.issues.length === 0 ? (
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 7 }}>
+              <CheckCircle2 size={15} style={{ color: 'var(--status-success)' }} />
+              Nothing is wrong in what was read.
+              {!insight.gathered.scan && <span style={{ color: 'var(--text-muted)' }}> No log scan was included — press <strong>Scan for issues</strong> first to add /var/log.</span>}
+            </p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {insight.issues.map((i) => {
+                const color = i.severity === 'critical' ? 'var(--status-error)'
+                  : i.severity === 'warning' ? 'var(--status-warning)' : 'var(--text-muted)';
+                const kinds = Array.from(new Set(i.evidence.map((e) => e.kind)));
+                return (
+                  <div key={i.id} style={{
+                    border: '1px solid var(--border-color)', borderLeft: `3px solid ${color}`,
+                    borderRadius: 8, padding: '10px 12px', background: 'var(--bg-tertiary)',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <AlertTriangle size={13} style={{ color, flexShrink: 0 }} />
+                      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-heading)' }}>{i.title}</span>
+                      <span style={{
+                        fontSize: 9.5, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase',
+                        color: i.confidence === 'confirmed' ? 'var(--status-success)' : 'var(--text-muted)',
+                        border: `1px solid ${i.confidence === 'confirmed' ? 'var(--status-success)' : 'var(--border-strong)'}`,
+                        borderRadius: 999, padding: '1px 7px',
+                      }}>
+                        {i.confidence === 'confirmed' ? `corroborated by ${kinds.length} sources` : 'single source'}
+                      </span>
+                    </div>
+
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '6px 0 8px', lineHeight: 1.55 }}>
+                      {i.why}
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                      {i.evidence.map((e, n) => (
+                        <div key={n} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12 }}>
+                          <span style={{
+                            fontSize: 9.5, color: 'var(--text-muted)', minWidth: 104, flexShrink: 0,
+                            textTransform: 'uppercase', letterSpacing: '0.03em',
+                          }}>
+                            {e.kind === 'log' ? '/var/log' : e.kind === 'health' ? 'health check'
+                              : e.kind === 'metric' ? 'metric' : 'dependency graph'}
+                          </span>
+                          <span style={{ color: 'var(--text-primary)' }}>
+                            {e.summary}
+                            {!!e.count && e.count > 1 && <span style={{ color: 'var(--text-muted)' }}> &times;{e.count}</span>}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {i.units.length > 0 && (
+                      <div style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>units:</span>
+                        {i.units.map((u) => (
+                          <button key={u} className="btn secondary" disabled={busyUnit === u}
+                            style={{ padding: '2px 8px', fontSize: 11 }}
+                            onClick={() => serviceAction(u, 'status')}>
+                            <Info size={10} /> {u}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {i.checks.length > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>
+                          read-only commands to run next
+                        </div>
+                        {i.checks.map((c) => (
+                          <code key={c} style={{
+                            display: 'block', fontSize: 11, color: 'var(--text-secondary)',
+                            background: 'var(--code-bg)', padding: '3px 7px', borderRadius: 4, marginBottom: 3,
+                            whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                          }}>{c}</code>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
