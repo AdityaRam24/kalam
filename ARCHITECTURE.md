@@ -3,8 +3,10 @@
 Kalam is a single-pane operations console for HPE Private Cloud AI (PCAI) environments:
 it monitors VMs over SSH (including jump-host hops to VMs behind other VMs), inspects
 Docker/Kubernetes workloads and services, diagnoses cluster problems read-only,
-renders a live multi-host topology map, and answers PCAI questions through a
-RAG-grounded AI assistant that keeps learning from your uploads and solved cases.
+renders a live multi-host topology map, gives a whole-host view of any VM (health,
+systemd services, `/var/log` and the systemd journal, with rule-based issue
+detection), and answers PCAI questions through a RAG-grounded AI assistant that
+keeps learning from your uploads and solved cases.
 
 Security note: the API can run Docker/kubectl actions and SSH commands, so the
 server binds to `127.0.0.1` only. Set `HOST=0.0.0.0` in `.env` to expose it on
@@ -17,7 +19,7 @@ the network deliberately.
 ```mermaid
 flowchart LR
     subgraph B["Clients"]
-        UI["React UI: Dashboard, VM Monitor, PCAI Assistant, Stack Visualizer"]
+        UI["React UI: Dashboard, VM Monitor, Host Logs, PCAI Assistant, Stack Visualizer"]
         CLI["kalam CLI (bin/kalam.cjs)"]
     end
 
@@ -25,6 +27,7 @@ flowchart LR
         API["Express server (index.ts, port 3001)"]
         RAG["PCAI RAG engine + learning loop (kb.json, learned.json)"]
         VMS["VM / SSH module (vms.ts)"]
+        HOSTLOGS["Host Logs (hostlogs/: rules, system, journal, router)"]
         GRAPH["Dependency graph engine (graph/: model, build, analyze)"]
         LLM["LLM router (llm.ts, pcai/router.ts)"]
     end
@@ -45,6 +48,8 @@ flowchart LR
     CLI -->|"same /api (auto-starts server)"| API
     API --> RAG
     API --> VMS
+    API --> HOSTLOGS
+    HOSTLOGS -->|"sshRun (same inventory + elevation)"| VMS
     API --> GRAPH
     VMS --> GRAPH
     API --> LLM
@@ -376,6 +381,127 @@ tab in the topology drawer showing one object's history plus its rollout
 revisions; a "Recently changed" heatmap mode on the map; and
 `kalam history [--source x] [--since 7d]` / `kalam history capture` in the CLI.
 
+### 2.2d Host Logs — system health, services, `/var/log` and the journal
+
+Everything above is about the *cluster*. When a node misbehaves, the answer is
+usually on the host itself: a full disk, an OOM kill, a failed `containerd`, a
+flapping NIC. The **Host Logs** tab (`src/components/HostLogs.tsx`) is a
+whole-machine view of any VM in the SSH inventory. The backend lives in
+`server/hostlogs/` and reaches hosts only through `sshRun`, so jump hosts and
+sudo/su elevation work exactly as they do on the Virtual Machines tab.
+
+```
+server/hostlogs/
+  rules.ts    pure: log rule engine, message grouping, /var/log path confinement
+  system.ts   pure: parsers (free, df, systemctl, ps, ss), health checklist,
+              finding → systemd unit linking, service-name validation
+  journal.ts  pure: structured query → validated, quoted journalctl command
+  router.ts   the SSH round-trips and HTTP endpoints below
+```
+
+The page is five panels over one host:
+
+```mermaid
+flowchart TB
+    PICK["VM picker (SSH inventory)"] --> OV & SCAN & JX & FILES
+    OV["System overview: identity, CPU/memory/disk tiles, health checks,<br/>systemd services, filesystems, top processes, listening ports, reboots"]
+    SCAN["Scan for issues: rule engine over recent /var/log, journal (-p warning) and dmesg"]
+    JX["Journal explorer: every read-only journalctl option, presets, follow, download"]
+    FILES["Files + viewer: /var/log tree, tail/grep any file (.gz too), download file / selection / all as .tar.gz"]
+    OV -->|"Status / Start / Restart (confirmed)"| SVC["Service panel: state, NRestarts, systemctl status, journalctl -u"]
+    SCAN -->|"finding linked to a unit"| SVC
+    SVC -->|"Open in journal explorer"| JX
+```
+
+**API** (every call takes `{ name }` — the VM is looked up in the inventory, never
+taken as a raw host):
+
+| Endpoint | Changes the host? | What it runs |
+|---|---|---|
+| `POST /api/logs/overview` | no | `id`, `/etc/os-release`, `/proc/uptime`, `/proc/loadavg`, `free -b`, `df -PT` / `df -Pi`, `systemctl list-units --type=service --all`, `ps --sort`, `ss -tulnp`, `timedatectl show`, `last -x reboot` — one round trip |
+| `POST /api/logs/scan` `{ hours }` | no | newest ≤40 text logs changed in the window, `tail -n 5000` each through a keyword pre-filter, `journalctl -p warning --since`, `dmesg --level=err,warn`, plus the unit list for linking |
+| `POST /api/logs/list` | no | `find /var/log -maxdepth 3 -type f` (+ `! -readable` to flag no-access files) |
+| `POST /api/logs/read` `{ path, lines, grep }` | no | `tail -n`, or `zcat`/`xzcat`/`bzcat`/`zstdcat` + `grep -F` + `tail`; `last -f` for wtmp/btmp |
+| `POST /api/logs/download` `{ paths? \| path+raw }` | no | `tar czf` (or the single file) → base64 over SSH → decoded, capped at `KALAM_LOG_BUNDLE_MAX_MB` |
+| `POST /api/logs/service` `{ unit, action }` | **`start` / `restart`** | `systemctl show`, `systemctl status`, `journalctl -u -n 80`; for start/restart first `systemctl <action>` |
+| `POST /api/logs/journal` `{ query }` | no | `journalctl` built by `journal.ts` (see below) |
+| `POST /api/logs/journal/meta` | no | `--list-boots`, `-F _SYSTEMD_UNIT`, `-F SYSLOG_IDENTIFIER`, `-N`, `--disk-usage`, journald.conf, persistent vs volatile |
+| `POST /api/logs/journal/field-values` `{ field }` | no | `journalctl -F FIELD` |
+| `POST /api/logs/journal/download` `{ query }` | no | same query, saved as `.log` / `.json` |
+| `POST /api/logs/journal/check` `{ op }` | no | `journalctl --verify` or `--header` |
+| `GET /api/logs/rules` | — | the rule catalogue |
+
+**Detection is deterministic, not an LLM.** `rules.ts` holds ~18 rules in
+priority order — kernel panic/lockup, OOM killer, disk full, filesystem errors,
+block I/O errors, MCE/EDAC/AER hardware errors, NVIDIA Xid, segfaults, failed
+systemd units, kubelet/containerd errors, TLS/certificate failures, SSH/PAM
+auth failures, sudo denials, clock skew, link/DNS/conntrack problems — then
+generic fatal/error/warning fallbacks. Lines are grouped by rule + a normalized
+message (timestamps, PIDs, IPs, hex and numbers stripped), so 400 identical
+`Invalid user` lines become one finding with a count, first/last seen and
+samples. Each rule carries its own explanation and read-only checks, which is
+what the **Explain** toggle shows — it works on an air-gapped host with no model
+configured. The remote keyword pre-filter (`PREFILTER`) keeps transfer small;
+a unit test asserts it never drops a line any rule would match.
+
+**Health checks** (`buildHealth`) reduce the overview to ok / warning / critical:
+disk and inode use ≥80/90%, available memory <20/10%, swap >50%, 5-minute load
+per CPU >1/2, failed or restarting units (critical for core node services such
+as kubelet, containerd, etcd, sshd, NetworkManager), stopped core services, NTP
+not synchronized, reboot within the last hour, not running as root.
+
+**Linking findings to services.** `unitsForLines` maps a finding's sample lines
+to units that exist on that host: an explicit `foo.service`, the syslog
+identifier (`kubelet[900]:` → `kubelet.service`, `sshd` → `ssh.service`), or
+systemd's `Failed to start <Description>`. That is what puts a **Restart
+kubelet.service** button next to a PLEG error.
+
+**The one mutating action: `systemctl start|restart`.** It is guarded in layers:
+
+| Guard | Where |
+|---|---|
+| Browser confirmation, with a stronger warning for core units and for SSH/network units (`ACCESS_UNITS`) that can cut access | `HostLogs.tsx` |
+| Server refuses without `confirm: true` | `router.ts` |
+| Only `status`, `start`, `restart` — no `stop`, `disable`, `mask` | `router.ts` |
+| Unit name validated (`safeServiceUnit`) and shell-quoted | `system.ts` |
+| Unit must exist on the host (`LoadState=loaded`) before `systemctl` runs | remote pre-check |
+| Every start/restart logged with time, unit, VM and login | server log |
+| A dropped SSH connection while restarting sshd/networking is reported as expected, not as a failure | `router.ts` |
+
+Service control needs root; a non-root login without elevation gets a message
+pointing at the root-access setting, not a raw `Interactive authentication
+required`. Note that this goes over SSH, so the Helm `rbac.allowWrite` switch
+(which governs Kubernetes writes) does not apply to it.
+
+**Journal explorer.** `journal.ts` turns a structured query into a `journalctl`
+command: `-u` (globs), `-t`, `-k`, `-p` level or range (ordered for the user),
+`-b` index or boot ID, `--since/--until` (validated against systemd.time forms;
+`datetime-local` input normalized), `FIELD=value` matches, `-g` with
+`--case-sensitive` or a fixed-string `grep -F` whose line limit applies after
+filtering, `-o` (12 modes), `--output-fields`, `-n` (≤20000), `-r`, `-x`,
+`--utc`, `--no-hostname`. Every value is validated and quoted; invalid fields
+come back as readable errors and the exact command is shown for copying.
+`-f` is replaced by polling: `--show-cursor` on the first request, then
+`--after-cursor=<cursor>` every 3 s, so no stream is held open. An option the
+host's `journalctl` is too old for is reported as such.
+
+**Deliberately not offered:** `journalctl --vacuum-*`, `--rotate`, `--flush`,
+`--sync` (they delete or rewrite logs — a page for investigating incidents must
+not be able to destroy the evidence), `--file` / `-D` / `-M` / `--user` (other
+journals), and `systemctl stop` (stopping sshd or networking locks you out).
+
+**Limits are reported, never silent.** Downloads above the cap return
+`X-Kalam-Truncated: 1` and the UI says so; scan output that hits the SSH buffer
+is flagged partial; files unreadable to a non-root login are badged and
+explained. Hosts whose `find` lacks `-printf` (BusyBox) still list files via
+`stat`, but the scan then reads only the journal and dmesg.
+
+Tests: `server/__tests__/hostlogs.test.ts` (rules, grouping, pre-filter, path
+confinement), `hostsystem.test.ts` (parsers, health, unit linking, unit-name
+validation), `hostjournal.test.ts` (every journal option, injection rejection,
+cursors, `--list-boots` formats; generated commands are syntax-checked with
+`bash -n` where bash is available).
+
 ### 2.3 PCAI Assistant (RAG chat)
 
 ```mermaid
@@ -652,6 +778,11 @@ three paths are environment-configurable:
 | `KALAM_LEARNED_PATH` | `server/pcai/learned.json` | the learned knowledge base |
 | `KALAM_HISTORY_DIR` | `server/history/data` | change-history snapshots and changelog |
 
+Host Logs writes nothing to disk; its one tunable is `KALAM_LOG_BUNDLE_MAX_MB`
+(default `50`), the cap on a `/var/log` or journal download, set through
+`config.extraEnv`. It reaches hosts over SSH only, so it needs `ssh.secretName`
+and, for most of `/var/log` and any service restart, root access on the host.
+
 Validate before installing:
 
 ```bash
@@ -681,7 +812,7 @@ identically.
 
 ```mermaid
 flowchart LR
-    T["Terminal: kalam ask / solve / learn / vms / vm diagnose / train"] --> CLI["bin/kalam.cjs"]
+    T["Terminal: kalam ask / solve / learn / vms / vm diagnose / vm logs / vm journal / train"] --> CLI["bin/kalam.cjs"]
     CLI -->|"backend up?"| API["Express server :3001"]
     CLI -.->|"if down: spawn node + tsx directly, poll every 250ms"| API
     API --> ANSWER["SSE stream rendered live with ANSI markdown"]
@@ -713,5 +844,11 @@ Key behaviors:
   findings with suggested fixes), `kalam vm discover <name>`, `kalam vm peers <name>`,
   `kalam vm graph <name>` (dependency graph + ranked root causes),
   `kalam vm impact <name> <id>` (blast radius of one resource).
+- **Host commands** (§2.2d) — `kalam vm health <name>`, `kalam vm logs <name>
+  [--hours N] [--all]`, `kalam vm journal <name> [journalctl flags]` (the flags are
+  translated into the same structured query the UI sends, so the server validates
+  them identically; `-f` polls with cursors until Ctrl+C), and `kalam vm service
+  <name> <unit> [status|start|restart]`, which asks y/N before changing anything
+  (`--yes` to skip; inside the REPL, where stdin is taken, `--yes` is required).
 - **Settings persistence** — provider/model/mode choices are saved to `~/.kalam.json`
   and merged with `.env` on startup, so the model you pick sticks across sessions.

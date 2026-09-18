@@ -164,3 +164,21 @@ and check the file:
 curl -s -X POST http://localhost:3001/api/vms/discover   -H 'Content-Type: application/json' -d '{"name":"<vm>"}' > vm.json
 npm run topology:check -- vm.json
 ```
+
+## Checking a host's logs and health from the shell
+
+Everything on the Host Logs tab is a `POST` against the running server, so the
+same data can be pulled with `curl` — useful when the UI is unreachable or to
+attach to a ticket. `<vm>` is a name from the SSH inventory.
+
+```bash
+API=http://localhost:3001; VM='{"name":"<vm>"}'
+curl -s -X POST $API/api/logs/overview -H 'Content-Type: application/json' -d "$VM" > overview.json   # health checks, services, disks
+curl -s -X POST $API/api/logs/scan     -H 'Content-Type: application/json' -d '{"name":"<vm>","hours":24}' > findings.json
+curl -s -X POST $API/api/logs/journal  -H 'Content-Type: application/json' \
+  -d '{"name":"<vm>","query":{"boot":"-1","priority":"err","lines":500}}'                            # errors from the previous boot
+curl -s -X POST $API/api/logs/download -H 'Content-Type: application/json' -d "$VM" -o varlog.tar.gz  # all of /var/log
+```
+
+`/api/logs/service` with `"action":"restart"` changes the host and requires
+`"confirm":true`; `"action":"status"` is read-only.

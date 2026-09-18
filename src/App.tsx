@@ -29,6 +29,7 @@ import {
   Moon,
   Network,
   History,
+  Gauge,
   ScrollText
 } from 'lucide-react';
 import TopologyGraph from './components/TopologyGraph';
@@ -40,6 +41,7 @@ import PcaiStackView from './components/PcaiStackView';
 import VmMonitor from './components/VmMonitor';
 import ClusterHistory from './components/ClusterHistory';
 import HostLogs from './components/HostLogs';
+import Observability from './components/Observability';
 import KubectlCheatSheet from './components/KubectlCheatSheet';
 
 interface Container {
@@ -127,7 +129,7 @@ interface ChatMessage {
 
 export function App() {
   // Tabs & Config
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'logs' | 'history' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'logs' | 'metrics' | 'history' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet'>('dashboard');
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [provider, setProvider] = useState<'gemini' | 'local' | 'custom'>(() => (localStorage.getItem('kalam_llm_provider') as 'gemini' | 'local' | 'custom') || 'gemini');
@@ -1247,6 +1249,14 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               <span className="nav-item-badge">/var/log</span>
             </button>
             <button
+              className={`nav-item ${activeTab === 'metrics' ? 'active' : ''}`}
+              onClick={() => setActiveTab('metrics')}
+            >
+              <span className="nav-item-icon"><Gauge size={18} /></span>
+              <span className="nav-item-text">Observability</span>
+              <span className="nav-item-badge">Trends</span>
+            </button>
+            <button
               className={`nav-item ${activeTab === 'history' ? 'active' : ''}`}
               onClick={() => setActiveTab('history')}
             >
@@ -1350,6 +1360,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 {activeTab === 'k8s' && 'Kubernetes Cluster Management'}
                 {activeTab === 'vms' && 'Virtual Machine Monitoring & SSH'}
                 {activeTab === 'logs' && 'Host Logs — /var/log Collection & Issue Detection'}
+                {activeTab === 'metrics' && 'Observability — Host Telemetry Over Time'}
                 {activeTab === 'history' && 'Cluster Change History — What Changed, When, and Who'}
                 {activeTab === 'chat' && 'Kalam Agentic DevOps Assistant'}
                 {activeTab === 'security' && 'Container Security & CVE Patching'}
@@ -1677,6 +1688,10 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           )}
 
           {/* CLUSTER CHANGE HISTORY TAB */}
+          {activeTab === 'metrics' && (
+            <Observability />
+          )}
+
           {activeTab === 'history' && (
             <div className="tab-panel">
               <ClusterHistory />

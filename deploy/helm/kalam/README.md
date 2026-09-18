@@ -76,6 +76,25 @@ Confirm it from the UI: **Settings → Test connection** runs a real completion
 and names the exact failure (off-network, refused port, token rejected,
 untrusted certificate, model not served).
 
+### Host Logs (`/var/log`, services, journal)
+
+The Host Logs tab works entirely over SSH, so it needs `ssh.secretName` and
+hosts added on the Virtual Machines tab (with `persistence.enabled=true`, or
+they are gone after a restart). Reading most of `/var/log` and restarting a
+systemd service need root on the host — enable root access per VM in the UI.
+
+`rbac.allowWrite` does **not** govern Host Logs: it controls Kubernetes writes,
+while service start/restart goes over SSH. Those actions are confirmed in the
+UI, refused by the server without confirmation, limited to `start`/`restart`,
+and logged in the pod's output (`kubectl -n kalam logs deploy/kalam | grep hostlogs`).
+
+Raise the download cap (default 50 MB) if you pull large log bundles:
+
+```bash
+--set 'config.extraEnv[0].name=KALAM_LOG_BUNDLE_MAX_MB' \
+--set-string 'config.extraEnv[0].value=200'
+```
+
 ## What the chart installs
 
 ServiceAccount, ClusterRole/ClusterRoleBinding (or Role/RoleBinding), Service,

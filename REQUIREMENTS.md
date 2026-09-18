@@ -26,7 +26,7 @@ To run Kalam locally, you need the following system tools installed and running:
 
 ## 📁 Where Kalam writes state
 
-Three files/directories are written at runtime. Each path is overridable, which
+Four files/directories are written at runtime. Each path is overridable, which
 is what lets the container image stay read-only and keep its state on a mounted
 volume — without this, every host added on the Virtual Machines tab is lost on
 restart.
@@ -36,8 +36,9 @@ restart.
 | `KALAM_VMS_PATH` | `server/vms.json` | the SSH inventory (hosts, users, credentials) |
 | `KALAM_LEARNED_PATH` | `server/pcai/learned.json` | the learned knowledge base |
 | `KALAM_HISTORY_DIR` | `server/history/data` | change-history snapshots and changelog |
+| `KALAM_METRICS_DIR` | `server/metrics/data` | host telemetry samples for the Observability page |
 
-All three are git-ignored at their defaults. The Helm chart sets them to a
+All four are git-ignored at their defaults. The Helm chart sets them to a
 volume automatically when `persistence.enabled=true`.
 
 ## ⏱️ Reading a large cluster
@@ -50,6 +51,51 @@ This is deliberately separate from the 8-second probe timeout used for
 `docker`/`kubectl` version checks. That short bound exists because a stopped
 Docker Desktop on Windows blocks forever with no error of its own; applying it
 to a bulk cluster read is what once made a large cluster report itself empty.
+
+## 📈 Observability — recording host telemetry
+
+The Observability tab charts numeric samples taken from each host over SSH. Like
+the change-history poller, **nothing is sampled unless you opt in** — Kalam does
+not start SSHing into an estate on a timer because it was launched.
+
+```bash
+KALAM_METRICS=1                    # opt in
+KALAM_METRICS_INTERVAL_SEC=30      # how often (default 30s, floor 10s)
+KALAM_METRICS_SOURCES=all          # `all` = every inventory VM, or a comma list
+KALAM_METRICS_RETENTION_HOURS=48   # how far back samples are kept
+```
+
+Each sample is **one short SSH command** — `/proc/stat`, `/proc/loadavg`,
+`free -b`, one `df`, `nvidia-smi` and a failed-unit count — deliberately not the
+much heavier Host Logs overview. Every tool is optional: a host with no
+`nvidia-smi` simply reports no GPUs. Without the poller the page still works —
+press **Sample now** to take one reading.
+
+CPU is stored as the raw `/proc/stat` counter and the percentage is derived
+between samples, so a reboot shows a **gap** rather than a nonsense spike.
+
+## 📜 Host Logs — what the remote hosts need
+
+The Host Logs tab runs standard Linux tools on the VM over SSH. Nothing is
+installed on the host, and every tool is optional — a missing one empties only
+the panel that uses it.
+
+| Panel | Uses on the host | Without it |
+| --- | --- | --- |
+| System overview | `free`, `df`, `ps`, `ss`, `systemctl`, `timedatectl`, `last`, `/proc` | that tile/section shows "no data" |
+| Scan / file list | GNU `find` (`-printf`), `tail`, `grep` | BusyBox `find` still lists files, but the scan reads only the journal and `dmesg` |
+| Viewer | `tail`, `grep`, `zcat` / `xzcat` / `bzcat` / `zstdcat` for rotated files | that compression format can't be opened |
+| Downloads | `tar`, `gzip`, `base64`, `head` | download fails with a readable error |
+| Services | `systemctl`, `journalctl` | service buttons unavailable (non-systemd host) |
+| Journal explorer | `journalctl` (regex search and `--case-sensitive` need systemd ≥ 246) | explorer says journalctl is missing / too old for that option |
+
+**Root matters.** Most of `/var/log` is root-only and every `systemctl start` /
+`restart` needs root. Enable root access for the VM (sudo, su, or a root login)
+on the Virtual Machines tab; the page says so whenever it is not running as root.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `KALAM_LOG_BUNDLE_MAX_MB` | `50` | Cap on a `/var/log` bundle, single-file or journal download. A download that hits it is flagged as incomplete, never silently cut. |
 
 ---
 
