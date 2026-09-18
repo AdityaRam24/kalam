@@ -64,7 +64,15 @@ interface Pod {
   ip: string;
   node: string;
   restarts: number;
-  containers: Array<{ name: string; ready: boolean; state: string }>;
+  // `image` and the requests/limits blocks are what the PCAI Stack view sums to
+  // answer "what is this component actually using" — see normalizePod.
+  containers: Array<{
+    name: string; ready: boolean; state: string; image?: string;
+    requests?: { cpuMilli: number; memBytes: number; gpu: number };
+    limits?: { cpuMilli: number; memBytes: number; gpu: number };
+  }>;
+  /** PersistentVolumeClaims this pod mounts. */
+  claims?: string[];
   created: string;
 }
 

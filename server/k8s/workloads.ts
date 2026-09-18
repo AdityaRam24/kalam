@@ -105,6 +105,70 @@ export function resolvePodOwner(pod: any, replicaSets: Map<string, any>): OwnerR
   return { kind: 'ReplicaSet', name: controller.name };
 }
 
+// ---------------------------------------------------------------------------
+// Resource quantities
+//
+// "What is this component actually using?" cannot be answered from counts of
+// pods, and on a GPU platform it is the question that matters most — a
+// namespace with three pods holding eight A100s is a very different tenant from
+// one with thirty pods holding none.
+//
+// Kubernetes quantities are strings in several notations ("500m", "2", "1Gi",
+// "1.5", "512Mi", "1e3"), so they are parsed to one canonical unit here rather
+// than in the UI, where summing "500m" + "2" would silently produce nonsense.
+// ---------------------------------------------------------------------------
+
+/** CPU quantity -> millicores. "500m" -> 500, "2" -> 2000. */
+export function parseCpu(q: unknown): number {
+  if (typeof q === 'number') return Math.round(q * 1000);
+  if (typeof q !== 'string' || !q.trim()) return 0;
+  const t = q.trim();
+  if (t.endsWith('m')) {
+    const n = Number(t.slice(0, -1));
+    return Number.isFinite(n) ? Math.round(n) : 0;
+  }
+  const n = Number(t);
+  return Number.isFinite(n) ? Math.round(n * 1000) : 0;
+}
+
+const MEM_SUFFIX: Record<string, number> = {
+  Ki: 1024, Mi: 1024 ** 2, Gi: 1024 ** 3, Ti: 1024 ** 4, Pi: 1024 ** 5, Ei: 1024 ** 6,
+  k: 1e3, K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18,
+};
+
+/** Memory quantity -> bytes. "1Gi" -> 1073741824, "512Mi" -> 536870912. */
+export function parseMemory(q: unknown): number {
+  if (typeof q === 'number') return Math.round(q);
+  if (typeof q !== 'string' || !q.trim()) return 0;
+  const m = q.trim().match(/^([0-9.eE+-]+)\s*([A-Za-z]*)$/);
+  if (!m) return 0;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return 0;
+  const suffix = m[2];
+  if (!suffix) return Math.round(n);
+  const mult = MEM_SUFFIX[suffix];
+  return mult ? Math.round(n * mult) : 0;
+}
+
+export interface ResourceAmounts {
+  cpuMilli: number;
+  memBytes: number;
+  /** nvidia.com/gpu, plus the AMD/Intel equivalents so the count is honest. */
+  gpu: number;
+}
+
+const GPU_KEYS = ['nvidia.com/gpu', 'amd.com/gpu', 'gpu.intel.com/i915', 'habana.ai/gaudi'];
+
+export function parseResources(block: any): ResourceAmounts {
+  const b = block || {};
+  let gpu = 0;
+  for (const k of GPU_KEYS) {
+    const n = Number(b[k]);
+    if (Number.isFinite(n)) gpu += n;
+  }
+  return { cpuMilli: parseCpu(b.cpu), memBytes: parseMemory(b.memory), gpu };
+}
+
 export function normalizePod(item: any, replicaSets: Map<string, any> = new Map()): any {
   const metadata = item?.metadata || {};
   const status = item?.status || {};
@@ -129,8 +193,15 @@ export function normalizePod(item: any, replicaSets: Map<string, any> = new Map(
         image: c.image,
         ready: !!st.ready,
         state: Object.keys(st.state || {})[0] || 'unknown',
+        requests: parseResources(c.resources?.requests),
+        limits: parseResources(c.resources?.limits),
       };
     }),
+    // Which PersistentVolumeClaims this pod mounts — the storage half of
+    // "what is it using", and the thing that explains a pod stuck Pending.
+    claims: (spec.volumes || [])
+      .map((v: any) => v?.persistentVolumeClaim?.claimName)
+      .filter((n: any): n is string => typeof n === 'string' && !!n),
   };
 }
 
