@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeClusterItems, normalizePod, normalizeService, normalizeWorkload,
   normalizeNode, resolvePodOwner, indexByKey, parseReplicaSetOwners,
+  parseCpu, parseMemory, parseResources,
 } from '../k8s/workloads.js';
 
 const rs = (name: string, ns: string, ownerKind: string | null, ownerName?: string) => ({
@@ -172,5 +173,98 @@ describe('parseReplicaSetOwners (projected kubectl output)', () => {
     expect(parseReplicaSetOwners('').size).toBe(0);
     expect(parseReplicaSetOwners('\n\n  \n').size).toBe(0);
     expect(parseReplicaSetOwners('ns  name-only').size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resource quantities
+//
+// These exist so the UI can SUM what a PCAI component is using. Summing the raw
+// strings would quietly add "500m" to "2" and report 502 CPUs, so the parsing
+// is the correctness boundary.
+// ---------------------------------------------------------------------------
+
+describe('parseCpu', () => {
+  it('normalises every notation to millicores', () => {
+    expect(parseCpu('500m')).toBe(500);
+    expect(parseCpu('2')).toBe(2000);
+    expect(parseCpu('1.5')).toBe(1500);
+    expect(parseCpu('100m')).toBe(100);
+    expect(parseCpu(2)).toBe(2000);
+  });
+
+  it('treats absent or unparseable values as zero, never NaN', () => {
+    expect(parseCpu(undefined)).toBe(0);
+    expect(parseCpu('')).toBe(0);
+    expect(parseCpu('abc')).toBe(0);
+    expect(parseCpu(null)).toBe(0);
+  });
+});
+
+describe('parseMemory', () => {
+  it('handles binary and decimal suffixes', () => {
+    expect(parseMemory('1Gi')).toBe(1024 ** 3);
+    expect(parseMemory('512Mi')).toBe(512 * 1024 ** 2);
+    expect(parseMemory('1G')).toBe(1e9);
+    expect(parseMemory('1024')).toBe(1024);
+  });
+
+  it('returns zero rather than guessing at junk', () => {
+    expect(parseMemory('12Zi')).toBe(0);
+    expect(parseMemory('nonsense')).toBe(0);
+    expect(parseMemory(undefined)).toBe(0);
+  });
+});
+
+describe('parseResources', () => {
+  it('pulls cpu, memory and GPUs out of one requests block', () => {
+    expect(parseResources({ cpu: '250m', memory: '2Gi', 'nvidia.com/gpu': '2' }))
+      .toEqual({ cpuMilli: 250, memBytes: 2 * 1024 ** 3, gpu: 2 });
+  });
+
+  it('counts non-NVIDIA accelerators too', () => {
+    expect(parseResources({ 'amd.com/gpu': '1' }).gpu).toBe(1);
+    expect(parseResources({ 'habana.ai/gaudi': '8' }).gpu).toBe(8);
+  });
+
+  it('is all zeros for a container that requests nothing', () => {
+    expect(parseResources(undefined)).toEqual({ cpuMilli: 0, memBytes: 0, gpu: 0 });
+    expect(parseResources({})).toEqual({ cpuMilli: 0, memBytes: 0, gpu: 0 });
+  });
+});
+
+describe('normalizePod resource + storage fields', () => {
+  const gpuPod = {
+    kind: 'Pod',
+    metadata: { name: 'mlis-predictor-0', namespace: 'mlis', labels: {} },
+    spec: {
+      nodeName: 'gpu-1',
+      containers: [{
+        name: 'server', image: 'nvcr.io/nim:1',
+        resources: { requests: { cpu: '4', memory: '32Gi', 'nvidia.com/gpu': '2' },
+                     limits: { cpu: '8', memory: '64Gi', 'nvidia.com/gpu': '2' } },
+      }],
+      volumes: [
+        { name: 'models', persistentVolumeClaim: { claimName: 'model-store' } },
+        { name: 'tmp', emptyDir: {} },
+      ],
+    },
+    status: { phase: 'Running', containerStatuses: [{ name: 'server', ready: true, restartCount: 0, state: { running: {} } }] },
+  };
+
+  it('carries what the container asked for', () => {
+    const p = normalizePod(gpuPod);
+    expect(p.containers[0].requests).toEqual({ cpuMilli: 4000, memBytes: 32 * 1024 ** 3, gpu: 2 });
+    expect(p.containers[0].limits.gpu).toBe(2);
+  });
+
+  it('lists only real PersistentVolumeClaims, not every volume', () => {
+    expect(normalizePod(gpuPod).claims).toEqual(['model-store']);
+  });
+
+  it('leaves a pod with no requests at zero rather than undefined', () => {
+    const p = normalizePod(podItem('web-1', 'default'));
+    expect(p.containers[0].requests).toEqual({ cpuMilli: 0, memBytes: 0, gpu: 0 });
+    expect(p.claims).toEqual([]);
   });
 });

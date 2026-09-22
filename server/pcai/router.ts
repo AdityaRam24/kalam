@@ -9,11 +9,32 @@ import { GoogleGenAI } from '@google/genai';
 import { resolveEmbedConfig, embedTexts, EmbedConfig } from './embed.js';
 import { loadKB, saveKB, searchKB, SearchHit, KnowledgeBase, chunkText, tokenize, loadLearned, saveLearned, LearnedDoc } from './store.js';
 import { runIngest } from './ingest.js';
+import { identifyComponent } from './components.js';
 
 export const pcaiRouter = Router();
 
 let ingesting = false;
 let lastIngestLog: string[] = [];
+
+/**
+ * POST /api/pcai/identify { items: [{ name, image?, namespace? }] }
+ *
+ * "What IS this thing?" for a list of workloads, answered from the offline
+ * component catalog (server/pcai/components.ts) rather than a model — so the
+ * PCAI Stack page can explain spire-agent, the GPU operator or ezpresto on an
+ * air-gapped cluster with no LLM configured at all.
+ *
+ * Read-only and free: a regex match per item against a fixed catalog.
+ */
+pcaiRouter.post('/api/pcai/identify', (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, 500) : [];
+  const results = items.map((it: any) => {
+    const key = [it?.name, it?.image, it?.namespace].filter(Boolean).join(' ').toLowerCase();
+    const info = key ? identifyComponent(key) : null;
+    return { name: it?.name, info };
+  });
+  res.json({ results });
+});
 
 pcaiRouter.get('/api/pcai/status', async (_req, res) => {
   const kb = await loadKB();
