@@ -1,0 +1,50 @@
+{{- if include "kalam.pcaiEnabled" . }}
+{{- $ez := .Values.ezua }}
+# HPE Private Cloud AI: publish Kalam on the platform's Istio gateway, the same
+# way PCAI's own applications are exposed (https://<endpoint>).
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: {{ include "kalam.fullname" . }}
+  labels: {{- include "kalam.labels" . | nindent 4 }}
+spec:
+  gateways:
+    - {{ $ez.virtualService.istioGateway }}
+  hosts:
+    - {{ $ez.virtualService.endpoint | quote }}
+  http:
+    - match:
+        - uri:
+            prefix: /
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: {{ printf "%s.%s.svc.cluster.local" (include "kalam.fullname" .) .Release.Namespace }}
+            port:
+              number: {{ .Values.service.port }}
+      # No route timeout on purpose: the chat and log endpoints stream, and
+      # Istio's default (none) leaves them running. Istio rejects "0s".
+{{- if $ez.authorizationPolicy.enabled }}
+---
+# Platform SSO: every request to the endpoint must carry a PCAI (Keycloak)
+# session, enforced at the gateway by oauth2-proxy before it reaches Kalam.
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ printf "%s-%s-auth" .Release.Namespace (include "kalam.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $ez.authorizationPolicy.namespace }}
+  labels: {{- include "kalam.labels" . | nindent 4 }}
+spec:
+  action: CUSTOM
+  provider:
+    name: {{ $ez.authorizationPolicy.providerName }}
+  rules:
+    - to:
+        - operation:
+            hosts:
+              - {{ $ez.virtualService.endpoint | quote }}
+  selector:
+    matchLabels: {{- toYaml $ez.authorizationPolicy.matchLabels | nindent 6 }}
+{{- end }}
+{{- end }}

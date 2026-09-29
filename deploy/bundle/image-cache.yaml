@@ -1,0 +1,80 @@
+# Per-node image cache — how install.sh delivers the Kalam image when you have
+# not given it a registry.
+#
+# One tiny registry per node, listening on 127.0.0.1:5959 only (host network,
+# loopback: nothing outside the node can reach it). install.sh pushes the
+# bundled image into each one through `kubectl port-forward`, and the Kalam pod
+# pulls 127.0.0.1:5959/kalam — containerd talks plain HTTP to loopback
+# registries by default, so no node or registry configuration is needed.
+#
+# The images live on the node's disk (/var/lib/kalam-image-cache), so they
+# survive a restart of this pod. `uninstall.sh --purge` removes all of it.
+#
+# __CACHE_IMAGE__ is replaced by install.sh (default: registry:2; override with
+# --cache-image for a mirror in an air-gapped cluster).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kalam-image-cache
+  labels:
+    app.kubernetes.io/part-of: kalam
+    # hostNetwork + hostPath are outside the baseline Pod Security profile.
+    pod-security.kubernetes.io/enforce: privileged
+    istio-injection: disabled
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kalam-image-cache
+  namespace: kalam-image-cache
+  labels:
+    app.kubernetes.io/name: kalam-image-cache
+    app.kubernetes.io/part-of: kalam
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kalam-image-cache
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kalam-image-cache
+        app.kubernetes.io/part-of: kalam
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      # Every node, including tainted GPU / control-plane nodes: Kalam may be
+      # scheduled anywhere, and the image has to be local wherever it lands.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: registry
+          image: __CACHE_IMAGE__
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REGISTRY_HTTP_ADDR
+              value: 127.0.0.1:5959
+            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+              value: /var/lib/registry
+            - name: REGISTRY_LOG_LEVEL
+              value: warn
+          volumeMounts:
+            - name: store
+              mountPath: /var/lib/registry
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: store
+          hostPath:
+            path: /var/lib/kalam-image-cache
+            type: DirectoryOrCreate

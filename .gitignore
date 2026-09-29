@@ -34,3 +34,7 @@ server/metrics/data/
 *.sln
 *.sw?
 
+
+# bundle build output (deploy/bundle/build-bundle.sh)
+deploy/bundle/.cache/
+deploy/bundle/dist/

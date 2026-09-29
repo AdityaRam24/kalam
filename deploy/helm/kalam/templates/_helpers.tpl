@@ -35,13 +35,39 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
-{{/* Browser origins the API accepts. Falls back to the ingress host so a
-     standard install is reachable without having to set it twice. */}}
+{{/* repository[:tag][@digest] */}}
+{{- define "kalam.image" -}}
+{{- $ref := printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- if .Values.image.digest -}}
+{{- $ref = printf "%s@%s" $ref .Values.image.digest -}}
+{{- end -}}
+{{- $ref -}}
+{{- end -}}
+
+{{/* "true" when the PCAI VirtualService should be rendered: Istio is present
+     and the endpoint is a real hostname. An unsubstituted ${DOMAIN_NAME}
+     would be rejected by istiod's validation webhook and fail the install. */}}
+{{- define "kalam.pcaiEnabled" -}}
+{{- $ez := .Values.ezua -}}
+{{- if and $ez.enabled $ez.virtualService.endpoint (not (contains "${" $ez.virtualService.endpoint)) (or (.Capabilities.APIVersions.Has "networking.istio.io/v1beta1") (.Capabilities.APIVersions.Has "networking.istio.io/v1")) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/* Browser origins the API accepts. Falls back to the hostnames this chart
+     publishes, so a standard install never has to set it twice. */}}
 {{- define "kalam.allowedHosts" -}}
 {{- if .Values.config.allowedHosts -}}
 {{- .Values.config.allowedHosts -}}
-{{- else if .Values.ingress.enabled -}}
-{{- .Values.ingress.host -}}
+{{- else -}}
+{{- $hosts := list -}}
+{{- if include "kalam.pcaiEnabled" . -}}
+{{- $hosts = append $hosts .Values.ezua.virtualService.endpoint -}}
+{{- end -}}
+{{- if .Values.ingress.enabled -}}
+{{- $hosts = append $hosts .Values.ingress.host -}}
+{{- end -}}
+{{- join "," $hosts -}}
 {{- end -}}
 {{- end -}}
 
