@@ -140,11 +140,27 @@ async function kubectlKind(
 const ALPHANUMERIC_DASH = /^[a-zA-Z0-9_.-]+$/;
 const DOCKER_ID_REGEX = /^[a-fA-F0-9]{12,64}$|^[a-zA-Z0-9_.-]+$/;
 
+// Liveness/readiness for Kubernetes. Deliberately does no work: /api/status
+// shells out to seven CLIs, which is too heavy to run on every probe tick and
+// would fail the pod whenever the apiserver is slow rather than when Kalam is.
+app.get('/healthz', (_req, res) => {
+  res.json({ ok: true });
+});
+
+// The kubeconfig context kubectl is using — or "in-cluster" when Kalam runs in
+// a pod and kubectl talks to the API through the ServiceAccount, where there
+// is no kubeconfig and so no context name at all.
+async function kubeContextName(): Promise<string> {
+  const r = await runCmd('kubectl config current-context');
+  if (r.success && r.stdout.trim()) return r.stdout.trim();
+  return process.env.KUBERNETES_SERVICE_HOST ? 'in-cluster' : 'unknown';
+}
+
 // API: Get Status
 // Probed in parallel, not in sequence: Docker is one optional runtime among
 // several, so a slow or absent one must not delay reporting the others.
 app.get('/api/status', async (req, res) => {
-  const [dockerVer, k8sVer, dockerRunning, k8sRunning, crictlVer, nerdctlVer, podmanVer] =
+  const [dockerVer, k8sVer, dockerRunning, k8sRunning, crictlVer, nerdctlVer, podmanVer, k8sContext] =
     await Promise.all([
       runCmd('docker --version'),
       runCmd('kubectl version --client'),
@@ -153,6 +169,7 @@ app.get('/api/status', async (req, res) => {
       runCmd('crictl version'),
       runCmd('nerdctl --version'),
       runCmd('podman --version'),
+      kubeContextName(),
     ]);
 
   // Every container runtime that answered on this machine. Consumers should
@@ -174,7 +191,7 @@ app.get('/api/status', async (req, res) => {
       installed: k8sVer.success,
       version: k8sVer.stdout.trim() || 'Not found',
       running: k8sRunning.success,
-      context: k8sRunning.success ? 'docker-desktop' : 'Unavailable',
+      context: k8sRunning.success ? k8sContext : 'Unavailable',
     },
     runtimes,
   });
@@ -608,7 +625,7 @@ async function gatherClusterState() {
         }
       });
 
-      k8sStateStr = `Kubernetes is active (context: docker-desktop).
+      k8sStateStr = `Kubernetes is active (context: ${await kubeContextName()}).
 Nodes:
 ${nodes.join('\n')}
 Deployments:
@@ -757,7 +774,7 @@ ${dockerVer.success ? `✅ Installed (${dockerVer.stdout.trim()})` : '❌ Not In
 
 **Kubernetes Status:**
 ${k8sVer.success ? `✅ Installed (${k8sVer.stdout.trim()})` : '❌ Not Installed'}
-- Nodes: ${k8sRes.success && k8sRes.stdout.includes('Node') ? 'docker-desktop (Ready)' : 'None/Unavailable'}
+- Nodes: ${k8sRes.success && k8sRes.stdout.includes('Node') ? 'Ready' : 'None/Unavailable'}
 
 You can check out the **Docker** and **Kubernetes** tabs at the top to inspect details, view logs, restart containers, and scale deployments directly!
 

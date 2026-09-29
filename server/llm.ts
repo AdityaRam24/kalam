@@ -432,6 +432,20 @@ export async function testLocal(localUrl: string, localModel: string, authKey?: 
   }
 }
 
+// Deployment-level engine defaults (KALAM_PROVIDER / KALAM_LOCAL_URL /
+// KALAM_LOCAL_MODEL, set by the Helm chart). The UI applies them only where
+// the browser has no saved choice, so an operator can point every fresh
+// browser at the in-cluster model without anyone opening Settings.
+llmRouter.get('/api/llm/defaults', (_req, res) => {
+  const provider = process.env.KALAM_PROVIDER;
+  res.json({
+    provider: provider === 'gemini' || provider === 'local' ? provider : undefined,
+    localUrl: process.env.KALAM_LOCAL_URL || undefined,
+    localModel: process.env.KALAM_LOCAL_MODEL || undefined,
+    geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
+  });
+});
+
 llmRouter.post('/api/llm/test', async (req, res) => {
   const { provider = 'gemini', apiKey, localUrl, localModel, authKey } = req.body || {};
   try {

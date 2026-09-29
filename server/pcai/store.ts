@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 import { cosineSimilarity, EmbedConfig } from './embed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const KB_PATH = path.join(__dirname, 'kb.json');
+export const KB_PATH = process.env.KALAM_KB_PATH || path.join(__dirname, 'kb.json');
 
 export interface Chunk {
   id: string;
@@ -105,6 +105,7 @@ export async function loadKB(): Promise<KnowledgeBase | null> {
 }
 
 export async function saveKB(kb: KnowledgeBase): Promise<void> {
+  await fs.mkdir(path.dirname(KB_PATH), { recursive: true }).catch(() => {});
   await fs.writeFile(KB_PATH, JSON.stringify(kb), 'utf-8');
 }
 

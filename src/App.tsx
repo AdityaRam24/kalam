@@ -149,6 +149,19 @@ export function App() {
   const [customModel, setCustomModel] = useState<string>(() => localStorage.getItem('kalam_custom_model') || '');
   const [customKey, setCustomKey] = useState<string>(() => localStorage.getItem('kalam_custom_key') || '');
   const [showCustomKey, setShowCustomKey] = useState<boolean>(false);
+  // Deployment defaults (Helm llm.* values) fill in only what this browser has
+  // never chosen; an explicit choice in Settings always wins.
+  useEffect(() => {
+    fetch('/api/llm/defaults')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { provider?: 'gemini' | 'local'; localUrl?: string; localModel?: string } | null) => {
+        if (!d) return;
+        if (d.provider && !localStorage.getItem('kalam_llm_provider')) setProvider(d.provider);
+        if (d.localUrl && !localStorage.getItem('kalam_local_url')) setLocalUrl(d.localUrl);
+        if (d.localModel && !localStorage.getItem('kalam_local_model')) setLocalModel(d.localModel);
+      })
+      .catch(() => {});
+  }, []);
   // Model discovery for the custom endpoint (works with any OpenAI-compatible API)
   const [customModels, setCustomModels] = useState<string[]>([]);
   const [customDetectMsg, setCustomDetectMsg] = useState<string>('');

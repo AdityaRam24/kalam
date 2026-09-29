@@ -4,6 +4,11 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ include "kalam.fullname" . }}-data
   labels: {{- include "kalam.labels" . | nindent 4 }}
+  annotations:
+    # The VM inventory, KB and history outlive `helm uninstall`; a reinstall
+    # under the same release picks the volume back up. uninstall.sh --purge
+    # is what deletes it.
+    helm.sh/resource-policy: keep
 spec:
   accessModes: [{{ .Values.persistence.accessMode }}]
   resources:
