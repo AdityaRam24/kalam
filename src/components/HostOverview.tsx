@@ -144,7 +144,7 @@ export const HostOverview: React.FC<Props> = ({ data, loading, busyUnit, onRefre
         <span><Clock size={11} style={{ verticalAlign: -1 }} /> up {data.uptime || '—'}{data.bootedAt ? ` · since ${data.bootedAt}` : ''}</span>
         {data.timezone && <span>{data.timezone}</span>}
         {data.journalDisk && <span>journal {data.journalDisk}</span>}
-        <span className={`badge ${data.runsAsRoot ? 'success' : 'warning'}`}>{data.runsAsRoot ? 'root' : 'not root'}</span>
+        <span className={`badge badge-lc ${data.runsAsRoot ? 'success' : 'warning'}`}>{data.runsAsRoot ? 'root' : 'not root'}</span>
       </div>
 
       {/* Resource tiles */}

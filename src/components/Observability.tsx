@@ -20,8 +20,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, Cpu, Database, Gauge, HardDrive, RefreshCw,
-  Server, Thermometer, Zap, CheckCircle2, CircleSlash,
+  Server, Thermometer, Zap, CheckCircle2, CircleSlash, Search, Download, Copy, Check, ChevronDown, ChevronRight,
 } from 'lucide-react';
+import ClusterMetrics from './ClusterMetrics';
+import { downloadText, stamp, toCsv } from '../lib/health';
 
 // ── Palette ─────────────────────────────────────────────────────────────────
 // Validated with the dataviz palette checker against Kalam's own surfaces
@@ -340,6 +342,11 @@ const SEV_LEVEL: Record<Severity, Level> = { critical: 'critical', warning: 'war
 const IssueCard: React.FC<{ issue: Issue }> = ({ issue }) => {
   const tok = LEVEL_TOKEN[SEV_LEVEL[issue.severity]];
   const kinds = Array.from(new Set(issue.evidence.map((e) => e.kind)));
+  const [more, setMore] = useState(false);
+  const [copied, setCopied] = useState('');
+  const copy = (c: string) => {
+    navigator.clipboard?.writeText(c).then(() => { setCopied(c); setTimeout(() => setCopied(''), 1400); }).catch(() => {});
+  };
   return (
     <div style={{
       border: '1px solid var(--border-color)', borderLeft: `3px solid ${tok.color}`,
@@ -364,7 +371,7 @@ const IssueCard: React.FC<{ issue: Issue }> = ({ issue }) => {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-        {issue.evidence.slice(0, 4).map((e, i) => (
+        {issue.evidence.slice(0, more ? undefined : 4).map((e, i) => (
           <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 7, fontSize: 11 }}>
             <span style={{
               fontSize: 9.5, color: 'var(--text-muted)', minWidth: 96,
@@ -381,6 +388,28 @@ const IssueCard: React.FC<{ issue: Issue }> = ({ issue }) => {
           </div>
         ))}
       </div>
+
+      {(issue.evidence.length > 4 || issue.checks.length > 0) && (
+        <button type="button" onClick={() => setMore((m) => !m)}
+          style={{ marginTop: 6, background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 10.5, color: 'var(--hpe-green)', display: 'flex', alignItems: 'center', gap: 3 }}>
+          {more ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          {more ? 'Less' : `${issue.evidence.length > 4 ? `${issue.evidence.length - 4} more signals · ` : ''}${issue.checks.length} check${issue.checks.length === 1 ? '' : 's'} to run`}
+        </button>
+      )}
+
+      {more && issue.checks.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>read-only commands to run next</div>
+          {issue.checks.map((c) => (
+            <div key={c} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 3 }}>
+              <code style={{ flex: 1, fontSize: 11, color: 'var(--text-secondary)', background: 'var(--code-bg, var(--bg-secondary))', padding: '3px 7px', borderRadius: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{c}</code>
+              <button type="button" className="icon-btn secondary" style={{ padding: 4 }} onClick={() => copy(c)} title="Copy">
+                {copied === c ? <Check size={11} /> : <Copy size={11} />}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {issue.units.length > 0 && (
         <div style={{ marginTop: 7, fontSize: 10, color: 'var(--text-muted)' }}>
@@ -406,8 +435,24 @@ const LevelChip: React.FC<{ level: Level }> = ({ level }) => {
 
 // ── Page ────────────────────────────────────────────────────────────────────
 
-const Observability: React.FC = () => {
+interface ObservabilityProps {
+  /** The app's current cluster data, for the Kubernetes resource panel. */
+  k8sResources?: { pods: any[]; nodes: any[] };
+  source?: string;
+  vmNames?: string[];
+}
+
+type SortKey = 'attention' | 'name' | 'cpuPct' | 'memUsedPct' | 'diskUsedPct' | 'gpuUtilPct';
+
+const Observability: React.FC<ObservabilityProps> = ({ k8sResources, source = 'local', vmNames = [] }) => {
   const [rangeMin, setRangeMin] = useState(60);
+  const [hostQuery, setHostQuery] = useState('');
+  const [levelFilter, setLevelFilter] = useState<'all' | 'attention' | 'down'>('all');
+  const [sortKey, setSortKey] = useState<SortKey>('attention');
+  const [openHosts, setOpenHosts] = useState<Set<string>>(new Set());
+  const [allIssues, setAllIssues] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [overlayMetric, setOverlayMetric] = useState('cpuPct');
   const [status, setStatus] = useState<any>(null);
   const [latest, setLatest] = useState<Record<string, HostLatest>>({});
@@ -434,6 +479,7 @@ const Observability: React.FC = () => {
       setLatest(lt.hosts || {});
       setSeriesByHost(se.hosts || {});
       setInsight(ins.hosts || {});
+      setUpdatedAt(new Date());
       setError('');
     } catch (e: any) {
       setError(e?.message || 'Could not reach the Kalam backend.');
@@ -444,9 +490,10 @@ const Observability: React.FC = () => {
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
-    const id = setInterval(() => void load(), 30000);
+    if (!autoRefresh) return;
+    const id = setInterval(() => { if (!document.hidden) void load(); }, 30000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, autoRefresh]);
 
   const sampleNow = async () => {
     setSampling(true);
@@ -501,6 +548,31 @@ const Observability: React.FC = () => {
     }));
   }, [hosts, latest, seriesByHost, overlayMetric, seriesColors]);
 
+  const visibleHosts = useMemo(() => {
+    const q = hostQuery.trim().toLowerCase();
+    const rank = (h: string) => (latest[h]?.level === 'critical' ? 0 : latest[h]?.level === 'warn' ? 1 : !latest[h]?.reachable ? 2 : 3);
+    const val = (h: string, k: string) => latest[h]?.values?.[k]?.v ?? -1;
+    return hosts
+      .filter((h) => !q || h.toLowerCase().includes(q))
+      .filter((h) => levelFilter === 'all'
+        || (levelFilter === 'attention' && (latest[h]?.level === 'warn' || latest[h]?.level === 'critical'))
+        || (levelFilter === 'down' && !latest[h]?.reachable))
+      .sort((a, b) => sortKey === 'name' ? a.localeCompare(b)
+        : sortKey === 'attention' ? rank(a) - rank(b) || a.localeCompare(b)
+          : val(b, sortKey) - val(a, sortKey) || a.localeCompare(b));
+  }, [hosts, latest, hostQuery, levelFilter, sortKey]);
+
+  const exportCsv = () => {
+    const ids = metrics.map((m) => m.id);
+    const header = ['Host', 'Level', 'Reachable', 'Sampled at', 'CPUs', 'GPUs', 'Uptime', 'Fullest mount', ...metrics.map((m) => `${m.label}${m.unit ? ` (${m.unit})` : ''}`)];
+    const body = hosts.map((h) => {
+      const x = latest[h];
+      return [h, x.level, x.reachable ? 'yes' : 'no', x.at || '', x.cpus ?? '', x.gpus, fmtUptime(x.uptimeSec),
+        x.fullest ? `${x.fullest.mount} ${x.fullest.usePct.toFixed(0)}%` : '', ...ids.map((id) => x.values?.[id]?.v ?? '')];
+    });
+    downloadText(toCsv([header, ...body]), `kalam-observability-${stamp()}.csv`, 'text/csv');
+  };
+
   const pollerOn = !!status?.enabled;
   const accent = isDark ? SERIES_DARK[0] : SERIES_LIGHT[0];
 
@@ -530,6 +602,19 @@ const Observability: React.FC = () => {
           }}>
           <RefreshCw size={12} style={{ animation: sampling ? 'spin 1s linear infinite' : undefined }} />
           {sampling ? 'Sampling…' : 'Sample now'}
+        </button>
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+          <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> Auto-refresh (30s)
+        </label>
+        {updatedAt && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>updated {updatedAt.toLocaleTimeString()}</span>}
+        <button onClick={exportCsv} disabled={!hosts.length}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6, background: 'var(--bg-tertiary)',
+            border: '1px solid var(--border-color)', borderRadius: 7, padding: '6px 12px',
+            fontSize: 11, color: 'var(--text-secondary)', cursor: hosts.length ? 'pointer' : 'default',
+          }}>
+          <Download size={12} /> Export CSV
         </button>
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 7, fontSize: 11,
@@ -564,6 +649,11 @@ const Observability: React.FC = () => {
                   sub={fleet.worstHost?.fullest ? `${fleet.worstHost.fullest.mount}` : undefined} />
       </div>
 
+      {/* ── Kubernetes: CPU / memory / GPU used and requested, per node ── */}
+      {k8sResources && (k8sResources.nodes || []).length > 0 && (
+        <ClusterMetrics k8sResources={k8sResources} source={source} vmNames={vmNames} />
+      )}
+
       {/* ── What needs attention: the fused view ── */}
       <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: 10, padding: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -583,11 +673,12 @@ const Observability: React.FC = () => {
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {fleetIssues.slice(0, 8).map((i) => <IssueCard key={i.id} issue={i} />)}
+            {fleetIssues.slice(0, allIssues ? undefined : 8).map((i) => <IssueCard key={i.id} issue={i} />)}
             {fleetIssues.length > 8 && (
-              <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
-                +{fleetIssues.length - 8} more
-              </div>
+              <button type="button" onClick={() => setAllIssues((a) => !a)}
+                style={{ alignSelf: 'flex-start', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 11, color: 'var(--hpe-green)' }}>
+                {allIssues ? 'Show the top 8 only' : `Show all ${fleetIssues.length} issues`}
+              </button>
             )}
           </div>
         )}
@@ -640,10 +731,46 @@ const Observability: React.FC = () => {
           To record continuously, start Kalam with <code>KALAM_METRICS=1</code>.
         </div>
       ) : (
+        <>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <h3 style={{ margin: 0, fontSize: 13, color: 'var(--text-heading)', fontWeight: 600 }}>Hosts</h3>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{visibleHosts.length} of {hosts.length}</span>
+          <div style={{ display: 'flex', background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 7, overflow: 'hidden' }}>
+            {([['all', 'All'], ['attention', 'Need attention'], ['down', 'Unreachable']] as const).map(([k, label]) => (
+              <button key={k} onClick={() => setLevelFilter(k)}
+                style={{
+                  background: levelFilter === k ? 'var(--bg-hover)' : 'transparent',
+                  color: levelFilter === k ? 'var(--text-primary)' : 'var(--text-muted)',
+                  border: 'none', padding: '5px 10px', fontSize: 11, cursor: 'pointer', fontWeight: 600,
+                }}>{label}</button>
+            ))}
+          </div>
+          <select value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)}
+            style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', fontSize: 11, border: '1px solid var(--border-color)', borderRadius: 6, padding: '4px 8px' }}>
+            <option value="attention">Sort: most affected first</option>
+            <option value="name">Sort: name</option>
+            <option value="cpuPct">Sort: CPU</option>
+            <option value="memUsedPct">Sort: memory</option>
+            <option value="diskUsedPct">Sort: disk</option>
+            <option value="gpuUtilPct">Sort: GPU</option>
+          </select>
+          <div style={{ position: 'relative', marginLeft: 'auto' }}>
+            <Search size={12} style={{ position: 'absolute', left: 8, top: 7, color: 'var(--text-muted)' }} />
+            <input value={hostQuery} onChange={(e) => setHostQuery(e.target.value)} placeholder="Find a host…"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', fontSize: 11.5, border: '1px solid var(--border-color)', borderRadius: 6, padding: '5px 8px 5px 26px', width: 190 }} />
+          </div>
+        </div>
+        {visibleHosts.length === 0 && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No host matches these filters.</div>
+        )}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
-          {hosts.map((h) => {
+          {visibleHosts.map((h) => {
             const host = latest[h];
             const hostSeries = seriesByHost[h]?.series || {};
+            const isOpen = openHosts.has(h);
+            // Everything sampled for this host beyond the four card metrics.
+            const extra = metrics.filter((m) => !(CARD_METRICS as readonly string[]).includes(m.id)
+              && ((host.values?.[m.id]?.v ?? null) !== null || (hostSeries[m.id] || []).some((p) => p.v !== null)));
             return (
               <div key={h} style={{
                 background: 'var(--bg-card)', border: '1px solid var(--border-color)',
@@ -686,16 +813,43 @@ const Observability: React.FC = () => {
                       </div>
                     );
                   })}
+                  {isOpen && extra.map((meta) => {
+                    const cur = host.values?.[meta.id];
+                    const Icon = METRIC_ICON[meta.id] || Activity;
+                    return (
+                      <div key={meta.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 5, width: 74, fontSize: 10.5, color: 'var(--text-secondary)' }} title={meta.label}>
+                          <Icon size={11} /> <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{meta.label}</span>
+                        </span>
+                        <span style={{
+                          width: 52, textAlign: 'right', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums',
+                          color: cur && cur.level !== 'ok' && cur.level !== 'unknown' ? LEVEL_TOKEN[cur.level].color : 'var(--text-primary)',
+                        }}>
+                          {fmt(cur?.v ?? null, meta.unit)}
+                        </span>
+                        <Sparkline points={hostSeries[meta.id] || []} color={accent} ratio={meta.ratio} />
+                      </div>
+                    );
+                  })}
                   {host.fullest && (
                     <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
                       fullest mount {host.fullest.mount} at {host.fullest.usePct.toFixed(0)}%
                     </div>
+                  )}
+                  {extra.length > 0 && (
+                    <button type="button"
+                      onClick={() => setOpenHosts((cur) => { const n = new Set(cur); if (n.has(h)) n.delete(h); else n.add(h); return n; })}
+                      style={{ alignSelf: 'flex-start', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 10.5, color: 'var(--hpe-green)', display: 'flex', alignItems: 'center', gap: 3 }}>
+                      {isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                      {isOpen ? 'Fewer metrics' : `${extra.length} more metric${extra.length === 1 ? '' : 's'} (load, swap, GPU memory/temp/power…)`}
+                    </button>
                   )}
                 </div>
               </div>
             );
           })}
         </div>
+        </>
       )}
     </div>
   );

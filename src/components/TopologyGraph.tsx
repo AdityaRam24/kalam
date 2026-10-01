@@ -40,7 +40,10 @@ import {
   Box,
   Server,
   Network,
-  History
+  History,
+  Sun,
+  Moon,
+  Camera
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { canvasSignature } from '../lib/topology';
@@ -51,6 +54,8 @@ import {
   type Relation,
 } from '../lib/relations';
 import { layoutCluster, orderPods, CARD_H } from '../lib/layout';
+import { podHealthOf, workloadHealthOf, podStatusText } from '../lib/health';
+import { captureElement, captureName, downloadDataUrl } from '../lib/capture';
 
 interface Container {
   id: string;
@@ -82,7 +87,36 @@ interface TopologyGraphProps {
   source?: string;
   onSourceChange?: (source: string) => void;
   sources?: Array<{ name: string; label: string }>;
+  /** Namespace selected on first load when it exists (e.g. kube-system on the dashboard). */
+  defaultNamespace?: string;
 }
+
+// Map colour schemes. The dark values are exactly the literals the map was
+// drawn with before themes existed, so dark mode is unchanged; every neutral
+// colour on the canvas, cards, toolbar and drawer reads one of these.
+const TOPO_THEMES: Record<'dark' | 'light', Record<string, string>> = {
+  dark: {},
+  light: {
+    '--tp-text': '#0f172a', '--tp-text-2': '#1e293b', '--tp-text-3': '#334155', '--tp-muted': '#475569',
+    '--tp-badge-red': '#b91c1c', '--tp-badge-amber': '#b45309', '--tp-badge-rose': '#be123c', '--tp-ns': '#1d4ed8',
+    '--tp-w012': 'rgba(15, 23, 42, 0.025)', '--tp-w02': 'rgba(15, 23, 42, 0.04)', '--tp-w03': 'rgba(15, 23, 42, 0.06)',
+    '--tp-w04': 'rgba(15, 23, 42, 0.05)', '--tp-w05': 'rgba(15, 23, 42, 0.1)', '--tp-w06': 'rgba(15, 23, 42, 0.12)',
+    '--tp-w07': 'rgba(15, 23, 42, 0.14)', '--tp-w08': 'rgba(15, 23, 42, 0.16)', '--tp-w10': 'rgba(15, 23, 42, 0.18)',
+    '--tp-ink40': '#f1f5f9', '--tp-ink50': '#f1f5f9', '--tp-ink60': '#ffffff',
+    '--tp-panel': 'rgba(241, 245, 249, 0.9)', '--tp-label-bg': 'rgba(255, 255, 255, 0.94)',
+    '--tp-drawer': 'rgba(255, 255, 255, 0.98)', '--tp-card': '#ffffff', '--tp-chrome': '#ffffff',
+    '--tp-canvas': 'radial-gradient(ellipse at 20% 30%, #ffffff, #eef2f7)',
+    '--tp-canvas-full': 'radial-gradient(ellipse at 30% 20%, #ffffff, #e8edf4)',
+  },
+};
+// Colours that end up in SVG attributes, where CSS variables do not apply.
+const TOPO_SVG: Record<'dark' | 'light', { dots: string; mask: string; hover: string }> = {
+  dark: { dots: 'rgba(255,255,255,0.03)', mask: 'rgba(2, 6, 23, 0.75)', hover: '#e2e8f0' },
+  light: { dots: 'rgba(15,23,42,0.14)', mask: 'rgba(226, 232, 240, 0.7)', hover: '#0f172a' },
+};
+
+// How often Live monitoring re-reads the cluster.
+const LIVE_INTERVALS = [10, 30, 60, 120];
 
 // Canvas node ids. Built in exactly one place so that "which card is this?"
 // stays a lookup instead of a string-parsing guess (namespaces contain dashes).
@@ -116,7 +150,7 @@ function relationToEdge(r: Relation): Edge {
     // it is drawn fainter and says so, rather than passing as the real thing.
     label: r.inferred ? `${st.label}?` : st.label,
     labelStyle: { fill: st.labelColor, fontSize: 8, fontWeight: 600, fontFamily: 'Outfit, sans-serif', letterSpacing: '0.05em', opacity: 0 },
-    labelBgStyle: { fill: 'rgba(15, 23, 42, 0.85)', strokeWidth: 0 },
+    labelBgStyle: { fill: 'var(--tp-label-bg, rgba(15, 23, 42, 0.85))', strokeWidth: 0 },
     labelBgPadding: [4, 2] as [number, number],
     labelBgBorderRadius: 4,
     style: {
@@ -156,7 +190,7 @@ function formatAge(creationTime: string | number | undefined): string {
 const MetaRow = memo(({ label, value, mono, narrow }: { label: string; value: string | number; mono?: boolean; narrow?: boolean }) => (
   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
     <span style={{ color: '#64748b', fontSize: '10px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em', flexShrink: 0 }}>{label}</span>
-    <span style={{ color: '#e2e8f0', fontSize: '10.5px', fontWeight: 500, fontFamily: mono ? 'JetBrains Mono, monospace' : 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: narrow ? '50px' : '105px', textAlign: 'right' }} title={String(value)}>{value}</span>
+    <span style={{ color: 'var(--tp-text-2, #e2e8f0)', fontSize: '10.5px', fontWeight: 500, fontFamily: mono ? 'JetBrains Mono, monospace' : 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: narrow ? '50px' : '105px', textAlign: 'right' }} title={String(value)}>{value}</span>
   </div>
 ));
 MetaRow.displayName = 'MetaRow';
@@ -167,13 +201,13 @@ MetaRow.displayName = 'MetaRow';
 const StatChip = memo(({ color, label, value, warn }: { color: string; label: string; value: string; warn?: boolean }) => (
   <div style={{
     display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 8,
-    background: warn ? 'rgba(244, 63, 94, 0.12)' : 'rgba(2, 6, 23, 0.5)',
-    border: `1px solid ${warn ? 'rgba(244, 63, 94, 0.4)' : 'rgba(255,255,255,0.07)'}`,
+    background: warn ? 'rgba(244, 63, 94, 0.12)' : 'var(--tp-ink50, rgba(2, 6, 23, 0.5))',
+    border: `1px solid ${warn ? 'rgba(244, 63, 94, 0.4)' : 'var(--tp-w07, rgba(255,255,255,0.07))'}`,
     fontSize: 11.5, fontFamily: 'Outfit, sans-serif', whiteSpace: 'nowrap'
   }}>
     <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 5px ${color}`, flexShrink: 0 }} />
-    <span style={{ color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', fontSize: 9.5 }}>{label}</span>
-    <span style={{ color: warn ? '#fda4af' : '#f1f5f9', fontWeight: 700 }}>{value}</span>
+    <span style={{ color: 'var(--tp-muted, #94a3b8)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', fontSize: 9.5 }}>{label}</span>
+    <span style={{ color: warn ? 'var(--tp-badge-rose, #fda4af)' : 'var(--tp-text, #f1f5f9)', fontWeight: 700 }}>{value}</span>
   </div>
 ));
 // Drawer text helpers. Module level so selecting a card does not rebuild every
@@ -221,7 +255,13 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
   let statusDotColor = '#10b981'; // default green
   let ledMode: 'glow' | 'blink-fast' | 'blink-slow' | 'off' = 'glow';
 
-  if (statusText) {
+  if (data.health) {
+    // Server-derived health (kubectl STATUS semantics) beats guessing from words.
+    if (data.health === 'failing') { accentColor = '#f43f5e'; statusDotColor = '#f43f5e'; ledMode = 'blink-fast'; }
+    else if (data.health === 'progressing') { accentColor = '#fbbf24'; statusDotColor = '#fbbf24'; ledMode = 'blink-slow'; }
+    else if (data.health === 'completed') { accentColor = '#64748b'; statusDotColor = '#64748b'; ledMode = 'off'; }
+    else if (data.health === 'healthy') { statusDotColor = '#10b981'; ledMode = 'glow'; }
+  } else if (statusText) {
     const sLower = statusText.toLowerCase();
     if (sLower.includes('running') || sLower === 'ready') {
       statusDotColor = '#10b981';
@@ -299,11 +339,11 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
         boxSizing: 'border-box',
         display: 'flex',
         alignItems: 'stretch',
-        background: 'rgba(13, 17, 23, 0.92)',
+        background: 'var(--tp-card, rgba(13, 17, 23, 0.92))',
         borderRadius: '10px',
-        border: `1px solid ${isHighlighted ? accentColor + '60' : 'rgba(255,255,255,0.07)'}`,
+        border: `1px solid ${isHighlighted ? accentColor + '60' : 'var(--tp-w07, rgba(255,255,255,0.07))'}`,
         boxShadow,
-        color: '#f8fafc',
+        color: 'var(--tp-text, #f8fafc)',
         fontFamily: 'Outfit, sans-serif',
         transition: 'border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease',
         transform: isHighlighted ? 'translateY(-1px)' : 'none',
@@ -323,7 +363,7 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
         <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: isPortType ? 0 : '7px' }}>
           <theme.icon size={isPortType ? 13 : 15} strokeWidth={2.25} style={{ color: accentColor, flexShrink: 0 }} />
           <div style={{ flexGrow: 1, overflow: 'hidden', minWidth: 0 }}>
-            <div style={{ fontSize: isPortType ? '10px' : '11.5px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: 1.25, color: '#f1f5f9' }} title={name}>
+            <div style={{ fontSize: isPortType ? '10px' : '11.5px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: 1.25, color: 'var(--tp-text, #f1f5f9)' }} title={name}>
               {isPortType ? `:${data.hostPort}` : name}
             </div>
             {!isPortType && (
@@ -337,7 +377,7 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
             <span
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: '2px',
-                color: '#fde68a', fontSize: '9px', fontWeight: 700,
+                color: 'var(--tp-badge-amber, #fde68a)', fontSize: '9px', fontWeight: 700,
                 background: 'rgba(245, 158, 11, 0.2)', border: '1px solid rgba(245, 158, 11, 0.35)',
                 padding: '1px 5px', borderRadius: '6px', flexShrink: 0
               }}
@@ -350,7 +390,7 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
           {restarts > 0 && (
             <span style={{
               display: 'inline-flex', alignItems: 'center', gap: '2px',
-              color: '#fecaca', fontSize: '9px', fontWeight: 700,
+              color: 'var(--tp-badge-red, #fecaca)', fontSize: '9px', fontWeight: 700,
               background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.3)',
               padding: '1px 5px', borderRadius: '6px', flexShrink: 0
             }} title={`${restarts} restarts`}>
@@ -407,7 +447,8 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
             )}
             {type === 'deployment' && (
               <>
-                <MetaRow narrow={isPortType} label="Ready" value={`${ready} / ${replicas}`} />
+                <MetaRow narrow={isPortType} label="Ready" value={String(ready ?? `? / ${replicas}`)} />
+                {showMeta && status && <MetaRow narrow={isPortType} label="Status" value={status} />}
                 {showMeta && <MetaRow narrow={isPortType} label="Available" value={data.available} />}
               </>
             )}
@@ -503,7 +544,7 @@ const GroupNode = memo(({ data, style }: any) => {
   const isDocker = data.label?.includes('Docker');
   const isNs = data.label?.startsWith('ns:');
 
-  let borderColor = 'rgba(255,255,255,0.07)';
+  let borderColor = 'var(--tp-w07, rgba(255,255,255,0.07))';
   let iconSize = '11px';
 
   if (isK8s) {
@@ -526,7 +567,7 @@ const GroupNode = memo(({ data, style }: any) => {
         pointerEvents: 'none',
         borderRadius: isNs ? '10px' : '14px',
         border: `1px solid ${borderColor}`,
-        background: isNs ? 'transparent' : 'rgba(255,255,255,0.012)',
+        background: isNs ? 'transparent' : 'var(--tp-w012, rgba(255,255,255,0.012))',
         overflow: 'hidden'
       }}
     >
@@ -545,12 +586,12 @@ const GroupNode = memo(({ data, style }: any) => {
         }}
       >
         {data.icon && (
-          <data.icon size={parseInt(iconSize, 10) + 2} strokeWidth={2.25} style={{ color: data.textColor || '#94a3b8', flexShrink: 0 }} />
+          <data.icon size={parseInt(iconSize, 10) + 2} strokeWidth={2.25} style={{ color: data.textColor || 'var(--tp-muted, #94a3b8)', flexShrink: 0 }} />
         )}
         <span style={{
           fontSize: iconSize,
           fontWeight: 800,
-          color: data.textColor || '#94a3b8',
+          color: data.textColor || 'var(--tp-muted, #94a3b8)',
           fontFamily: 'Outfit, sans-serif',
           letterSpacing: '0.06em',
           textTransform: 'uppercase'
@@ -630,6 +671,7 @@ const FlowEdge = memo(({
               whiteSpace: 'nowrap',
               transition: 'opacity 0.2s ease',
               ...(labelStyle as React.CSSProperties),
+              color: (labelStyle as any)?.fill,
               background: (labelBgStyle as any)?.fill,
               padding: labelBgPadding ? `${labelBgPadding[0]}px ${labelBgPadding[1]}px` : undefined,
               borderRadius: labelBgBorderRadius
@@ -662,7 +704,7 @@ const nodeTypes = {
 
 const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   containers, k8sResources, onRefresh,
-  source: sourceProp, onSourceChange, sources: sourcesProp,
+  source: sourceProp, onSourceChange, sources: sourcesProp, defaultNamespace,
 }) => {
   const { fitView } = useReactFlow();
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -675,6 +717,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   // key -> last recorded change, for the "recently changed" overlay.
   const [changeIndex, setChangeIndex] = useState<Record<string, { count: number; lastAt: string; kind: string; severity: string; summary: string }>>({});
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [mapTheme, setMapTheme] = useState<'dark' | 'light'>(() => {
+    try { return localStorage.getItem('kalam_topology_theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('kalam_topology_theme', mapTheme); } catch { /* storage unavailable */ }
+  }, [mapTheme]);
+  const svgColors = TOPO_SVG[mapTheme];
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [capturing, setCapturing] = useState(false);
 
   // ── Source selector: this machine, or any SSH-connected VM / node ──
   // `controlled` means the app above is doing the fetching for the chosen
@@ -691,8 +742,20 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   const [remoteBusy, setRemoteBusy] = useState(false);
   const [remoteErr, setRemoteErr] = useState('');
 
-  // ── Live mode + problems-only focus + layout engine ──
-  const [live, setLive] = useState(false);
+  // ── Sampling + problems-only focus + layout engine ──
+  //
+  // Two ways to watch the map, because they trade freshness for cost:
+  //   'snapshot' (default) — the map is a still picture of one read. Nothing
+  //       re-lays out or re-renders until "Sample now" takes a new picture, so
+  //       a large cluster stays smooth and the layout never shifts under you.
+  //   'live' — follows every refresh and re-reads on a timer. Fresh, but each
+  //       read re-queries the whole cluster (over SSH for remote sources) and
+  //       re-lays out the graph, so it is opt-in behind a warning.
+  const [sampleMode, setSampleMode] = useState<'snapshot' | 'live'>('snapshot');
+  const live = sampleMode === 'live';
+  const [liveEvery, setLiveEvery] = useState(30);
+  const [liveConfirm, setLiveConfirm] = useState<number | null>(null);
+  const [sampling, setSampling] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [problemsOnly, setProblemsOnly] = useState(false);
   const [layoutMode, setLayoutMode] = useState<'columns' | 'auto'>('columns');
@@ -778,27 +841,96 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   const onRefreshRef = useRef(onRefresh);
   useEffect(() => { onRefreshRef.current = onRefresh; }, [onRefresh]);
 
+  // One read of the active source: the parent's refresh, or our own SSH fetch.
+  const readSource = useCallback(async () => {
+    if (controlled || source === 'local') await onRefreshRef.current?.();
+    else await fetchRemote(source, true);
+    setLastRefresh(new Date());
+  }, [controlled, source, fetchRemote]);
+
   useEffect(() => {
     if (!live) return;
-    const tick = async () => {
-      if (controlled || source === 'local') { await onRefreshRef.current?.(); setLastRefresh(new Date()); }
-      else await fetchRemote(source, true);
-    };
-    const id = setInterval(tick, 8000);
+    const id = setInterval(() => { if (!document.hidden) void readSource(); }, liveEvery * 1000);
     return () => clearInterval(id);
-  }, [live, controlled, source, fetchRemote]);
+  }, [live, liveEvery, readSource]);
 
-  // Effective data feeding the graph. In controlled mode the props already hold
-  // the selected source's snapshot; otherwise local props or our own remote fetch.
-  const rawEffContainers = controlled || source === 'local' ? containers : (remote?.containers || []);
-  const rawEffK8s = controlled || source === 'local' ? k8sResources : (remote?.k8s || { pods: [], services: [], deployments: [], nodes: [] });
+  // What the source looks like right now. In controlled mode the props already
+  // hold the selected source's data; otherwise local props or our remote fetch.
+  const liveContainers = controlled || source === 'local' ? containers : (remote?.containers || []);
+  const liveK8s = controlled || source === 'local' ? k8sResources : (remote?.k8s || { pods: [], services: [], deployments: [], nodes: [] });
+  const liveRef = useRef({ containers: liveContainers, k8s: liveK8s });
+  liveRef.current = { containers: liveContainers, k8s: liveK8s };
+
+  // ── Snapshot ("Sample now") ──
+  const makeSample = useCallback(() => {
+    const { containers: c, k8s } = liveRef.current;
+    return { containers: c, k8s, sig: canvasSignature(c, k8s), at: new Date() };
+  }, []);
+  const [frozen, setFrozen] = useState(makeSample);
+  const isEmpty = (c: Container[], k: K8sResources) =>
+    !c.length && !k.pods.length && !k.nodes.length && !k.services.length && !k.deployments.length;
+  const frozenEmpty = isEmpty(frozen.containers, frozen.k8s);
+  // After a source switch the snapshot waits for that source's data to land.
+  const [resampleFrom, setResampleFrom] = useState<string | null>(null);
+  const resampleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // In a steady snapshot nothing about the live data is even fingerprinted —
+  // polls from the rest of the app cost the map nothing at all.
+  const watchLive = live || resampleFrom !== null || frozenEmpty;
+  const liveSig = watchLive ? canvasSignature(liveContainers, liveK8s) : '';
+
+  const firstSource = useRef(true);
+  useEffect(() => {
+    if (firstSource.current) { firstSource.current = false; return; }
+    const { containers: c, k8s } = liveRef.current;
+    setResampleFrom(canvasSignature(c, k8s));
+    clearTimeout(resampleTimer.current);
+    // Fallback: a source whose data happens to look identical still gets sampled.
+    resampleTimer.current = setTimeout(() => { setFrozen(makeSample()); setResampleFrom(null); }, 30_000);
+    return () => clearTimeout(resampleTimer.current);
+  }, [source, makeSample]);
+
+  useEffect(() => {
+    if (live || !liveSig) return;
+    if (resampleFrom !== null && liveSig !== resampleFrom) {
+      clearTimeout(resampleTimer.current);
+      setFrozen(makeSample());
+      setResampleFrom(null);
+    } else if (frozenEmpty && !isEmpty(liveRef.current.containers, liveRef.current.k8s)) {
+      setFrozen(makeSample());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, liveSig, resampleFrom, frozenEmpty, makeSample]);
+
+  // "Sample now": read the source, then freeze what came back. The freeze runs
+  // in an effect so it sees the props that read produced, not the old ones.
+  const [sampleToken, setSampleToken] = useState(0);
+  useEffect(() => { if (sampleToken) setFrozen(makeSample()); }, [sampleToken, makeSample]);
+  const sampleNow = useCallback(async () => {
+    setSampling(true);
+    try { await readSource(); } finally {
+      setSampling(false);
+      setSampleToken((t) => t + 1);
+    }
+  }, [readSource]);
+
+  const goSnapshot = useCallback(() => { setFrozen(makeSample()); setSampleMode('snapshot'); }, [makeSample]);
+  const goLive = useCallback((every: number) => {
+    setLiveEvery(every);
+    setLiveConfirm(null);
+    setSampleMode('live');
+    void readSource();
+  }, [readSource]);
+
+  // Effective data feeding the graph: the frozen sample, or the live data.
+  const rawEffContainers = live ? liveContainers : frozen.containers;
+  const rawEffK8s = live ? liveK8s : frozen.k8s;
 
   // Every poll hands us brand-new array/object identities even when the cluster
   // has not changed at all. Feeding those straight into the layout memos rebuilt
   // the whole canvas every few seconds — the visible fluctuation. Compare by
   // what the canvas draws and keep the previous references when nothing moved,
   // so a quiet cluster produces a completely still graph.
-  const dataSig = canvasSignature(rawEffContainers, rawEffK8s);
+  const dataSig = live ? liveSig : frozen.sig;
   const stableData = useRef({ sig: dataSig, containers: rawEffContainers, k8s: rawEffK8s });
   if (stableData.current.sig !== dataSig) {
     stableData.current = { sig: dataSig, containers: rawEffContainers, k8s: rawEffK8s };
@@ -851,6 +983,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     ])).sort();
   }, [effK8s]);
 
+  const nsDefaulted = useRef(false);
+  useEffect(() => {
+    if (nsDefaulted.current || !defaultNamespace) return;
+    if (namespaces.includes(defaultNamespace)) {
+      setSelectedNamespace(defaultNamespace);
+      nsDefaulted.current = true;
+    }
+  }, [namespaces, defaultNamespace]);
+
   // Construct raw nodes and edges based on filters (Namespace and Type only)
   const { nodes: rawNodes, edges: rawEdges } = useMemo(() => {
     const nsNodes: Node[] = [];
@@ -902,7 +1043,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           ? { label: g.label, icon: Container, textColor: '#38bdf8' }
           : g.kind === 'k8s'
             ? { label: g.label, icon: Network, textColor: '#a78bfa' }
-            : { label: g.label, textColor: '#93c5fd' },
+            : { label: g.label, textColor: 'var(--tp-ns, #93c5fd)' },
       });
     }
 
@@ -971,7 +1112,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                 animated: true,
                 label: 'expose',
                 labelStyle: { fill: '#818cf8', fontSize: 8, fontWeight: 600, fontFamily: 'Outfit, sans-serif', letterSpacing: '0.05em', opacity: 0 },
-                labelBgStyle: { fill: 'rgba(15, 23, 42, 0.85)', strokeWidth: 0 },
+                labelBgStyle: { fill: 'var(--tp-label-bg, rgba(15, 23, 42, 0.85))', strokeWidth: 0 },
                 labelBgPadding: [4, 2] as [number, number],
                 labelBgBorderRadius: 4,
                 style: { stroke: '#818cf8', strokeWidth: 1.5, opacity: 0.7, strokeLinecap: 'round' },
@@ -995,7 +1136,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           data: {
             type: 'k8s-node',
             name: n.name,
-            status: n.status,
+            status: n.status === 'Ready' && n.pressure?.length ? `Ready · ${n.pressure.join(', ')}` : n.status,
+            health: n.status === 'Ready' ? (n.pressure?.length || n.schedulable === false ? 'progressing' : 'healthy') : 'failing',
             role: n.role,
             ip: n.ip,
             created: n.created
@@ -1043,6 +1185,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
             name: d.name,
             namespace: ns,
             kind: d.kind || 'Deployment',
+            status: d.status,
+            health: workloadHealthOf(d),
             ready: d.ready,
             replicas: d.replicas,
             available: d.available,
@@ -1063,7 +1207,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
             type: 'pod',
             name: p.name,
             namespace: ns,
-            status: p.status,
+            status: podStatusText(p),
+            health: podHealthOf(p),
             ready: p.ready,
             ip: p.ip,
             restarts: p.restarts,
@@ -1141,7 +1286,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         ? { label: g.label, icon: Container, textColor: '#38bdf8' }
         : g.kind === 'k8s'
           ? { label: g.label, icon: Network, textColor: '#a78bfa' }
-          : { label: g.label, textColor: '#93c5fd' },
+          : { label: g.label, textColor: 'var(--tp-ns, #93c5fd)' },
     }));
 
     return [
@@ -1156,13 +1301,10 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   // ── Problems-only focus: unhealthy resources plus everything they touch ──
   const isProblemNode = useCallback((n: Node) => {
     const d: any = n.data || {};
-    if (d.type === 'pod') return (d.status && d.status !== 'Running' && d.status !== 'Succeeded') || (d.restarts || 0) >= 3;
+    if (d.type === 'pod') return d.health === 'failing' || d.health === 'progressing' || (d.restarts || 0) >= 3;
     if (d.type === 'docker') return d.state && d.state !== 'running';
-    if (d.type === 'k8s-node') return d.status && d.status !== 'Ready';
-    if (d.type === 'deployment') {
-      const [r, t] = String(d.ready ?? '').split('/').map(Number);
-      return Number.isFinite(r) && Number.isFinite(t) && r < t;
-    }
+    if (d.type === 'k8s-node') return d.health !== 'healthy';
+    if (d.type === 'deployment') return d.health === 'failing' || d.health === 'progressing';
     return false;
   }, []);
 
@@ -1255,7 +1397,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         e.preventDefault();
         searchInputRef.current?.focus();
       } else if (e.key === 'Escape') {
-        if (searchTerm) {
+        if (liveConfirm !== null) {
+          setLiveConfirm(null);
+        } else if (searchTerm) {
           setSearchTerm('');
         } else if (selectedNodeId) {
           setSelectedNodeId(null);
@@ -1266,7 +1410,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchTerm, selectedNodeId, isFullscreen]);
+  }, [searchTerm, selectedNodeId, isFullscreen, liveConfirm]);
 
   // Map raw nodes & inject states (search matching, dimming, hover states).
   //
@@ -1363,7 +1507,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       const isDimmed = !!hoveredNodeId && !isHovered;
       const isCrossPanel = edge.id.includes('pod-') && edge.id.includes('docker-') || edge.id.includes('k8snode-') && edge.id.includes('docker-');
 
-      const sig = `${isHovered}|${isDimmed}|${isCrossPanel}|${dotsOn}`;
+      const sig = `${isHovered}|${isDimmed}|${isCrossPanel}|${dotsOn}|${svgColors.hover}`;
       const cached = cache.get(edge.id);
       if (cached && cached.base === edge && cached.sig === sig) return cached.out;
 
@@ -1371,17 +1515,17 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       if (isDimmed) {
         edgeStyle.opacity = 0.06;
       } else if (isHovered) {
-        edgeStyle.stroke = '#e2e8f0'; // bright white glow on hover
+        edgeStyle.stroke = svgColors.hover; // high-contrast glow on hover (white on dark, ink on light)
         edgeStyle.strokeWidth = 2.5;
         edgeStyle.opacity = 0.9;
-        edgeStyle.filter = 'drop-shadow(0 0 4px rgba(226, 232, 240, 0.5))';
+        edgeStyle.filter = mapTheme === 'light' ? 'drop-shadow(0 0 3px rgba(15, 23, 42, 0.35))' : 'drop-shadow(0 0 4px rgba(226, 232, 240, 0.5))';
       } else if (isCrossPanel) {
         edgeStyle.opacity = 0.12;
       }
 
       let markerEnd = edge.markerEnd;
       if (isHovered) {
-        markerEnd = typeof markerEnd === 'object' ? { ...markerEnd, color: '#e2e8f0' } : markerEnd;
+        markerEnd = typeof markerEnd === 'object' ? { ...markerEnd, color: svgColors.hover } : markerEnd;
       }
 
       // Update label visibility on hover/dim
@@ -1390,7 +1534,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         labelStyle.opacity = 0.1;
       } else if (isHovered && labelStyle) {
         labelStyle.opacity = 1;
-        labelStyle.fill = '#f1f5f9';
+        labelStyle.fill = 'var(--tp-text, #f1f5f9)';
       }
 
       const built: Edge = {
@@ -1410,7 +1554,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     if (prev.length === out.length && prev.every((e, i) => e === out[i])) return prev;
     prevFlowEdges.current = out;
     return out;
-  }, [rawEdges, problemVisibleIds, hoveredNodeId, motion, prefersReducedMotion]);
+  }, [rawEdges, problemVisibleIds, hoveredNodeId, motion, prefersReducedMotion, svgColors.hover, mapTheme]);
 
   // Bind node click to open details drawer
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -1579,6 +1723,21 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     URL.revokeObjectURL(url);
   }, []);
 
+  // PNG of the canvas exactly as drawn — current zoom, theme and filters.
+  const captureMap = useCallback(async () => {
+    const el = canvasRef.current;
+    if (!el) return;
+    setCapturing(true);
+    try {
+      const bg = mapTheme === 'light' ? '#f8fafc' : '#0b1020';
+      downloadDataUrl(await captureElement(el, { background: bg }), captureName(`topology-${source}`));
+    } catch (e) {
+      console.error('Map capture failed', e);
+    } finally {
+      setCapturing(false);
+    }
+  }, [mapTheme, source]);
+
   // Drawer action helper functions
   const fetchLogs = async () => {
     if (!selectedResource) return;
@@ -1700,7 +1859,10 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   // Cluster health roll-up for the summary bar
   const healthStats = useMemo(() => {
     const pods = effK8s.pods || [];
-    const podProblems = pods.filter(p => (p.status !== 'Running' && p.status !== 'Succeeded') || (p.restarts || 0) >= 3).length;
+    const podProblems = pods.filter(p => {
+      const h = podHealthOf(p);
+      return h === 'failing' || h === 'progressing' || (p.restarts || 0) >= 3;
+    }).length;
     const dockerRunning = effContainers.filter(c => c.state === 'running').length;
     const nodesReady = (effK8s.nodes || []).filter(n => n.status === 'Ready').length;
     return {
@@ -1728,12 +1890,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   const manifestText: string = (manifestView === 'describe' ? inspect?.describe : inspect?.yaml) || '';
 
   return (
-    <div style={{ position: 'relative', width: '100%' }}>
+    <div
+      data-map-theme={mapTheme}
+      style={{ position: 'relative', width: '100%', color: 'var(--tp-text, #f8fafc)', ...(TOPO_THEMES[mapTheme] as React.CSSProperties) }}
+    >
       {/* ─── Cluster health summary + legend ─── */}
       <div style={{
         display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
         padding: '8px 16px', marginBottom: 8, borderRadius: 10,
-        background: 'rgba(15, 23, 42, 0.4)', border: '1px solid rgba(255,255,255,0.06)'
+        background: 'var(--tp-panel, rgba(15, 23, 42, 0.4))', border: '1px solid var(--tp-w06, rgba(255,255,255,0.06))'
       }}>
         {healthStats.podProblems > 0 && (
           <StatChip color="#f43f5e" label="Problems" value={`${healthStats.podProblems} pod${healthStats.podProblems === 1 ? '' : 's'}`} warn />
@@ -1762,8 +1927,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           gap: '12px',
           alignItems: 'center',
           flexWrap: 'wrap',
-          background: 'rgba(15, 23, 42, 0.4)',
-          border: '1px solid rgba(255,255,255,0.06)',
+          background: 'var(--tp-panel, rgba(15, 23, 42, 0.4))',
+          border: '1px solid var(--tp-w06, rgba(255,255,255,0.06))',
           padding: '10px 16px',
           borderRadius: '10px',
           marginBottom: '12px',
@@ -1772,15 +1937,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       >
         {/* Source: local machine or an SSH-connected VM */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Server size={12} style={{ color: source === 'local' ? '#94a3b8' : '#01a982' }} />
+          <Server size={12} style={{ color: source === 'local' ? 'var(--tp-muted, #94a3b8)' : '#01a982' }} />
           <select
             value={source}
             onChange={(e) => setSource(e.target.value)}
             title="Which machine's topology to display — this machine, or a connected VM / cluster node"
             style={{
-              background: source === 'local' ? 'rgba(2, 6, 23, 0.6)' : 'rgba(1, 169, 130, 0.12)',
-              border: `1px solid ${source === 'local' ? 'rgba(255,255,255,0.08)' : 'rgba(1, 169, 130, 0.5)'}`,
-              borderRadius: '6px', color: '#f8fafc', padding: '6px 10px', fontSize: '12px', outline: 'none', cursor: 'pointer', fontWeight: 600
+              background: source === 'local' ? 'var(--tp-ink60, rgba(2, 6, 23, 0.6))' : 'rgba(1, 169, 130, 0.12)',
+              border: `1px solid ${source === 'local' ? 'var(--tp-w08, rgba(255,255,255,0.08))' : 'rgba(1, 169, 130, 0.5)'}`,
+              borderRadius: '6px', color: 'var(--tp-text, #f8fafc)', padding: '6px 10px', fontSize: '12px', outline: 'none', cursor: 'pointer', fontWeight: 600
             }}
           >
             {sourceOptions.map(o => <option key={o.name} value={o.name}>{o.label}</option>)}
@@ -1788,26 +1953,64 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           {remoteBusy && <RefreshCw size={12} className="animate-spin" style={{ color: '#01a982' }} />}
         </div>
 
-        {/* Live mode */}
+        {/* Sampling: a still snapshot (default) or opt-in live monitoring */}
+        <div style={{ display: 'flex', alignItems: 'center', background: 'var(--tp-ink40, rgba(2, 6, 23, 0.4))', border: '1px solid var(--tp-w06, rgba(255,255,255,0.06))', borderRadius: '6px', overflow: 'hidden' }}>
+          <button
+            onClick={() => { if (live) goSnapshot(); else void sampleNow(); }}
+            disabled={sampling}
+            title={live
+              ? 'Stop live monitoring and freeze the map on its current state'
+              : 'Read the cluster once and redraw the map from that one sample — fastest and most stable'}
+            style={{
+              background: !live ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+              color: !live ? '#38bdf8' : 'var(--tp-muted, #94a3b8)',
+              border: 'none', padding: '6px 10px', fontSize: '11px', cursor: sampling ? 'wait' : 'pointer', fontWeight: 700,
+              display: 'flex', alignItems: 'center', gap: '5px'
+            }}
+          >
+            <RefreshCw size={11} className={sampling ? 'animate-spin' : ''} />
+            {sampling ? 'Sampling…' : 'Sample now'}
+          </button>
+          <button
+            onClick={() => { if (!live) setLiveConfirm(liveEvery); }}
+            title="Live monitoring — re-read the cluster on a timer (asks first: it costs time and load)"
+            style={{
+              background: live ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
+              color: live ? '#34d399' : 'var(--tp-muted, #94a3b8)',
+              border: 'none', padding: '6px 10px', fontSize: '11px', cursor: 'pointer', fontWeight: 700,
+              display: 'flex', alignItems: 'center', gap: '6px', letterSpacing: '0.04em'
+            }}
+          >
+            <span style={{
+              width: 7, height: 7, borderRadius: '50%',
+              background: live ? '#34d399' : '#475569',
+              boxShadow: live ? '0 0 6px #34d399' : 'none',
+              animation: live ? 'led-glow-halo 1.4s ease-in-out infinite' : 'none'
+            }} />
+            {live ? `LIVE · ${liveEvery}s` : 'Live'}
+          </button>
+        </div>
+        <span
+          title={live ? 'Time of the last live read' : 'The map shows the cluster as it was at this moment'}
+          style={{ fontSize: '10.5px', color: 'var(--tp-muted, #94a3b8)', whiteSpace: 'nowrap' }}
+        >
+          {live
+            ? `updated ${(lastRefresh || frozen.at).toLocaleTimeString()}`
+            : `sampled ${frozen.at.toLocaleTimeString()}${resampleFrom !== null ? ' · waiting for new source…' : ''}`}
+        </span>
+
+        {/* Map colour scheme */}
         <button
-          onClick={() => setLive(l => !l)}
-          title="Auto-refresh the map every 8 seconds"
+          onClick={() => setMapTheme(t => (t === 'dark' ? 'light' : 'dark'))}
+          title={mapTheme === 'dark' ? 'Switch the map to a light background' : 'Switch the map to a dark background'}
+          aria-label="Toggle map colour scheme"
           style={{
-            background: live ? 'rgba(16, 185, 129, 0.15)' : 'rgba(2, 6, 23, 0.4)',
-            border: `1px solid ${live ? 'rgba(16, 185, 129, 0.5)' : 'rgba(255,255,255,0.08)'}`,
-            borderRadius: '6px', color: live ? '#34d399' : '#94a3b8',
-            padding: '6px 12px', fontSize: '11px', cursor: 'pointer', fontWeight: 700,
-            display: 'flex', alignItems: 'center', gap: '6px', letterSpacing: '0.04em'
+            background: 'var(--tp-ink40, rgba(2, 6, 23, 0.4))', border: '1px solid var(--tp-w08, rgba(255,255,255,0.08))',
+            borderRadius: '6px', color: 'var(--tp-muted, #94a3b8)', padding: '6px 10px', fontSize: '11px',
+            cursor: 'pointer', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '5px'
           }}
         >
-          <span style={{
-            width: 7, height: 7, borderRadius: '50%',
-            background: live ? '#34d399' : '#475569',
-            boxShadow: live ? '0 0 6px #34d399' : 'none',
-            animation: live ? 'led-glow-halo 1.4s ease-in-out infinite' : 'none'
-          }} />
-          {live ? 'LIVE' : 'Paused'}
-          {live && lastRefresh && <span style={{ fontWeight: 400, color: '#64748b' }}>{lastRefresh.toLocaleTimeString()}</span>}
+          {mapTheme === 'dark' ? <Sun size={11} /> : <Moon size={11} />} {mapTheme === 'dark' ? 'Light' : 'Dark'}
         </button>
 
         {/* Animation budget. Auto keeps the flow dots on small graphs and drops
@@ -1820,9 +2023,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
               : 'Flow animation is off. Click to turn it back on.'
           }
           style={{
-            background: motion === 'off' ? 'rgba(2, 6, 23, 0.4)' : 'rgba(56, 189, 248, 0.12)',
-            border: `1px solid ${motion === 'off' ? 'rgba(255,255,255,0.08)' : 'rgba(56, 189, 248, 0.4)'}`,
-            borderRadius: '6px', color: motion === 'off' ? '#94a3b8' : '#38bdf8',
+            background: motion === 'off' ? 'var(--tp-ink40, rgba(2, 6, 23, 0.4))' : 'rgba(56, 189, 248, 0.12)',
+            border: `1px solid ${motion === 'off' ? 'var(--tp-w08, rgba(255,255,255,0.08))' : 'rgba(56, 189, 248, 0.4)'}`,
+            borderRadius: '6px', color: motion === 'off' ? 'var(--tp-muted, #94a3b8)' : '#38bdf8',
             padding: '6px 12px', fontSize: '11px', cursor: 'pointer', fontWeight: 600,
             display: 'flex', alignItems: 'center', gap: '5px'
           }}
@@ -1835,9 +2038,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           onClick={() => setProblemsOnly(p => !p)}
           title="Show only failing resources and what they connect to"
           style={{
-            background: problemsOnly ? 'rgba(244, 63, 94, 0.15)' : 'rgba(2, 6, 23, 0.4)',
-            border: `1px solid ${problemsOnly ? 'rgba(244, 63, 94, 0.5)' : 'rgba(255,255,255,0.08)'}`,
-            borderRadius: '6px', color: problemsOnly ? '#f43f5e' : '#94a3b8',
+            background: problemsOnly ? 'rgba(244, 63, 94, 0.15)' : 'var(--tp-ink40, rgba(2, 6, 23, 0.4))',
+            border: `1px solid ${problemsOnly ? 'rgba(244, 63, 94, 0.5)' : 'var(--tp-w08, rgba(255,255,255,0.08))'}`,
+            borderRadius: '6px', color: problemsOnly ? '#f43f5e' : 'var(--tp-muted, #94a3b8)',
             padding: '6px 12px', fontSize: '11px', cursor: 'pointer', fontWeight: 600,
             display: 'flex', alignItems: 'center', gap: '5px'
           }}
@@ -1852,13 +2055,13 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         </button>
 
         {/* Layout engine */}
-        <div style={{ display: 'flex', alignItems: 'center', background: 'rgba(2, 6, 23, 0.4)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '6px', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', background: 'var(--tp-ink40, rgba(2, 6, 23, 0.4))', border: '1px solid var(--tp-w06, rgba(255,255,255,0.06))', borderRadius: '6px', overflow: 'hidden' }}>
           <button
             onClick={() => setLayoutMode('columns')}
             title="Grouped column layout (Docker / namespaces / nodes)"
             style={{
-              background: layoutMode === 'columns' ? 'rgba(255,255,255,0.08)' : 'transparent',
-              color: layoutMode === 'columns' ? '#fff' : '#94a3b8',
+              background: layoutMode === 'columns' ? 'var(--tp-w08, rgba(255,255,255,0.08))' : 'transparent',
+              color: layoutMode === 'columns' ? 'var(--tp-text, #fff)' : 'var(--tp-muted, #94a3b8)',
               border: 'none', padding: '6px 10px', fontSize: '11px', cursor: 'pointer', fontWeight: 500
             }}
           >
@@ -1869,7 +2072,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
             title="Automatic flow layout computed from the real connections, with namespaces kept as bands"
             style={{
               background: layoutMode === 'auto' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
-              color: layoutMode === 'auto' ? '#38bdf8' : '#94a3b8',
+              color: layoutMode === 'auto' ? '#38bdf8' : 'var(--tp-muted, #94a3b8)',
               border: 'none', padding: '6px 10px', fontSize: '11px', cursor: 'pointer', fontWeight: 500,
               display: 'flex', alignItems: 'center', gap: '4px'
             }}
@@ -1889,11 +2092,11 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
             onChange={(e) => setSearchTerm(e.target.value)}
             style={{
               width: '100%',
-              background: 'rgba(2, 6, 23, 0.6)',
-              border: '1px solid rgba(255,255,255,0.08)',
+              background: 'var(--tp-ink60, rgba(2, 6, 23, 0.6))',
+              border: '1px solid var(--tp-w08, rgba(255,255,255,0.08))',
               borderRadius: '6px',
               padding: '6px 12px 6px 30px',
-              color: '#f8fafc',
+              color: 'var(--tp-text, #f8fafc)',
               fontSize: '12.5px',
               outline: 'none',
               transition: 'border-color 0.2s',
@@ -1923,15 +2126,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
 
         {/* Namespace filter */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Sliders size={12} style={{ color: '#94a3b8' }} />
+          <Sliders size={12} style={{ color: 'var(--tp-muted, #94a3b8)' }} />
           <select
             value={selectedNamespace}
-            onChange={(e) => setSelectedNamespace(e.target.value)}
+            onChange={(e) => { nsDefaulted.current = true; setSelectedNamespace(e.target.value); }}
             style={{
-              background: 'rgba(2, 6, 23, 0.6)',
-              border: '1px solid rgba(255,255,255,0.08)',
+              background: 'var(--tp-ink60, rgba(2, 6, 23, 0.6))',
+              border: '1px solid var(--tp-w08, rgba(255,255,255,0.08))',
               borderRadius: '6px',
-              color: '#f8fafc',
+              color: 'var(--tp-text, #f8fafc)',
               padding: '6px 10px',
               fontSize: '12px',
               outline: 'none',
@@ -1950,10 +2153,10 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           value={selectedType}
           onChange={(e) => setSelectedType(e.target.value)}
           style={{
-            background: 'rgba(2, 6, 23, 0.6)',
-            border: '1px solid rgba(255,255,255,0.08)',
+            background: 'var(--tp-ink60, rgba(2, 6, 23, 0.6))',
+            border: '1px solid var(--tp-w08, rgba(255,255,255,0.08))',
             borderRadius: '6px',
-            color: '#f8fafc',
+            color: 'var(--tp-text, #f8fafc)',
             padding: '6px 10px',
             fontSize: '12px',
             outline: 'none',
@@ -1973,8 +2176,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           style={{
             display: 'flex',
             alignItems: 'center',
-            background: 'rgba(2, 6, 23, 0.4)',
-            border: '1px solid rgba(255,255,255,0.06)',
+            background: 'var(--tp-ink40, rgba(2, 6, 23, 0.4))',
+            border: '1px solid var(--tp-w06, rgba(255,255,255,0.06))',
             borderRadius: '6px',
             overflow: 'hidden'
           }}
@@ -1982,8 +2185,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           <button
             onClick={() => setHeatmapMode('none')}
             style={{
-              background: heatmapMode === 'none' ? 'rgba(255,255,255,0.08)' : 'transparent',
-              color: heatmapMode === 'none' ? '#fff' : '#94a3b8',
+              background: heatmapMode === 'none' ? 'var(--tp-w08, rgba(255,255,255,0.08))' : 'transparent',
+              color: heatmapMode === 'none' ? 'var(--tp-text, #fff)' : 'var(--tp-muted, #94a3b8)',
               border: 'none',
               padding: '6px 10px',
               fontSize: '11px',
@@ -1997,7 +2200,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
             onClick={() => setHeatmapMode('restarts')}
             style={{
               background: heatmapMode === 'restarts' ? 'rgba(239, 68, 68, 0.15)' : 'transparent',
-              color: heatmapMode === 'restarts' ? '#f43f5e' : '#94a3b8',
+              color: heatmapMode === 'restarts' ? '#f43f5e' : 'var(--tp-muted, #94a3b8)',
               border: 'none',
               padding: '6px 10px',
               fontSize: '11px',
@@ -2014,7 +2217,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
             onClick={() => setHeatmapMode('age')}
             style={{
               background: heatmapMode === 'age' ? 'rgba(6, 182, 212, 0.15)' : 'transparent',
-              color: heatmapMode === 'age' ? '#06b6d4' : '#94a3b8',
+              color: heatmapMode === 'age' ? '#06b6d4' : 'var(--tp-muted, #94a3b8)',
               border: 'none',
               padding: '6px 10px',
               fontSize: '11px',
@@ -2032,7 +2235,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
             title="Highlight what Kalam recorded changing in the last 24 hours"
             style={{
               background: heatmapMode === 'changed' ? 'rgba(245, 158, 11, 0.15)' : 'transparent',
-              color: heatmapMode === 'changed' ? '#f59e0b' : '#94a3b8',
+              color: heatmapMode === 'changed' ? '#f59e0b' : 'var(--tp-muted, #94a3b8)',
               border: 'none',
               padding: '6px 10px',
               fontSize: '11px',
@@ -2047,23 +2250,36 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           </button>
         </div>
 
+        {/* Picture of the map exactly as drawn (works in fullscreen too) */}
+        <button
+          onClick={() => void captureMap()}
+          disabled={capturing}
+          title="Save the map as a PNG image"
+          style={{
+            background: 'var(--tp-ink40, rgba(2, 6, 23, 0.4))', border: '1px solid var(--tp-w08, rgba(255,255,255,0.08))',
+            borderRadius: '6px', color: 'var(--tp-muted, #94a3b8)', padding: '6px 12px', fontSize: '12px',
+            cursor: capturing ? 'wait' : 'pointer', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '6px', marginLeft: 'auto'
+          }}
+        >
+          <Camera size={13} /> {capturing ? 'Capturing…' : 'Capture map'}
+        </button>
+
         {/* Fit View */}
         <button
           onClick={() => fitView({ duration: 500, padding: 0.2 })}
           title="Reset zoom & pan to fit the whole graph"
           style={{
-            background: 'rgba(2, 6, 23, 0.4)',
-            border: '1px solid rgba(255,255,255,0.08)',
+            background: 'var(--tp-ink40, rgba(2, 6, 23, 0.4))',
+            border: '1px solid var(--tp-w08, rgba(255,255,255,0.08))',
             borderRadius: '6px',
-            color: '#94a3b8',
+            color: 'var(--tp-muted, #94a3b8)',
             padding: '6px 12px',
             fontSize: '12px',
             cursor: 'pointer',
             fontWeight: 500,
             display: 'flex',
             alignItems: 'center',
-            gap: '6px',
-            marginLeft: 'auto'
+            gap: '6px'
           }}
         >
           <RefreshCw size={13} /> Fit View
@@ -2073,10 +2289,10 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         <button
           onClick={() => setIsFullscreen(prev => !prev)}
           style={{
-            background: isFullscreen ? 'rgba(56, 189, 248, 0.15)' : 'rgba(2, 6, 23, 0.4)',
-            border: '1px solid rgba(255,255,255,0.08)',
+            background: isFullscreen ? 'rgba(56, 189, 248, 0.15)' : 'var(--tp-ink40, rgba(2, 6, 23, 0.4))',
+            border: '1px solid var(--tp-w08, rgba(255,255,255,0.08))',
             borderRadius: '6px',
-            color: isFullscreen ? '#38bdf8' : '#94a3b8',
+            color: isFullscreen ? '#38bdf8' : 'var(--tp-muted, #94a3b8)',
             padding: '6px 12px',
             fontSize: '12px',
             cursor: 'pointer',
@@ -2111,13 +2327,14 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
 
       {/* ─── Graph Canvas Container ─── */}
       <div
+        ref={canvasRef}
         style={isFullscreen ? {
           position: 'fixed',
           top: 0,
           left: 0,
           width: '100vw',
           height: '100vh',
-          background: 'radial-gradient(ellipse at 30% 20%, rgba(15, 23, 42, 0.99), rgba(2, 6, 23, 0.99))',
+          background: 'var(--tp-canvas-full, radial-gradient(ellipse at 30% 20%, rgba(15, 23, 42, 0.99), rgba(2, 6, 23, 0.99)))',
           zIndex: 9999,
           overflow: 'hidden',
           padding: '20px',
@@ -2126,10 +2343,10 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           position: 'relative',
           width: '100%',
           height: '680px',
-          background: 'radial-gradient(ellipse at 20% 30%, rgba(15, 23, 42, 0.7), rgba(2, 6, 23, 0.7))',
+          background: 'var(--tp-canvas, radial-gradient(ellipse at 20% 30%, rgba(15, 23, 42, 0.7), rgba(2, 6, 23, 0.7)))',
           borderRadius: '12px',
-          border: '1px solid rgba(255,255,255,0.05)',
-          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03), 0 4px 24px rgba(0,0,0,0.3)',
+          border: '1px solid var(--tp-w05, rgba(255,255,255,0.05))',
+          boxShadow: 'inset 0 1px 0 var(--tp-w03, rgba(255,255,255,0.03)), 0 4px 24px rgba(0,0,0,0.3)',
           overflow: 'hidden'
         }}
       >
@@ -2159,6 +2376,71 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           </button>
         )}
 
+        {liveConfirm !== null && (
+          <div
+            data-capture-ignore
+            style={{
+              position: 'absolute', inset: 0, zIndex: 10002, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'rgba(2, 6, 23, 0.55)', padding: 16
+            }}
+            onClick={() => setLiveConfirm(null)}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Enable live monitoring"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                maxWidth: 520, width: '100%', background: 'var(--tp-drawer, rgba(9, 15, 30, 0.95))', color: 'var(--tp-text, #f8fafc)',
+                border: '1px solid rgba(245, 158, 11, 0.45)', borderRadius: 12, padding: 20, boxShadow: '0 20px 50px rgba(0,0,0,0.45)',
+                fontFamily: 'Outfit, sans-serif'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 700, color: '#f59e0b' }}>
+                <AlertTriangle size={17} /> Live monitoring takes time and adds load
+              </div>
+              <ul style={{ margin: '12px 0', paddingLeft: 18, fontSize: 12.5, lineHeight: 1.6, color: 'var(--tp-text-3, #cbd5e1)' }}>
+                <li>Every interval re-reads the <strong>whole cluster</strong> — pods, workloads, services and nodes{source !== 'local' ? ', over SSH to the selected host' : ''}. On a large cluster one read can take from several seconds to over a minute.</li>
+                <li>Each read adds load on the Kubernetes API server and the network, and the map re-lays itself out whenever anything changed, so cards can move while you are looking at them.</li>
+                <li>The browser keeps re-rendering the graph, which can make panning and zooming less smooth.</li>
+              </ul>
+              <div style={{ fontSize: 12.5, color: 'var(--tp-text-3, #cbd5e1)', marginBottom: 14 }}>
+                For the best results use <strong>Sample now</strong> to take a fresh, stable picture whenever you need one. If you do want live monitoring, pick how often to refresh:
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 16 }}>
+                {LIVE_INTERVALS.map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => setLiveConfirm(n)}
+                    style={{
+                      background: liveConfirm === n ? 'rgba(16, 185, 129, 0.18)' : 'var(--tp-ink40, rgba(2, 6, 23, 0.4))',
+                      border: `1px solid ${liveConfirm === n ? 'rgba(16, 185, 129, 0.6)' : 'var(--tp-w08, rgba(255,255,255,0.08))'}`,
+                      color: liveConfirm === n ? '#34d399' : 'var(--tp-text-2, #e2e8f0)',
+                      borderRadius: 6, padding: '6px 12px', fontSize: 12, cursor: 'pointer', fontWeight: 600
+                    }}
+                  >
+                    every {n < 60 ? `${n}s` : `${n / 60} min`}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button
+                  onClick={() => { setLiveConfirm(null); void sampleNow(); }}
+                  style={{ background: 'rgba(56, 189, 248, 0.15)', border: '1px solid rgba(56, 189, 248, 0.45)', color: '#38bdf8', borderRadius: 6, padding: '8px 14px', fontSize: 12.5, cursor: 'pointer', fontWeight: 600 }}
+                >
+                  Just sample now
+                </button>
+                <button
+                  onClick={() => goLive(liveConfirm)}
+                  style={{ background: '#10b981', border: 'none', color: '#fff', borderRadius: 6, padding: '8px 14px', fontSize: 12.5, cursor: 'pointer', fontWeight: 700 }}
+                >
+                  Start live monitoring
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <ReactFlow
           nodes={flowNodes}
           edges={flowEdges}
@@ -2182,16 +2464,16 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           style={{ width: '100%', height: isFullscreen ? 'calc(100vh - 40px)' : '100%' }}
         >
           <LedStyles />
-          <Background color="rgba(255,255,255,0.03)" gap={24} size={0.8} />
+          <Background color={svgColors.dots} gap={24} size={mapTheme === 'light' ? 1 : 0.8} />
           <Controls
             showInteractive={false}
             style={{
               // Opaque, not translucent-with-backdrop-blur: a backdrop filter
               // sitting over a canvas that pans and zooms is re-blurred every
               // frame of every interaction.
-              background: 'rgb(17, 25, 45)',
-              border: '1px solid rgba(255,255,255,0.06)',
-              color: '#e2e8f0',
+              background: 'var(--tp-chrome, rgb(17, 25, 45))',
+              border: '1px solid var(--tp-w06, rgba(255,255,255,0.06))',
+              color: 'var(--tp-text-2, #e2e8f0)',
               borderRadius: '10px',
               overflow: 'hidden',
               boxShadow: '0 4px 16px rgba(0,0,0,0.3)'
@@ -2205,14 +2487,14 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
               if (n.type === 'groupNode') return 'transparent';
               const nodeColors: Record<string, string> = {
                 docker: '#38bdf8', port: '#818cf8', service: '#fbbf24',
-                deployment: '#a78bfa', pod: '#34d399', 'k8s-node': '#94a3b8'
+                deployment: '#a78bfa', pod: '#34d399', 'k8s-node': 'var(--tp-muted, #94a3b8)'
               };
               return nodeColors[(n.data as any)?.type] || 'rgba(148,163,184,0.5)';
             }}
-            maskColor="rgba(2, 6, 23, 0.75)"
+            maskColor={svgColors.mask}
             style={{
-              background: 'rgb(17, 25, 45)',
-              border: '1px solid rgba(255,255,255,0.06)',
+              background: 'var(--tp-chrome, rgb(17, 25, 45))',
+              border: '1px solid var(--tp-w06, rgba(255,255,255,0.06))',
               borderRadius: '10px',
               boxShadow: '0 4px 16px rgba(0,0,0,0.3)'
             }}
@@ -2229,15 +2511,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
               width: '440px',
               maxWidth: '85%',
               height: '100%',
-              background: 'rgba(9, 15, 30, 0.95)',
+              background: 'var(--tp-drawer, rgba(9, 15, 30, 0.95))',
               backdropFilter: 'blur(16px)',
-              borderLeft: '1px solid rgba(255,255,255,0.08)',
+              borderLeft: '1px solid var(--tp-w08, rgba(255,255,255,0.08))',
               zIndex: 1000,
               padding: '16px',
               boxSizing: 'border-box',
               display: 'flex',
               flexDirection: 'column',
-              color: '#f8fafc',
+              color: 'var(--tp-text, #f8fafc)',
               fontFamily: 'Outfit, sans-serif',
               boxShadow: '-10px 0 30px rgba(0,0,0,0.5)'
             }}
@@ -2259,13 +2541,13 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                 aria-label="Close details panel"
                 onClick={() => setSelectedNodeId(null)}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedNodeId(null); }}
-                style={{ color: '#94a3b8', cursor: 'pointer', hover: { color: '#fff' } } as any}
+                style={{ color: 'var(--tp-muted, #94a3b8)', cursor: 'pointer', hover: { color: 'var(--tp-text, #fff)' } } as any}
               />
             </div>
 
             {/* Tab navigation — Related/Manifest/Events come from the deep
                 inspect call, so they work for remote VM sources too. */}
-            <div style={{ display: 'flex', gap: '2px', flexWrap: 'wrap', borderBottom: '1px solid rgba(255,255,255,0.06)', marginBottom: '14px' }}>
+            <div style={{ display: 'flex', gap: '2px', flexWrap: 'wrap', borderBottom: '1px solid var(--tp-w06, rgba(255,255,255,0.06))', marginBottom: '14px' }}>
               {([
                 { key: 'details', label: 'Details', show: true, badge: 0 },
                 { key: 'related', label: 'Related', show: relationGroups.length > 0 || inspectLoading, badge: relatedCount },
@@ -2281,7 +2563,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                   onClick={() => setDrawerTab(t.key as typeof drawerTab)}
                   style={{
                     background: 'transparent',
-                    color: drawerTab === t.key ? '#38bdf8' : '#94a3b8',
+                    color: drawerTab === t.key ? '#38bdf8' : 'var(--tp-muted, #94a3b8)',
                     border: 'none',
                     borderBottom: drawerTab === t.key ? '2px solid #38bdf8' : '2px solid transparent',
                     padding: '6px 10px',
@@ -2297,7 +2579,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                   {t.badge > 0 && (
                     <span style={{
                       background: t.key === 'events' ? 'rgba(244, 63, 94, 0.2)' : 'rgba(148, 163, 184, 0.15)',
-                      color: t.key === 'events' ? '#fda4af' : '#cbd5e1',
+                      color: t.key === 'events' ? 'var(--tp-badge-rose, #fda4af)' : 'var(--tp-text-3, #cbd5e1)',
                       borderRadius: '7px', padding: '0 5px', fontSize: '9.5px', fontWeight: 700
                     }}>{t.badge}</span>
                   )}
@@ -2312,17 +2594,17 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <tbody>
-                      <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                      <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                         <td style={{ padding: '8px 0', color: '#64748b', width: '90px' }}>Namespace</td>
                         <td style={{ padding: '8px 0', fontWeight: 500 }}>{selectedResource.data.namespace || 'N/A (Docker)'}</td>
                       </tr>
-                      <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                      <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                         <td style={{ padding: '8px 0', color: '#64748b' }}>Status</td>
                         <td style={{ padding: '8px 0', fontWeight: 500, color: selectedResource.data.state === 'running' || selectedResource.data.status === 'Running' || selectedResource.data.status === 'Ready' ? '#10b981' : '#f59e0b' }}>
                           ● {selectedResource.data.state || selectedResource.data.status}
                         </td>
                       </tr>
-                      <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                      <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                         <td style={{ padding: '8px 0', color: '#64748b' }}>Age</td>
                         <td style={{ padding: '8px 0', fontWeight: 500 }}>
                           <Clock size={11} style={{ display: 'inline', marginRight: '4px', verticalAlign: 'middle' }} />
@@ -2330,37 +2612,37 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                         </td>
                       </tr>
                       {selectedResource.data.ip && (
-                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                        <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                           <td style={{ padding: '8px 0', color: '#64748b' }}>IP Address</td>
                           <td style={{ padding: '8px 0', fontFamily: 'monospace' }}>{selectedResource.data.ip}</td>
                         </tr>
                       )}
                       {selectedResource.data.clusterIp && (
-                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                        <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                           <td style={{ padding: '8px 0', color: '#64748b' }}>Cluster IP</td>
                           <td style={{ padding: '8px 0', fontFamily: 'monospace' }}>{selectedResource.data.clusterIp}</td>
                         </tr>
                       )}
                       {selectedResource.data.ports && (
-                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                        <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                           <td style={{ padding: '8px 0', color: '#64748b' }}>Port Maps</td>
                           <td style={{ padding: '8px 0', fontSize: '11px', fontFamily: 'monospace' }}>{selectedResource.data.ports}</td>
                         </tr>
                       )}
                       {selectedResource.data.image && (
-                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                        <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                           <td style={{ padding: '8px 0', color: '#64748b' }}>Docker Image</td>
-                          <td style={{ padding: '8px 0', fontSize: '11px', color: '#93c5fd', wordBreak: 'break-all' }}>{selectedResource.data.image}</td>
+                          <td style={{ padding: '8px 0', fontSize: '11px', color: 'var(--tp-ns, #93c5fd)', wordBreak: 'break-all' }}>{selectedResource.data.image}</td>
                         </tr>
                       )}
                       {selectedResource.data.role && (
-                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                        <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                           <td style={{ padding: '8px 0', color: '#64748b' }}>Node Role</td>
                           <td style={{ padding: '8px 0' }}>{selectedResource.data.role}</td>
                         </tr>
                       )}
                       {selectedResource.data.version && (
-                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                        <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                           <td style={{ padding: '8px 0', color: '#64748b' }}>kubelet</td>
                           <td style={{ padding: '8px 0' }}>{selectedResource.data.version} ({selectedResource.data.os})</td>
                         </tr>
@@ -2378,7 +2660,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                     </div>
                   )}
                   {inspectError && (
-                    <div style={{ background: 'rgba(244,63,94,0.08)', border: '1px solid rgba(244,63,94,0.35)', color: '#fda4af', padding: '8px 10px', borderRadius: '6px', fontSize: '11px' }}>
+                    <div style={{ background: 'rgba(244,63,94,0.08)', border: '1px solid rgba(244,63,94,0.35)', color: 'var(--tp-badge-rose, #fda4af)', padding: '8px 10px', borderRadius: '6px', fontSize: '11px' }}>
                       <AlertTriangle size={11} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
                       {inspectError}
                     </div>
@@ -2390,7 +2672,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                         <tbody>
                           {inspect.summary.map((row: any) => (
-                            <tr key={row.label} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                            <tr key={row.label} style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                               <td style={{ padding: '6px 0', color: '#64748b', width: '120px', verticalAlign: 'top' }}>{row.label}</td>
                               <td style={{ padding: '6px 0', fontWeight: 500, wordBreak: 'break-word' }}>{row.value}</td>
                             </tr>
@@ -2407,7 +2689,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                       <SectionTitle>Containers ({detailContainers.length})</SectionTitle>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '6px' }}>
                         {detailContainers.map((c: any, idx: number) => (
-                          <div key={`${c.name}-${idx}`} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '6px', padding: '8px' }}>
+                          <div key={`${c.name}-${idx}`} style={{ background: 'var(--tp-w03, rgba(255,255,255,0.03))', border: '1px solid var(--tp-w06, rgba(255,255,255,0.06))', borderRadius: '6px', padding: '8px' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontWeight: 600 }}>
                               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                 {c.name}
@@ -2419,11 +2701,11 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                                 </span>
                               )}
                             </div>
-                            <div style={{ fontSize: '10px', color: '#94a3b8', wordBreak: 'break-all', marginTop: '4px' }}>
+                            <div style={{ fontSize: '10px', color: 'var(--tp-muted, #94a3b8)', wordBreak: 'break-all', marginTop: '4px' }}>
                               Image: {c.image}
                             </div>
                             {c.reason && (
-                              <div style={{ fontSize: '10px', color: '#fda4af', marginTop: '3px' }}>{c.reason}</div>
+                              <div style={{ fontSize: '10px', color: 'var(--tp-badge-rose, #fda4af)', marginTop: '3px' }}>{c.reason}</div>
                             )}
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
                               {c.restarts > 0 && <MiniTag color="#f43f5e">{c.restarts} restarts</MiniTag>}
@@ -2467,7 +2749,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '6px' }}>
                         {Object.entries(inspect.annotations).map(([k, v]) => (
                           <div key={k} style={{ fontSize: '10px', wordBreak: 'break-all' }}>
-                            <span style={{ color: '#93c5fd' }}>{k}</span>
+                            <span style={{ color: 'var(--tp-ns, #93c5fd)' }}>{k}</span>
                             <span style={{ color: '#64748b' }}>: {String(v).slice(0, 300)}</span>
                           </div>
                         ))}
@@ -2481,7 +2763,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
               {drawerTab === 'related' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                   {inspectLoading && (
-                    <div style={{ padding: '24px 0', textAlign: 'center', color: '#94a3b8' }}>
+                    <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--tp-muted, #94a3b8)' }}>
                       <RefreshCw size={16} className="animate-spin" style={{ display: 'block', margin: '0 auto 8px auto' }} />
                       Working out the connections…
                     </div>
@@ -2506,8 +2788,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                               onClick={() => clickable && focusRelated(item)}
                               title={clickable ? 'Open this card on the map' : undefined}
                               style={{
-                                background: 'rgba(255,255,255,0.03)',
-                                border: '1px solid rgba(255,255,255,0.06)',
+                                background: 'var(--tp-w03, rgba(255,255,255,0.03))',
+                                border: '1px solid var(--tp-w06, rgba(255,255,255,0.06))',
                                 borderRadius: '6px',
                                 padding: '8px',
                                 cursor: clickable ? 'pointer' : 'default'
@@ -2525,7 +2807,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                                   <span style={{ fontSize: '9px', color: '#64748b' }}>ns: {item.namespace}</span>
                                 )}
                               </div>
-                              <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>{item.via}</div>
+                              <div style={{ fontSize: '10px', color: 'var(--tp-muted, #94a3b8)', marginTop: '4px' }}>{item.via}</div>
                               {item.detail && (
                                 <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px', wordBreak: 'break-word' }}>{item.detail}</div>
                               )}
@@ -2543,14 +2825,14 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', height: '100%' }}>
                   <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
                     {inspect?.describe !== undefined && inspect?.describe !== '' && (
-                      <div style={{ display: 'flex', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '6px', overflow: 'hidden' }}>
+                      <div style={{ display: 'flex', border: '1px solid var(--tp-w08, rgba(255,255,255,0.08))', borderRadius: '6px', overflow: 'hidden' }}>
                         {(['yaml', 'describe'] as const).map(v => (
                           <button
                             key={v}
                             onClick={() => setManifestView(v)}
                             style={{
                               background: manifestView === v ? 'rgba(56,189,248,0.15)' : 'transparent',
-                              color: manifestView === v ? '#38bdf8' : '#94a3b8',
+                              color: manifestView === v ? '#38bdf8' : 'var(--tp-muted, #94a3b8)',
                               border: 'none', padding: '4px 10px', fontSize: '11px', cursor: 'pointer', fontWeight: 600
                             }}
                           >
@@ -2561,20 +2843,20 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                     )}
                     <button
                       onClick={() => copyManifest(manifestText)}
-                      style={{ marginLeft: 'auto', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: copied ? '#10b981' : '#fff', padding: '4px 8px', cursor: 'pointer', fontSize: '11px' }}
+                      style={{ marginLeft: 'auto', background: 'var(--tp-w06, rgba(255,255,255,0.06))', border: '1px solid var(--tp-w10, rgba(255,255,255,0.1))', borderRadius: '4px', color: copied ? '#10b981' : 'var(--tp-text, #fff)', padding: '4px 8px', cursor: 'pointer', fontSize: '11px' }}
                     >
                       {copied ? 'Copied' : 'Copy'}
                     </button>
                     <button
                       onClick={() => downloadManifest(manifestText, `${selectedResource.data.name}.${inspectTarget?.label === 'JSON' ? 'json' : manifestView === 'yaml' ? 'yaml' : 'txt'}`)}
-                      style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: '#fff', padding: '4px 8px', cursor: 'pointer', fontSize: '11px' }}
+                      style={{ background: 'var(--tp-w06, rgba(255,255,255,0.06))', border: '1px solid var(--tp-w10, rgba(255,255,255,0.1))', borderRadius: '4px', color: 'var(--tp-text, #fff)', padding: '4px 8px', cursor: 'pointer', fontSize: '11px' }}
                     >
                       Download
                     </button>
                   </div>
 
                   {inspectLoading ? (
-                    <div style={{ padding: '30px 0', textAlign: 'center', color: '#94a3b8' }}>
+                    <div style={{ padding: '30px 0', textAlign: 'center', color: 'var(--tp-muted, #94a3b8)' }}>
                       <RefreshCw size={18} className="animate-spin" style={{ display: 'block', margin: '0 auto 10px auto' }} /> Fetching the manifest…
                     </div>
                   ) : inspectError ? (
@@ -2585,7 +2867,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                     <pre style={{
                       background: '#020617', color: '#a5b4fc', padding: '10px', borderRadius: '6px',
                       fontFamily: 'monospace', fontSize: '10px', overflow: 'auto', maxHeight: '420px',
-                      margin: 0, border: '1px solid rgba(255,255,255,0.04)', textAlign: 'left',
+                      margin: 0, border: '1px solid var(--tp-w04, rgba(255,255,255,0.04))', textAlign: 'left',
                       whiteSpace: 'pre', wordBreak: 'normal'
                     }}>
                       {manifestText || 'Nothing returned.'}
@@ -2602,17 +2884,17 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                   )}
                   {(inspect?.events || []).map((e: any, idx: number) => (
                     <div key={idx} style={{
-                      background: e.type === 'Normal' ? 'rgba(255,255,255,0.03)' : 'rgba(244,63,94,0.08)',
-                      border: `1px solid ${e.type === 'Normal' ? 'rgba(255,255,255,0.06)' : 'rgba(244,63,94,0.3)'}`,
+                      background: e.type === 'Normal' ? 'var(--tp-w03, rgba(255,255,255,0.03))' : 'rgba(244,63,94,0.08)',
+                      border: `1px solid ${e.type === 'Normal' ? 'var(--tp-w06, rgba(255,255,255,0.06))' : 'rgba(244,63,94,0.3)'}`,
                       borderRadius: '6px', padding: '8px'
                     }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                        <span style={{ fontWeight: 700, color: e.type === 'Normal' ? '#cbd5e1' : '#fda4af', fontSize: '11px' }}>
+                        <span style={{ fontWeight: 700, color: e.type === 'Normal' ? 'var(--tp-text-3, #cbd5e1)' : 'var(--tp-badge-rose, #fda4af)', fontSize: '11px' }}>
                           {e.reason}{e.count > 1 ? ` ×${e.count}` : ''}
                         </span>
                         <span style={{ fontSize: '9.5px', color: '#64748b', whiteSpace: 'nowrap' }}>{formatAge(e.time)}</span>
                       </div>
-                      <div style={{ fontSize: '10.5px', color: '#94a3b8', marginTop: '4px', lineHeight: 1.4 }}>{e.message}</div>
+                      <div style={{ fontSize: '10.5px', color: 'var(--tp-muted, #94a3b8)', marginTop: '4px', lineHeight: 1.4 }}>{e.message}</div>
                     </div>
                   ))}
                 </div>
@@ -2622,15 +2904,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
               {drawerTab === 'logs' && (
                 <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '8px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#94a3b8' }}>Live Container Logs (Tail 150 lines)</span>
+                    <span style={{ color: 'var(--tp-muted, #94a3b8)' }}>Live Container Logs (Tail 150 lines)</span>
                     <button
                       onClick={fetchLogs}
                       disabled={loadingLogs}
                       style={{
-                        background: 'rgba(255,255,255,0.06)',
-                        border: '1px solid rgba(255,255,255,0.1)',
+                        background: 'var(--tp-w06, rgba(255,255,255,0.06))',
+                        border: '1px solid var(--tp-w10, rgba(255,255,255,0.1))',
                         borderRadius: '4px',
-                        color: '#fff',
+                        color: 'var(--tp-text, #fff)',
                         padding: '4px 8px',
                         cursor: 'pointer',
                         fontSize: '11px',
@@ -2644,7 +2926,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                   </div>
 
                   {loadingLogs ? (
-                    <div style={{ padding: '30px 0', textAlign: 'center', color: '#94a3b8' }}>
+                    <div style={{ padding: '30px 0', textAlign: 'center', color: 'var(--tp-muted, #94a3b8)' }}>
                       <RefreshCw size={18} className="animate-spin" style={{ display: 'block', margin: '0 auto 10px auto' }} /> Loading container logs...
                     </div>
                   ) : logsError ? (
@@ -2665,7 +2947,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                         overflowY: 'auto',
                         maxHeight: '360px',
                         margin: 0,
-                        border: '1px solid rgba(255,255,255,0.04)',
+                        border: '1px solid var(--tp-w04, rgba(255,255,255,0.04))',
                         textAlign: 'left',
                         whiteSpace: 'pre-wrap',
                         wordBreak: 'break-all'
@@ -2680,7 +2962,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
               {/* Tab 3: Actions */}
               {drawerTab === 'actions' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                  <span style={{ color: '#94a3b8' }}>Trigger Runtime CLI Actions</span>
+                  <span style={{ color: 'var(--tp-muted, #94a3b8)' }}>Trigger Runtime CLI Actions</span>
 
                   {actionLoading && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#38bdf8', background: 'rgba(56,189,248,0.08)', padding: '10px', borderRadius: '6px', border: '1px solid rgba(56,189,248,0.2)' }}>
@@ -2824,8 +3106,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                           <RotateCw size={12} /> Rollout Restart
                         </button>
 
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '10px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '10px' }}>
-                          <label style={{ fontSize: '11px', color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '10px', borderTop: '1px solid var(--tp-w06, rgba(255,255,255,0.06))', paddingTop: '10px' }}>
+                          <label style={{ fontSize: '11px', color: 'var(--tp-muted, #94a3b8)', display: 'flex', alignItems: 'center', gap: '4px' }}>
                             <Scale size={11} /> Scale Deployment (Replicas)
                           </label>
                           <div style={{ display: 'flex', gap: '8px' }}>
@@ -2837,11 +3119,11 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                               onChange={(e) => setScaleReplicas(parseInt(e.target.value) || 0)}
                               style={{
                                 width: '60px',
-                                background: 'rgba(2, 6, 23, 0.6)',
-                                border: '1px solid rgba(255,255,255,0.08)',
+                                background: 'var(--tp-ink60, rgba(2, 6, 23, 0.6))',
+                                border: '1px solid var(--tp-w08, rgba(255,255,255,0.08))',
                                 borderRadius: '6px',
                                 padding: '6px',
-                                color: '#fff',
+                                color: 'var(--tp-text, #fff)',
                                 outline: 'none',
                                 textAlign: 'center'
                               }}
@@ -2874,7 +3156,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
               {drawerTab === 'security' && selectedResource.type === 'docker' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ color: '#94a3b8' }}>Image Vulnerability Scanning</span>
+                    <span style={{ color: 'var(--tp-muted, #94a3b8)' }}>Image Vulnerability Scanning</span>
                     <button
                       disabled={scanLoading}
                       onClick={runSecurityScan}
@@ -2897,7 +3179,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                   </div>
 
                   {scanLoading && (
-                    <div style={{ padding: '30px 0', textAlign: 'center', color: '#94a3b8' }}>
+                    <div style={{ padding: '30px 0', textAlign: 'center', color: 'var(--tp-muted, #94a3b8)' }}>
                       <RefreshCw size={18} className="animate-spin" style={{ display: 'block', margin: '0 auto 10px auto' }} /> Scanning Docker image layers...
                     </div>
                   )}
@@ -2926,8 +3208,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                           <div style={{ fontSize: '8px', color: '#eab308', textTransform: 'uppercase', fontWeight: 600 }}>Medium</div>
                         </div>
                         <div style={{ flexGrow: 1, background: 'rgba(100, 116, 139, 0.1)', border: '1px solid #64748b', borderRadius: '6px', padding: '8px', textAlign: 'center' }}>
-                          <div style={{ color: '#94a3b8', fontSize: '16px', fontWeight: 'bold' }}>{scanResult.low || 0}</div>
-                          <div style={{ fontSize: '8px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>Low</div>
+                          <div style={{ color: 'var(--tp-muted, #94a3b8)', fontSize: '16px', fontWeight: 'bold' }}>{scanResult.low || 0}</div>
+                          <div style={{ fontSize: '8px', color: 'var(--tp-muted, #94a3b8)', textTransform: 'uppercase', fontWeight: 600 }}>Low</div>
                         </div>
                       </div>
 
@@ -2937,7 +3219,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                           <div style={{ fontWeight: 600, color: '#38bdf8', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
                             <Info size={12} /> Recommendation
                           </div>
-                          <p style={{ margin: 0, fontSize: '11px', color: '#cbd5e1', lineHeight: 1.4 }}>{scanResult.recommendation}</p>
+                          <p style={{ margin: 0, fontSize: '11px', color: 'var(--tp-text-3, #cbd5e1)', lineHeight: 1.4 }}>{scanResult.recommendation}</p>
                         </div>
                       )}
 
@@ -2947,7 +3229,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                           <span style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase' }}>Vulnerability List</span>
                           <div style={{ maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' }}>
                             {scanResult.vulnerabilities.map((v: any, idx: number) => (
-                              <div key={idx} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.04)', borderRadius: '6px', padding: '6px 8px' }}>
+                              <div key={idx} style={{ background: 'var(--tp-w02, rgba(255,255,255,0.02))', border: '1px solid var(--tp-w04, rgba(255,255,255,0.04))', borderRadius: '6px', padding: '6px 8px' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600 }}>
                                   <span style={{ color: '#38bdf8' }}>{v.cve}</span>
                                   <span style={{
@@ -2961,8 +3243,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                                     {v.severity}
                                   </span>
                                 </div>
-                                <div style={{ fontSize: '10px', color: '#cbd5e1', marginTop: '2px' }}>Package: {v.package}</div>
-                                <p style={{ fontSize: '10px', color: '#94a3b8', margin: '4px 0 0 0', lineHeight: 1.3 }}>{v.desc}</p>
+                                <div style={{ fontSize: '10px', color: 'var(--tp-text-3, #cbd5e1)', marginTop: '2px' }}>Package: {v.package}</div>
+                                <p style={{ fontSize: '10px', color: 'var(--tp-muted, #94a3b8)', margin: '4px 0 0 0', lineHeight: 1.3 }}>{v.desc}</p>
                               </div>
                             ))}
                           </div>
@@ -2982,8 +3264,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         display: 'flex', gap: '16px', marginTop: '10px', flexWrap: 'wrap',
         padding: '8px 4px', fontSize: '11px', color: 'var(--text-muted)'
       }}>
-        <span style={{ display: 'flex', alignItems: 'center', gap: '5px', marginRight: '8px', paddingRight: '12px', borderRight: '1px solid rgba(255,255,255,0.08)' }}>
-          <span style={{ fontSize: '10px', fontWeight: 600, color: '#94a3b8', letterSpacing: '0.04em' }}>FLOW →</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: '5px', marginRight: '8px', paddingRight: '12px', borderRight: '1px solid var(--tp-w08, rgba(255,255,255,0.08))' }}>
+          <span style={{ fontSize: '10px', fontWeight: 600, color: 'var(--tp-muted, #94a3b8)', letterSpacing: '0.04em' }}>FLOW →</span>
           <span style={{ fontSize: '9px', color: '#64748b' }}>Port → Container → Service → Deploy → Pod → Node</span>
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>

@@ -818,6 +818,30 @@ html[data-theme='dark'] .nav-item.active {
   box-shadow: 0 4px 20px rgba(0,0,0,0.4) !important;
 }
 
+/* Light map theme (toggle on the topology toolbar). Scoped to the map, so it
+   is independent of the app theme. */
+.topology-visualizer-container:has(> [data-map-theme="light"]) {
+  background: linear-gradient(145deg, #f8fafc 0%, #eef2f7 100%);
+}
+.topology-visualizer-container [data-map-theme="light"] .react-flow__controls {
+  background: #ffffff !important;
+  border: 1px solid rgba(15, 23, 42, 0.14) !important;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12) !important;
+}
+.topology-visualizer-container [data-map-theme="light"] .react-flow__controls button {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.1) !important;
+  color: #475569 !important;
+}
+.topology-visualizer-container [data-map-theme="light"] .react-flow__controls button:hover {
+  background: rgba(15, 23, 42, 0.06) !important;
+  color: #0f172a !important;
+}
+.topology-visualizer-container [data-map-theme="light"] .react-flow__minimap {
+  background: rgba(255, 255, 255, 0.96) !important;
+  border: 1px solid rgba(15, 23, 42, 0.14) !important;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12) !important;
+}
+
 .context-card {
   background: var(--bg-tertiary);
   border: 1px solid var(--border-color);
@@ -994,6 +1018,13 @@ html[data-theme='dark'] .badge.success {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
   border: 1px solid var(--border-color);
+}
+
+/* Identity words (root, sudo, su, user) read as typed on a command line —
+   never shouted. */
+.badge.badge-lc {
+  text-transform: none;
+  letter-spacing: 0.2px;
 }
 
 /* Action buttons */

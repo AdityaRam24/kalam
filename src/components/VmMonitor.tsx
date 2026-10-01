@@ -506,7 +506,7 @@ export const VmMonitor: React.FC = () => {
                     <td>
                       <span className="code-id">{v.user}@{v.host}</span>
                       {v.runsAsRoot && (
-                        <span className="badge error" style={{ fontSize: 9, marginLeft: 6 }}
+                        <span className="badge badge-lc error" style={{ fontSize: 9, marginLeft: 6 }}
                           title={v.user === 'root' ? 'Logged in as root' : `Commands are elevated with ${v.elevate}`}>
                           root{v.user === 'root' ? '' : ` · ${v.elevate}`}
                         </span>
@@ -529,7 +529,7 @@ export const VmMonitor: React.FC = () => {
                         <button className="icon-btn secondary" title="Open an interactive terminal as this login" onClick={() => { setExecRoot(false); setExecFor(v.name); }}><Play size={14} /></button>
                         <button
                           className="icon-btn warning"
-                          title={v.user === 'root' ? 'Already root — opens a login shell' : 'Open a ROOT terminal (sudo -i / su -) for administrative work'}
+                          title={v.user === 'root' ? 'Already root — opens a login shell' : 'Open a root terminal (sudo -i / su -) for administrative work'}
                           onClick={() => { setExecRoot(true); setExecFor(v.name); }}
                         >
                           <TerminalSquare size={14} />
@@ -599,7 +599,7 @@ export const VmMonitor: React.FC = () => {
                 <div style={{ fontSize: 13, fontWeight: 600 }}>
                   <ShieldAlert size={14} style={{ verticalAlign: -2, marginRight: 6, color: 'var(--hpe-green)' }} />
                   Root access on {rootFor}
-                  {vm?.runsAsRoot && <span className="badge error" style={{ fontSize: 10, marginLeft: 8 }}>currently root</span>}
+                  {vm?.runsAsRoot && <span className="badge badge-lc error" style={{ fontSize: 10, marginLeft: 8 }}>currently root</span>}
                 </div>
                 <button className="icon-btn" onClick={() => setRootFor(null)}><X size={16} /></button>
               </div>
@@ -620,11 +620,11 @@ export const VmMonitor: React.FC = () => {
                 <>
                   {o && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-                      <span className="badge neutral" style={{ fontSize: 10 }}>logs in as {o.currentUser || vm?.user}</span>
-                      {o.alreadyRoot && <span className="badge running" style={{ fontSize: 10 }}>already root</span>}
-                      {o.sudoPasswordless && <span className="badge running" style={{ fontSize: 10 }}>passwordless sudo</span>}
-                      {!o.sudoAvailable && <span className="badge warning" style={{ fontSize: 10 }}>no sudo</span>}
-                      {!o.suAvailable && <span className="badge warning" style={{ fontSize: 10 }}>no su</span>}
+                      <span className="badge badge-lc neutral" style={{ fontSize: 10 }}>logs in as {o.currentUser || vm?.user}</span>
+                      {o.alreadyRoot && <span className="badge badge-lc running" style={{ fontSize: 10 }}>already root</span>}
+                      {o.sudoPasswordless && <span className="badge badge-lc running" style={{ fontSize: 10 }}>passwordless sudo</span>}
+                      {!o.sudoAvailable && <span className="badge badge-lc warning" style={{ fontSize: 10 }}>no sudo</span>}
+                      {!o.suAvailable && <span className="badge badge-lc warning" style={{ fontSize: 10 }}>no su</span>}
                     </div>
                   )}
 

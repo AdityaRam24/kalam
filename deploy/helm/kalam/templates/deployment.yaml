@@ -65,6 +65,8 @@ spec:
             - name: KALAM_METRICS_DIR
               value: /data/metrics
             # Engine defaults a fresh browser starts with (GET /api/llm/defaults).
+            - name: KALAM_LLM_ENABLED
+              value: {{ ne (toString .Values.llm.enabled) "false" | quote }}
             - name: KALAM_PROVIDER
               value: {{ .Values.llm.provider | quote }}
             - name: KALAM_LOCAL_URL

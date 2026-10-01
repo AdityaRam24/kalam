@@ -29,6 +29,8 @@ interface Props {
   k8sResources: K8sResources;
   status: { kubernetes: { running: boolean } };
   llm: LlmParams;
+  /** False when the deployment turned AI off: the health-read card is hidden. */
+  aiEnabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +149,7 @@ const Table: React.FC<{ head: string[]; rows: string[][]; bad?: (r: string[]) =>
   </div>
 );
 
-export const PcaiStackView: React.FC<Props> = ({ k8sResources, status, llm }) => {
+export const PcaiStackView: React.FC<Props> = ({ k8sResources, status, llm, aiEnabled = true }) => {
   const [health, setHealth] = useState<string>('');
   const [healthLoading, setHealthLoading] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -240,7 +242,7 @@ export const PcaiStackView: React.FC<Props> = ({ k8sResources, status, llm }) =>
 
   const mermaid = useMemo(() => {
     const L: string[] = ['flowchart TB', '  GL["HPE GreenLake<br/>Control Plane"]'];
-    const ep = llm.provider === 'gemini' ? 'Gemini' : (llm.authKey ? 'Model Endpoint' : (llm.localModel || 'Local LLM'));
+    const ep = !aiEnabled ? 'MLIS' : llm.provider === 'gemini' ? 'Gemini' : (llm.authKey ? 'Model Endpoint' : (llm.localModel || 'Local LLM'));
     L.push(`  ME["Served Model Endpoint<br/>${ep}"]`);
     L.push('  subgraph PCAI["HPE Private Cloud AI"]');
     L.push('    direction TB');
@@ -270,7 +272,7 @@ export const PcaiStackView: React.FC<Props> = ({ k8sResources, status, llm }) =>
     L.push('  class GL gl;');
     L.push('  class ME ep;');
     return L.join('\n');
-  }, [inv, orderedLabels, k8sResources.nodes, llm]);
+  }, [inv, orderedLabels, k8sResources.nodes, llm, aiEnabled]);
 
   const runHealthRead = async () => {
     setHealthLoading(true);
@@ -536,7 +538,7 @@ export const PcaiStackView: React.FC<Props> = ({ k8sResources, status, llm }) =>
       </div>
 
       {/* AI health read */}
-      <div className="panel-card">
+      {aiEnabled && <div className="panel-card">
         <div className="panel-card-title">
           <h2><Activity size={18} /> PCAI Health Read</h2>
           <button className="btn primary" onClick={runHealthRead} disabled={healthLoading} style={{ padding: '6px 12px' }}>
@@ -550,7 +552,7 @@ export const PcaiStackView: React.FC<Props> = ({ k8sResources, status, llm }) =>
             Feed the live component rollup to the PCAI assistant for a grounded health assessment and prioritized checks.
           </p>
         )}
-      </div>
+      </div>}
     </div>
   );
 };

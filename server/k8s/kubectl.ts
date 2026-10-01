@@ -45,6 +45,22 @@ export function shellQuote(arg: string): string {
   return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * The line of kubectl's stderr worth showing a person.
+ *
+ * kubectl prefixes the real message with klog noise ("E1001 23:33:59.86 37164
+ * memcache.go:265] Unhandled Error ..."), so the first line is usually the
+ * least readable one. Prefer kubectl's own summary ("Unable to connect to the
+ * server: ...", "error: ...", "Error from server (Forbidden): ..."), else the
+ * last line with the klog prefix stripped.
+ */
+export function kubectlErrorLine(stderr: string): string {
+  const lines = (stderr || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const plain = lines.find((l) => /^(Unable to connect|The connection to the server|error:|Error from server)/i.test(l));
+  const pick = plain || lines[lines.length - 1] || '';
+  return pick.replace(/^[EWIF]\d{4}\s+[\d:.]+\s+\d+\s+\S+\]\s*/, '').slice(0, 300);
+}
+
 /** Run one kubectl invocation locally, without a shell. */
 export function runLocalKubectl(
   args: string[],
@@ -81,7 +97,7 @@ export async function runSteps(
       out[s.tag] = results[i].stdout;
       if (results[i].ok) ok.add(s.tag);
       else if (!s.optional && !error) {
-        error = (results[i].stderr.split('\n')[0] || 'kubectl failed').slice(0, 300);
+        error = kubectlErrorLine(results[i].stderr) || 'kubectl failed';
       }
     });
     return { out, ok, error };
