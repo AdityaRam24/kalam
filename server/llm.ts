@@ -432,6 +432,25 @@ export async function testLocal(localUrl: string, localModel: string, authKey?: 
   }
 }
 
+// KALAM_LLM_ENABLED=false (Helm llm.enabled) turns every AI feature off for a
+// deployment that has no model to talk to: the UI hides them and the server
+// refuses their routes. Anything other than "false" leaves them on.
+export function llmEnabled(): boolean {
+  return process.env.KALAM_LLM_ENABLED !== 'false';
+}
+
+// Routes that reach a model. /api/llm/defaults stays open because it is how
+// the UI learns the features are off.
+export const LLM_ROUTES = [
+  '/api/agent',
+  '/api/pcai/chat',
+  '/api/pcai/ingest',
+  '/api/pcai/learn',
+  '/api/llm/test',
+  '/api/llm/models',
+  '/api/llm/pull',
+];
+
 // Deployment-level engine defaults (KALAM_PROVIDER / KALAM_LOCAL_URL /
 // KALAM_LOCAL_MODEL, set by the Helm chart). The UI applies them only where
 // the browser has no saved choice, so an operator can point every fresh
@@ -439,6 +458,7 @@ export async function testLocal(localUrl: string, localModel: string, authKey?: 
 llmRouter.get('/api/llm/defaults', (_req, res) => {
   const provider = process.env.KALAM_PROVIDER;
   res.json({
+    enabled: llmEnabled(),
     provider: provider === 'gemini' || provider === 'local' ? provider : undefined,
     localUrl: process.env.KALAM_LOCAL_URL || undefined,
     localModel: process.env.KALAM_LOCAL_MODEL || undefined,

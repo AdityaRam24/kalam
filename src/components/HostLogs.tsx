@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ScrollText, RefreshCw, Search, Download, FileText, FileArchive, AlertTriangle, ShieldAlert,
   ChevronDown, ChevronRight, Copy, Check, Lightbulb, RotateCcw, Info, X, Brain, CheckCircle2,
+  ChevronsDownUp, ChevronsUpDown, Radio,
 } from 'lucide-react';
+import { downloadText, stamp, toCsv } from '../lib/health';
 import HostOverview, { type Overview, type ServiceAction } from './HostOverview';
 import { unitBadge } from '../lib/hostlogs';
 import JournalExplorer, { type JournalPreset } from './JournalExplorer';
@@ -138,6 +140,15 @@ export const HostLogs: React.FC = () => {
   const [viewCount, setViewCount] = useState(500);
   const [viewing, setViewing] = useState(false);
   const [viewError, setViewError] = useState('');
+  const [viewLevel, setViewLevel] = useState<'all' | 'problems' | 'critical'>('all');
+  const [viewWrap, setViewWrap] = useState(false);
+  const [viewNumbers, setViewNumbers] = useState(true);
+  const [follow, setFollow] = useState(false);
+  const [viewCopied, setViewCopied] = useState(false);
+
+  const [findingSort, setFindingSort] = useState<'severity' | 'count' | 'recent'>('severity');
+  const [fileSort, setFileSort] = useState<'path' | 'size' | 'mtime'>('mtime');
+  const [withFindingsOnly, setWithFindingsOnly] = useState(false);
 
   const [downloading, setDownloading] = useState('');
   const [note, setNote] = useState('');
@@ -156,9 +167,15 @@ export const HostLogs: React.FC = () => {
     fetch('/api/vms').then((r) => r.json()).then((d) => {
       const list: VmEntry[] = Array.isArray(d) ? d : d.vms || [];
       setVms(list);
-      if (list.length) setVm((cur) => cur || list[0].name);
+      let saved = '';
+      try { saved = localStorage.getItem('kalam_hostlogs_vm') || ''; } catch { /* storage unavailable */ }
+      if (list.length) setVm((cur) => cur || (list.some((v) => v.name === saved) ? saved : list[0].name));
     }).catch(() => setVms([]));
   }, []);
+  useEffect(() => {
+    if (!vm) return;
+    try { localStorage.setItem('kalam_hostlogs_vm', vm); } catch { /* storage unavailable */ }
+  }, [vm]);
 
   const post = (url: string, body: object) => fetch(url, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -254,6 +271,27 @@ export const HostLogs: React.FC = () => {
   }, [vm, viewGrep, viewCount]);
 
   useEffect(() => {
+    if (!follow || !viewPath || !vm) return;
+    const id = setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const d = await (await post('/api/logs/read', { name: vm, path: viewPath, lines: viewCount, grep: viewGrep })).json();
+        if (d.lines) setViewLines(d.lines);
+      } catch { /* the next tick will try again */ }
+    }, 5000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [follow, viewPath, vm, viewCount, viewGrep]);
+
+  // Keep the newest lines in view while following.
+  useEffect(() => {
+    if (!follow) return;
+    const el = document.getElementById('hostlogs-viewer-pre');
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [viewLines, follow]);
+
+  useEffect(() => {
+    setFollow(false);
     setScan(null); setViewPath(''); setViewLines([]); setSelected(new Set()); setOpen({});
     setOverview(null); setSvcResult(null);
     loadFiles(vm);
@@ -286,15 +324,61 @@ export const HostLogs: React.FC = () => {
 
   const visibleFindings = useMemo(() => {
     const q = findingQuery.toLowerCase();
+    const rank: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
+    const when = (f: Finding) => Date.parse(f.lastSeen || '') || 0;
     return (scan?.findings || []).filter((f) =>
       (sevFilter === 'all' || f.severity === sevFilter) &&
-      (!q || `${f.title} ${f.message} ${f.category} ${f.files.join(' ')}`.toLowerCase().includes(q)));
-  }, [scan, sevFilter, findingQuery]);
+      (!q || `${f.title} ${f.message} ${f.category} ${f.files.join(' ')} ${(f.units || []).join(' ')}`.toLowerCase().includes(q)))
+      .sort((a, b) => findingSort === 'count' ? b.count - a.count
+        : findingSort === 'recent' ? when(b) - when(a) || rank[a.severity] - rank[b.severity]
+          : rank[a.severity] - rank[b.severity] || b.count - a.count);
+  }, [scan, sevFilter, findingQuery, findingSort]);
 
   const visibleFiles = useMemo(() => {
     const q = fileQuery.toLowerCase();
-    return files.filter((f) => !q || f.path.toLowerCase().includes(q));
-  }, [files, fileQuery]);
+    return files
+      .filter((f) => (!q || f.path.toLowerCase().includes(q)) && (!withFindingsOnly || findingsByFile.has(f.path)))
+      .sort((a, b) => fileSort === 'size' ? b.size - a.size
+        : fileSort === 'mtime' ? Date.parse(b.mtime) - Date.parse(a.mtime)
+          : a.path.localeCompare(b.path));
+  }, [files, fileQuery, withFindingsOnly, findingsByFile, fileSort]);
+
+  // Viewer lines with their original line number, after the level filter.
+  const shownLines = useMemo(() => viewLines
+    .map((text, i) => ({ text, n: i + 1, sev: lineSeverity(text) }))
+    .filter((l) => viewLevel === 'all' || (viewLevel === 'critical' ? l.sev === 'critical' : l.sev === 'critical' || l.sev === 'warning')),
+  [viewLines, viewLevel]);
+  const viewCounts = useMemo(() => {
+    const c = { critical: 0, warning: 0, info: 0 };
+    for (const l of viewLines) { const sv = lineSeverity(l); if (sv) c[sv]++; }
+    return c;
+  }, [viewLines]);
+
+  // Highlight the grep term inside a line (case-insensitive, fixed string).
+  const highlight = (text: string): React.ReactNode => {
+    const term = viewGrep.trim();
+    if (!term) return text || ' ';
+    const lower = text.toLowerCase();
+    const t = term.toLowerCase();
+    const parts: React.ReactNode[] = [];
+    let at = 0;
+    let i = lower.indexOf(t);
+    while (i !== -1 && parts.length < 200) {
+      if (i > at) parts.push(text.slice(at, i));
+      parts.push(<mark key={i} style={{ background: 'rgba(255, 131, 0, 0.35)', color: 'inherit', borderRadius: 2 }}>{text.slice(i, i + term.length)}</mark>);
+      at = i + term.length;
+      i = lower.indexOf(t, at);
+    }
+    parts.push(text.slice(at));
+    return parts;
+  };
+
+  const exportFindings = () => {
+    const header = ['Severity', 'Title', 'Category', 'Count', 'First seen', 'Last seen', 'Units', 'Sources', 'Message', 'Explanation', 'Checks'];
+    const body = visibleFindings.map((f) => [f.severity, f.title, f.category, f.count, f.firstSeen, f.lastSeen, (f.units || []).join('; '),
+      f.files.join('; '), f.message, f.explain, f.checks.join(' | ')]);
+    downloadText(toCsv([header, ...body]), `kalam-${vm}-log-findings-${stamp()}.csv`, 'text/csv');
+  };
 
   const totalSize = files.reduce((n, f) => n + f.size, 0);
   const small = { padding: '5px 12px', fontSize: 12 };
@@ -560,7 +644,22 @@ export const HostLogs: React.FC = () => {
         <div className="panel-card-title">
           <h3><AlertTriangle size={15} /> Findings {scan?.reachable ? `(${visibleFindings.length}${scan.totalGroups > scan.findings.length ? ` of ${scan.totalGroups}` : ''})` : ''}</h3>
           {scan?.reachable && (
-            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <select className="form-input" value={findingSort} onChange={(e) => setFindingSort(e.target.value as typeof findingSort)} style={{ width: 'auto', ...small }}>
+                <option value="severity">Sort: severity</option>
+                <option value="count">Sort: most frequent</option>
+                <option value="recent">Sort: most recent</option>
+              </select>
+              <button className="btn secondary" style={small} disabled={!visibleFindings.length}
+                onClick={() => setOpen(Object.fromEntries(visibleFindings.map((f) => [f.key, true])))}>
+                <ChevronsUpDown size={13} /> Expand all
+              </button>
+              <button className="btn secondary" style={small} onClick={() => setOpen({})}>
+                <ChevronsDownUp size={13} /> Collapse all
+              </button>
+              <button className="btn secondary" style={small} disabled={!visibleFindings.length} onClick={exportFindings}>
+                <Download size={13} /> CSV
+              </button>
               <Search size={13} />
               <input className="form-input" placeholder="Filter findings…" value={findingQuery}
                 onChange={(e) => setFindingQuery(e.target.value)} style={{ width: 200, ...small }} />
@@ -654,6 +753,16 @@ export const HostLogs: React.FC = () => {
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             {journal && <button className="btn secondary" style={small} onClick={() => openJournal({})}>Open journal explorer</button>}
             <button className="btn secondary" style={small} onClick={() => openFile('dmesg', '', viewCount)}>View dmesg</button>
+            {scan?.reachable && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={withFindingsOnly} onChange={(e) => setWithFindingsOnly(e.target.checked)} /> With findings only
+              </label>
+            )}
+            <select className="form-input" value={fileSort} onChange={(e) => setFileSort(e.target.value as typeof fileSort)} style={{ width: 'auto', ...small }}>
+              <option value="mtime">Sort: recently modified</option>
+              <option value="size">Sort: largest</option>
+              <option value="path">Sort: path</option>
+            </select>
             <input className="form-input" placeholder="Filter paths…" value={fileQuery} onChange={(e) => setFileQuery(e.target.value)} style={{ width: 180, ...small }} />
             <button className="btn secondary" style={small} disabled={!selected.size || !!downloading}
               onClick={() => download({ paths: [...selected] }, 'selected', `${vm}-varlog-selected.tar.gz`)}>
@@ -731,17 +840,54 @@ export const HostLogs: React.FC = () => {
               <button className="btn secondary" type="submit" disabled={viewing} style={small}>
                 <RefreshCw size={13} className={viewing ? 'animate-spin' : ''} /> Load
               </button>
+              <button type="button" className={`btn ${follow ? 'primary' : 'secondary'}`} style={small} onClick={() => setFollow((f) => !f)}
+                title="Re-read the newest lines every 5 seconds, like tail -f">
+                <Radio size={13} className={follow ? 'loader' : ''} /> {follow ? 'Following' : 'Follow'}
+              </button>
             </form>
           )}
         </div>
         {!viewPath && <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted)' }}>Click a file, the journal or dmesg to read it here.</p>}
         {viewError && <p style={{ margin: '0 0 8px', fontSize: 12.5, color: '#FF8300' }}>{viewError}</p>}
         {viewPath && (
-          <pre style={{ ...mono, margin: 0, padding: 10, borderRadius: 6, maxHeight: 520, overflow: 'auto', background: 'var(--bg-code, rgba(0,0,0,0.25))', whiteSpace: 'pre' }}>
-            {viewing ? 'Loading…' : viewLines.length ? viewLines.map((l, i) => {
-              const s = lineSeverity(l);
-              return <div key={i} style={{ color: s ? SEV_COLOR[s] : undefined }}>{l || ' '}</div>;
-            }) : 'No lines.'}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8, fontSize: 12 }}>
+            <div className="subnav-pills">
+              <button className={`subnav-pill-btn ${viewLevel === 'all' ? 'active' : ''}`} onClick={() => setViewLevel('all')}>All ({viewLines.length})</button>
+              <button className={`subnav-pill-btn ${viewLevel === 'problems' ? 'active' : ''}`} onClick={() => setViewLevel('problems')}>
+                Errors + warnings ({viewCounts.critical + viewCounts.warning})
+              </button>
+              <button className={`subnav-pill-btn ${viewLevel === 'critical' ? 'active' : ''}`} onClick={() => setViewLevel('critical')}>
+                Critical ({viewCounts.critical})
+              </button>
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={viewNumbers} onChange={(e) => setViewNumbers(e.target.checked)} /> Line numbers
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={viewWrap} onChange={(e) => setViewWrap(e.target.checked)} /> Wrap
+            </label>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+              <button className="btn secondary" style={small} disabled={!shownLines.length}
+                onClick={() => {
+                  navigator.clipboard?.writeText(shownLines.map((l) => l.text).join('\n')).then(() => { setViewCopied(true); setTimeout(() => setViewCopied(false), 1500); }).catch(() => {});
+                }}>
+                {viewCopied ? <Check size={13} /> : <Copy size={13} />} Copy
+              </button>
+              <button className="btn secondary" style={small} disabled={!shownLines.length}
+                onClick={() => downloadText(shownLines.map((l) => l.text).join('\n'), `${vm}-${(viewPath.split('/').pop() || 'log').replace(/[^a-z0-9._-]+/gi, '_')}-${stamp()}.log`)}>
+                <Download size={13} /> Save view
+              </button>
+            </div>
+          </div>
+        )}
+        {viewPath && (
+          <pre id="hostlogs-viewer-pre" style={{ ...mono, margin: 0, padding: 10, borderRadius: 6, maxHeight: 520, overflow: 'auto', background: 'var(--bg-code, rgba(0,0,0,0.25))', whiteSpace: viewWrap ? 'pre-wrap' : 'pre', wordBreak: viewWrap ? 'break-word' : undefined }}>
+            {viewing ? 'Loading…' : shownLines.length ? shownLines.map((l) => (
+              <div key={l.n} style={{ color: l.sev ? SEV_COLOR[l.sev] : undefined, display: 'flex', gap: 10 }}>
+                {viewNumbers && <span style={{ color: 'var(--text-muted)', userSelect: 'none', minWidth: 42, textAlign: 'right', flexShrink: 0, opacity: 0.7 }}>{l.n}</span>}
+                <span style={{ flex: 1, minWidth: 0 }}>{highlight(l.text)}</span>
+              </div>
+            )) : viewLines.length ? 'No lines at this level — choose "All" above.' : 'No lines.'}
           </pre>
         )}
       </div>

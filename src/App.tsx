@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Terminal, 
   Layers, 
@@ -14,35 +14,41 @@ import {
   ChevronLeft,
   ChevronDown, 
   Sliders, 
-  MessageSquare,
-  Eye,
-  EyeOff,
-  ShieldAlert,
-  Info,
-  Cpu,
+//   MessageSquare,
+//   Eye,
+//   EyeOff,
+//   ShieldAlert,
+//   Info,
+//   Cpu,
   Search,
   X,
   Activity,
-  Sparkles,
+//   Sparkles,
   HardDrive,
   Sun,
   Moon,
   Network,
   History,
   Gauge,
-  ScrollText
+  ScrollText,
+  Zap
 } from 'lucide-react';
 import TopologyGraph from './components/TopologyGraph';
-import AgentTeamwork from './components/AgentTeamwork';
-import HPEAgentChat from './components/HPEAgentChat';
-import PcaiAssistant from './components/PcaiAssistant';
-import ModelPicker from './components/ModelPicker';
+// import AgentTeamwork from './components/AgentTeamwork';
+// import HPEAgentChat from './components/HPEAgentChat';
+// import PcaiAssistant from './components/PcaiAssistant';
+// import ModelPicker from './components/ModelPicker';
 import PcaiStackView from './components/PcaiStackView';
 import VmMonitor from './components/VmMonitor';
 import ClusterHistory from './components/ClusterHistory';
 import HostLogs from './components/HostLogs';
 import Observability from './components/Observability';
 import KubectlCheatSheet from './components/KubectlCheatSheet';
+import ClusterResources from './components/ClusterResources';
+import ClusterMetrics from './components/ClusterMetrics';
+import GpuUtilization from './components/GpuUtilization';
+import CaptureButton from './components/CaptureButton';
+import { HEALTH_BADGE, podHealthOf, podStatusText, workloadHealthOf, ageOf } from './lib/health';
 
 interface Container {
   id: string;
@@ -59,7 +65,13 @@ interface Container {
 interface Pod {
   name: string;
   namespace: string;
+  /** status.phase — Running even while a container crash-loops. */
   status: string;
+  /** What kubectl's STATUS column says: CrashLoopBackOff, Init:0/1, Terminating … */
+  displayStatus?: string;
+  health?: string;
+  /** Why the last restart happened (e.g. OOMKilled). */
+  lastReason?: string;
   ready: string;
   ip: string;
   node: string;
@@ -90,6 +102,11 @@ interface Service {
 interface Deployment {
   name: string;
   namespace: string;
+  /** Deployment | StatefulSet | DaemonSet */
+  kind?: string;
+  /** Rollout state: Available, Degraded, Updating, Unavailable, Failed, ScaledToZero. */
+  status?: string;
+  health?: string;
   ready: string;
   available: number;
   updated: number;
@@ -120,96 +137,116 @@ interface SystemStatus {
   kubernetes: { installed: boolean; version: string; running: boolean; context: string };
 }
 
-interface ChatMessage {
-  role: 'user' | 'agent';
-  content: string;
-  timestamp: Date;
-  actions?: Array<{
-    type: string;
-    id?: string;
-    name?: string;
-    namespace?: string;
-    replicas?: number;
-    label: string;
-  }>;
-  actionStatuses?: Record<string, { status: 'idle' | 'running' | 'success' | 'error'; output?: string }>;
-}
+// ── Disabled: only used by Agent Chat ──
+// interface ChatMessage {
+//   role: 'user' | 'agent';
+//   content: string;
+//   timestamp: Date;
+//   actions?: Array<{
+//     type: string;
+//     id?: string;
+//     name?: string;
+//     namespace?: string;
+//     replicas?: number;
+//     label: string;
+//   }>;
+//   actionStatuses?: Record<string, { status: 'idle' | 'running' | 'success' | 'error'; output?: string }>;
+// }
 
 export function App() {
   // Tabs & Config
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'logs' | 'metrics' | 'history' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet'>('dashboard');
-  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
-  const [showApiKey, setShowApiKey] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'logs' | 'metrics' | 'history' | 'gpu' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet'>('dashboard');
+//   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
+  const [apiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
+  // ── Disabled: settings modal state ──
+//   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [provider, setProvider] = useState<'gemini' | 'local' | 'custom'>(() => (localStorage.getItem('kalam_llm_provider') as 'gemini' | 'local' | 'custom') || 'gemini');
   const [localUrl, setLocalUrl] = useState<string>(() => localStorage.getItem('kalam_local_url') || 'http://localhost:11434/v1');
   const [localModel, setLocalModel] = useState<string>(() => localStorage.getItem('kalam_local_model') || 'qwen2.5-coder:7b');
-  const [embedModel, setEmbedModel] = useState<string>(() => localStorage.getItem('kalam_local_embed_model') || 'nomic-embed-text');
+  // ── Disabled: only used by PCAI Assistant ──
+//   const [embedModel, setEmbedModel] = useState<string>(() => localStorage.getItem('kalam_local_embed_model') || 'nomic-embed-text');
   // Custom OpenAI-compatible model endpoint (e.g. HPE MLIS, vLLM, OpenAI)
-  const [customUrl, setCustomUrl] = useState<string>(() => localStorage.getItem('kalam_custom_url') || '');
-  const [customModel, setCustomModel] = useState<string>(() => localStorage.getItem('kalam_custom_model') || '');
-  const [customKey, setCustomKey] = useState<string>(() => localStorage.getItem('kalam_custom_key') || '');
-  const [showCustomKey, setShowCustomKey] = useState<boolean>(false);
+//   const [customUrl, setCustomUrl] = useState<string>(() => localStorage.getItem('kalam_custom_url') || '');
+  const [customUrl] = useState<string>(() => localStorage.getItem('kalam_custom_url') || '');
+//   const [customModel, setCustomModel] = useState<string>(() => localStorage.getItem('kalam_custom_model') || '');
+  const [customModel] = useState<string>(() => localStorage.getItem('kalam_custom_model') || '');
+//   const [customKey, setCustomKey] = useState<string>(() => localStorage.getItem('kalam_custom_key') || '');
+  const [customKey] = useState<string>(() => localStorage.getItem('kalam_custom_key') || '');
+//   const [showCustomKey, setShowCustomKey] = useState<boolean>(false);
+  // ── Disabled: the AI pages are commented out, so nothing reads this flag ──
+  // // False when the deployment turned AI off (Helm llm.enabled=false): every
+  // // model-backed tab, button and setting is hidden, not just disabled.
+  // const [aiEnabled, setAiEnabled] = useState<boolean>(true);
   // Deployment defaults (Helm llm.* values) fill in only what this browser has
   // never chosen; an explicit choice in Settings always wins.
   useEffect(() => {
     fetch('/api/llm/defaults')
       .then((r) => (r.ok ? r.json() : null))
-      .then((d: { provider?: 'gemini' | 'local'; localUrl?: string; localModel?: string } | null) => {
+      .then((d: { enabled?: boolean; provider?: 'gemini' | 'local'; localUrl?: string; localModel?: string } | null) => {
         if (!d) return;
+        if (d.enabled === false) {
+          // setAiEnabled(false);
+          setActiveTab((t) => (t === 'chat' || t === 'agents' || t === 'pcai' ? 'dashboard' : t));
+          return;
+        }
         if (d.provider && !localStorage.getItem('kalam_llm_provider')) setProvider(d.provider);
         if (d.localUrl && !localStorage.getItem('kalam_local_url')) setLocalUrl(d.localUrl);
         if (d.localModel && !localStorage.getItem('kalam_local_model')) setLocalModel(d.localModel);
       })
       .catch(() => {});
   }, []);
-  // Model discovery for the custom endpoint (works with any OpenAI-compatible API)
-  const [customModels, setCustomModels] = useState<string[]>([]);
-  const [customDetectMsg, setCustomDetectMsg] = useState<string>('');
-  // Result of the last "Test connection" in Settings. Proving the engine
-  // answers here beats finding out three messages into a conversation.
-  const [llmTest, setLlmTest] = useState<{ status: 'idle' | 'running' | 'ok' | 'fail'; msg: string; hint?: string }>({ status: 'idle', msg: '' });
-  const testLlmConnection = async () => {
-    setLlmTest({ status: 'running', msg: 'Contacting the engine…' });
-    try {
-      const res = await fetch('/api/llm/test', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: effProvider, apiKey, localUrl: effLocalUrl, localModel: effLocalModel, authKey: effAuthKey }),
-      });
-      const d = await res.json();
-      if (d.ok) {
-        const where = d.provider === 'gemini' ? d.model : `${d.model} @ ${d.endpoint}`;
-        setLlmTest({ status: 'ok', msg: `Connected — ${where} answered in ${d.latencyMs} ms${d.reply ? ` ("${d.reply}")` : ''}.` });
-      } else {
-        setLlmTest({ status: 'fail', msg: d.error || 'The engine did not answer.', hint: d.hint });
-      }
-    } catch (e: any) {
-      setLlmTest({ status: 'fail', msg: `Could not reach the Kalam backend: ${e.message}` });
-    }
-  };
-
-  const detectCustomModels = async () => {
-    if (!customUrl.trim()) { setCustomDetectMsg('Enter the endpoint base URL first.'); return; }
-    setCustomDetectMsg('Detecting…');
-    setCustomModels([]);
-    try {
-      const q = new URLSearchParams({ localUrl: customUrl.trim() });
-      if (customKey.trim()) q.set('authKey', customKey.trim());
-      const res = await fetch(`/api/llm/models?${q.toString()}`);
-      const data = await res.json();
-      if (!data.endpointUp) { setCustomDetectMsg('Endpoint not reachable (check the URL and API key).'); return; }
-      const names = (data.chatModels || data.models || []).map((m: any) => m.name).filter(Boolean);
-      setCustomModels(names);
-      setCustomDetectMsg(names.length ? `${names.length} model(s) found — click one to select it.` : 'Endpoint is up, but it lists no models. Type the model name manually.');
-    } catch (e: any) {
-      setCustomDetectMsg(`Detection failed: ${e.message}`);
-    }
-  };
-  const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
+  // ── Disabled: model discovery / connection test, only used by the settings modal ──
+//   // Model discovery for the custom endpoint (works with any OpenAI-compatible API)
+//   const [customModels, setCustomModels] = useState<string[]>([]);
+//   const [customDetectMsg, setCustomDetectMsg] = useState<string>('');
+//   // Result of the last "Test connection" in Settings. Proving the engine
+//   // answers here beats finding out three messages into a conversation.
+//   const [llmTest, setLlmTest] = useState<{ status: 'idle' | 'running' | 'ok' | 'fail'; msg: string; hint?: string }>({ status: 'idle', msg: '' });
+//   const testLlmConnection = async () => {
+//     setLlmTest({ status: 'running', msg: 'Contacting the engine…' });
+//     try {
+//       const res = await fetch('/api/llm/test', {
+//         method: 'POST', headers: { 'Content-Type': 'application/json' },
+//         body: JSON.stringify({ provider: effProvider, apiKey, localUrl: effLocalUrl, localModel: effLocalModel, authKey: effAuthKey }),
+//       });
+//       const d = await res.json();
+//       if (d.ok) {
+//         const where = d.provider === 'gemini' ? d.model : `${d.model} @ ${d.endpoint}`;
+//         setLlmTest({ status: 'ok', msg: `Connected — ${where} answered in ${d.latencyMs} ms${d.reply ? ` ("${d.reply}")` : ''}.` });
+//       } else {
+//         setLlmTest({ status: 'fail', msg: d.error || 'The engine did not answer.', hint: d.hint });
+//       }
+//     } catch (e: any) {
+//       setLlmTest({ status: 'fail', msg: `Could not reach the Kalam backend: ${e.message}` });
+//     }
+//   };
+//
+//   const detectCustomModels = async () => {
+//     if (!customUrl.trim()) { setCustomDetectMsg('Enter the endpoint base URL first.'); return; }
+//     setCustomDetectMsg('Detecting…');
+//     setCustomModels([]);
+//     try {
+//       const q = new URLSearchParams({ localUrl: customUrl.trim() });
+//       if (customKey.trim()) q.set('authKey', customKey.trim());
+//       const res = await fetch(`/api/llm/models?${q.toString()}`);
+//       const data = await res.json();
+//       if (!data.endpointUp) { setCustomDetectMsg('Endpoint not reachable (check the URL and API key).'); return; }
+//       const names = (data.chatModels || data.models || []).map((m: any) => m.name).filter(Boolean);
+//       setCustomModels(names);
+//       setCustomDetectMsg(names.length ? `${names.length} model(s) found — click one to select it.` : 'Endpoint is up, but it lists no models. Type the model name manually.');
+//     } catch (e: any) {
+//       setCustomDetectMsg(`Detection failed: ${e.message}`);
+//     }
+//   };
+//   const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('kalam_theme') as 'light' | 'dark') || 'light');
   const [globalSearch, setGlobalSearch] = useState<string>('');
   const [dockerFilter, setDockerFilter] = useState<'all' | 'running' | 'stopped'>('all');
-  const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services'>('all');
+  const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services' | 'resources'>('all');
+  // Status filters on the Kubernetes page ('all' or an exact status word).
+  const [podStatusFilter, setPodStatusFilter] = useState<string>('all');
+  const [workloadStatusFilter, setWorkloadStatusFilter] = useState<string>('all');
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
 
   // ── Where the cluster views read from ────────────────────────────────────
@@ -259,19 +296,20 @@ export function App() {
     kubernetes: { installed: false, version: '', running: false, context: '' }
   });
 
-  // Security states
-  const [securityTarget, setSecurityTarget] = useState<string>('');
-  const [scanLoading, setScanLoading] = useState<boolean>(false);
-  const [scanResult, setScanResult] = useState<{
-    imageName: string;
-    isMock: boolean;
-    summary: { critical: number; high: number; medium: number; low: number };
-    vulnerabilities: Array<{ cve: string; package: string; severity: string; desc: string }>;
-    recommendation: string;
-    fixAction: { type: string; targetImage: string; desc: string } | null;
-  } | null>(null);
-  const [fixExecuting, setFixExecuting] = useState<boolean>(false);
-  const [fixOutput, setFixOutput] = useState<string | null>(null);
+  // ── Disabled: Image Hardener state ──
+//   // Security states
+//   const [securityTarget, setSecurityTarget] = useState<string>('');
+//   const [scanLoading, setScanLoading] = useState<boolean>(false);
+//   const [scanResult, setScanResult] = useState<{
+//     imageName: string;
+//     isMock: boolean;
+//     summary: { critical: number; high: number; medium: number; low: number };
+//     vulnerabilities: Array<{ cve: string; package: string; severity: string; desc: string }>;
+//     recommendation: string;
+//     fixAction: { type: string; targetImage: string; desc: string } | null;
+//   } | null>(null);
+//   const [fixExecuting, setFixExecuting] = useState<boolean>(false);
+//   const [fixOutput, setFixOutput] = useState<string | null>(null);
 
   // Resources Data
   const [dockerContainers, setDockerContainers] = useState<Container[]>([]);
@@ -310,52 +348,53 @@ export function App() {
     value: number;
   } | null>(null);
 
-  // Chat/Agent
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>(() => {
-    const saved = localStorage.getItem('kalam_chat_history');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map((m: any) => ({
-            ...m,
-            timestamp: m.timestamp ? new Date(m.timestamp) : new Date()
-          }));
-        }
-      } catch (e) {
-        console.error('Failed to parse saved chat history:', e);
-      }
-    }
-    return [
-      {
-        role: 'agent',
-        content: `Hello! I am **Kalam**, your local DevOps agent. 
-I have scanned your local workspace. I can see your running Docker containers and Kubernetes clusters.
-
-I can help you:
-1. Explain the state of your clusters and individual resources.
-2. Render visual graphs of relationships between containers, nodes, and pods.
-3. Automatically execute actions like restarting containers, scaling deployments, or viewing logs upon your approval.
-
-Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the settings panel by clicking the Sliders icon in the top header. Otherwise, you can still view your resources in the tabs above and use standard controls!`,
-        timestamp: new Date()
-      }
-    ];
-  });
-  const [chatInput, setChatInput] = useState<string>('');
-  const [chatLoading, setChatLoading] = useState<boolean>(false);
-  
-  // Interactive Diagram State
-  const [agentMermaidChart, setAgentMermaidChart] = useState<string>(() => localStorage.getItem('kalam_agent_mermaid_chart') || '');
-
-  // Persist chat and diagram state
-  useEffect(() => {
-    localStorage.setItem('kalam_chat_history', JSON.stringify(chatHistory));
-  }, [chatHistory]);
-
-  useEffect(() => {
-    localStorage.setItem('kalam_agent_mermaid_chart', agentMermaidChart);
-  }, [agentMermaidChart]);
+  // ── Disabled: Agent Chat state ──
+//   // Chat/Agent
+//   const [chatHistory, setChatHistory] = useState<ChatMessage[]>(() => {
+//     const saved = localStorage.getItem('kalam_chat_history');
+//     if (saved) {
+//       try {
+//         const parsed = JSON.parse(saved);
+//         if (Array.isArray(parsed) && parsed.length > 0) {
+//           return parsed.map((m: any) => ({
+//             ...m,
+//             timestamp: m.timestamp ? new Date(m.timestamp) : new Date()
+//           }));
+//         }
+//       } catch (e) {
+//         console.error('Failed to parse saved chat history:', e);
+//       }
+//     }
+//     return [
+//       {
+//         role: 'agent',
+//         content: `Hello! I am **Kalam**, your local DevOps agent. 
+// I have scanned your local workspace. I can see your running Docker containers and Kubernetes clusters.
+//
+// I can help you:
+// 1. Explain the state of your clusters and individual resources.
+// 2. Render visual graphs of relationships between containers, nodes, and pods.
+// 3. Automatically execute actions like restarting containers, scaling deployments, or viewing logs upon your approval.
+//
+// Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the settings panel by clicking the Sliders icon in the top header. Otherwise, you can still view your resources in the tabs above and use standard controls!`,
+//         timestamp: new Date()
+//       }
+//     ];
+//   });
+//   const [chatInput, setChatInput] = useState<string>('');
+//   const [chatLoading, setChatLoading] = useState<boolean>(false);
+//
+//   // Interactive Diagram State
+//   const [agentMermaidChart, setAgentMermaidChart] = useState<string>(() => localStorage.getItem('kalam_agent_mermaid_chart') || '');
+//
+//   // Persist chat and diagram state
+//   useEffect(() => {
+//     localStorage.setItem('kalam_chat_history', JSON.stringify(chatHistory));
+//   }, [chatHistory]);
+//
+//   useEffect(() => {
+//     localStorage.setItem('kalam_agent_mermaid_chart', agentMermaidChart);
+//   }, [agentMermaidChart]);
 
   // Apply & persist theme (light default / refined dark)
   useEffect(() => {
@@ -363,256 +402,258 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
     localStorage.setItem('kalam_theme', theme);
   }, [theme]);
 
-  // Floating Hover State for Node Tooltips
-  const [hoveredNode, setHoveredNode] = useState<{
-    key: string;
-    x: number;
-    y: number;
-    resource: {
-      title: string;
-      type: string;
-      status: 'success' | 'warning' | 'error' | 'neutral';
-      statusLabel: string;
-      details: Record<string, string | number>;
-    } | null;
-  } | null>(null);
+  // ── Disabled: graph hover tooltip state, only used by Agent Chat ──
+//   // Floating Hover State for Node Tooltips
+//   const [hoveredNode, setHoveredNode] = useState<{
+//     key: string;
+//     x: number;
+//     y: number;
+//     resource: {
+//       title: string;
+//       type: string;
+//       status: 'success' | 'warning' | 'error' | 'neutral';
+//       statusLabel: string;
+//       details: Record<string, string | number>;
+//     } | null;
+//   } | null>(null);
+//
+//   const handleNodeHover = (nodeKey: string | null, clientX: number, clientY: number) => {
+//     if (!nodeKey) {
+//       setHoveredNode(null);
+//       return;
+//     }
+//
+//     let type: 'docker' | 'pod' | 'svc' | 'deploy' | 'node' | null = null;
+//     let matchKey = '';
+//
+//     if (nodeKey.startsWith('text_')) {
+//       const label = nodeKey.replace('text_', '').toLowerCase();
+//
+//       const dockerMatch = dockerContainers.find(c => 
+//         label.includes(c.name.toLowerCase()) || 
+//         c.name.toLowerCase().includes(label) || 
+//         label.includes(c.id.slice(0, 8).toLowerCase())
+//       );
+//       if (dockerMatch) {
+//         type = 'docker';
+//         matchKey = dockerMatch.id;
+//       } else {
+//         const podMatch = k8sResources.pods.find(p => 
+//           label.includes(p.name.toLowerCase()) || 
+//           p.name.toLowerCase().includes(label)
+//         );
+//         if (podMatch) {
+//           type = 'pod';
+//           matchKey = podMatch.name;
+//         } else {
+//           const svcMatch = k8sResources.services.find(s => 
+//             label.includes(s.name.toLowerCase()) || 
+//             s.name.toLowerCase().includes(label)
+//           );
+//           if (svcMatch) {
+//             type = 'svc';
+//             matchKey = svcMatch.name;
+//           } else {
+//             const deployMatch = k8sResources.deployments.find(d => 
+//               label.includes(d.name.toLowerCase()) || 
+//               d.name.toLowerCase().includes(label)
+//             );
+//             if (deployMatch) {
+//               type = 'deploy';
+//               matchKey = deployMatch.name;
+//             } else {
+//               const nodeMatch = k8sResources.nodes.find(n => 
+//                 label.includes(n.name.toLowerCase()) || 
+//                 n.name.toLowerCase().includes(label)
+//               );
+//               if (nodeMatch) {
+//                 type = 'node';
+//                 matchKey = nodeMatch.name;
+//               }
+//             }
+//           }
+//         }
+//       }
+//     } else {
+//       const match = nodeKey.match(/(docker|pod|svc|deploy|node)_([a-zA-Z0-9_.-]+)/);
+//       if (match) {
+//         type = match[1] as any;
+//         const rawKey = match[2];
+//
+//         if (type === 'docker') {
+//           const c = dockerContainers.find(item => item.id.startsWith(rawKey) || item.name.replace(/[^a-zA-Z0-9]/g, '_') === rawKey);
+//           if (c) matchKey = c.id;
+//         } else {
+//           if (type === 'pod') {
+//             const p = k8sResources.pods.find(item => item.name.replace(/[^a-zA-Z0-9]/g, '_').includes(rawKey) || rawKey.includes(item.name.replace(/[^a-zA-Z0-9]/g, '_')));
+//             if (p) matchKey = p.name;
+//           } else if (type === 'svc') {
+//             const s = k8sResources.services.find(item => item.name.replace(/[^a-zA-Z0-9]/g, '_').includes(rawKey) || rawKey.includes(item.name.replace(/[^a-zA-Z0-9]/g, '_')));
+//             if (s) matchKey = s.name;
+//           } else if (type === 'deploy') {
+//             const d = k8sResources.deployments.find(item => item.name.replace(/[^a-zA-Z0-9]/g, '_').includes(rawKey) || rawKey.includes(item.name.replace(/[^a-zA-Z0-9]/g, '_')));
+//             if (d) matchKey = d.name;
+//           } else if (type === 'node') {
+//             const n = k8sResources.nodes.find(item => item.name.replace(/[^a-zA-Z0-9]/g, '_').includes(rawKey) || rawKey.includes(item.name.replace(/[^a-zA-Z0-9]/g, '_')));
+//             if (n) matchKey = n.name;
+//           }
+//         }
+//       }
+//     }
+//
+//     if (!type || !matchKey) {
+//       setHoveredNode({
+//         key: nodeKey,
+//         x: clientX,
+//         y: clientY,
+//         resource: null
+//       });
+//       return;
+//     }
+//
+//     let title = '';
+//     let status: 'success' | 'warning' | 'error' | 'neutral' = 'neutral';
+//     let statusLabel = '';
+//     const details: Record<string, string | number> = {};
+//
+//     if (type === 'docker') {
+//       const c = dockerContainers.find(item => item.id === matchKey);
+//       if (c) {
+//         title = c.name;
+//         status = c.state === 'running' ? 'success' : 'error';
+//         statusLabel = c.state.toUpperCase();
+//         details['Image'] = c.image.split('@')[0];
+//         details['Container ID'] = c.id.slice(0, 12);
+//         details['Mapped Ports'] = c.ports || 'None';
+//         details['Status'] = c.status;
+//         details['Created'] = c.created;
+//       }
+//     } else if (type === 'pod') {
+//       const p = k8sResources.pods.find(item => item.name === matchKey);
+//       if (p) {
+//         title = p.name;
+//         status = p.status === 'Running' ? 'success' : p.status === 'Pending' ? 'warning' : 'error';
+//         statusLabel = p.status;
+//         details['Namespace'] = p.namespace;
+//         details['Ready Containers'] = p.ready;
+//         details['Pod IP'] = p.ip;
+//         details['Scheduled Node'] = p.node;
+//         details['Restarts'] = p.restarts;
+//       }
+//     } else if (type === 'svc') {
+//       const s = k8sResources.services.find(item => item.name === matchKey);
+//       if (s) {
+//         title = s.name;
+//         status = 'neutral';
+//         statusLabel = 'SERVICE';
+//         details['Namespace'] = s.namespace;
+//         details['Type'] = s.type;
+//         details['Cluster IP'] = s.clusterIp;
+//         details['Ports'] = s.ports;
+//       }
+//     } else if (type === 'deploy') {
+//       const d = k8sResources.deployments.find(item => item.name === matchKey);
+//       if (d) {
+//         title = d.name;
+//         const parts = d.ready.split('/');
+//         const isHealthy = parts[0] === parts[1] && parts[0] !== '0';
+//         status = isHealthy ? 'success' : 'error';
+//         statusLabel = `DEPLOY: ${d.ready}`;
+//         details['Namespace'] = d.namespace;
+//         details['Available Replicas'] = d.available;
+//       }
+//     } else if (type === 'node') {
+//       const n = k8sResources.nodes.find(item => item.name === matchKey);
+//       if (n) {
+//         title = n.name;
+//         status = n.status === 'Ready' ? 'success' : 'error';
+//         statusLabel = `NODE: ${n.status}`;
+//         details['Role'] = n.role;
+//         details['IP Address'] = n.ip;
+//         details['Kube Version'] = n.version;
+//       }
+//     }
+//
+//     setHoveredNode({
+//       key: nodeKey,
+//       x: clientX,
+//       y: clientY,
+//       resource: {
+//         title,
+//         type: type.toUpperCase(),
+//         status,
+//         statusLabel,
+//         details
+//       }
+//     });
+//   };
 
-  const handleNodeHover = (nodeKey: string | null, clientX: number, clientY: number) => {
-    if (!nodeKey) {
-      setHoveredNode(null);
-      return;
-    }
-
-    let type: 'docker' | 'pod' | 'svc' | 'deploy' | 'node' | null = null;
-    let matchKey = '';
-
-    if (nodeKey.startsWith('text_')) {
-      const label = nodeKey.replace('text_', '').toLowerCase();
-      
-      const dockerMatch = dockerContainers.find(c => 
-        label.includes(c.name.toLowerCase()) || 
-        c.name.toLowerCase().includes(label) || 
-        label.includes(c.id.slice(0, 8).toLowerCase())
-      );
-      if (dockerMatch) {
-        type = 'docker';
-        matchKey = dockerMatch.id;
-      } else {
-        const podMatch = k8sResources.pods.find(p => 
-          label.includes(p.name.toLowerCase()) || 
-          p.name.toLowerCase().includes(label)
-        );
-        if (podMatch) {
-          type = 'pod';
-          matchKey = podMatch.name;
-        } else {
-          const svcMatch = k8sResources.services.find(s => 
-            label.includes(s.name.toLowerCase()) || 
-            s.name.toLowerCase().includes(label)
-          );
-          if (svcMatch) {
-            type = 'svc';
-            matchKey = svcMatch.name;
-          } else {
-            const deployMatch = k8sResources.deployments.find(d => 
-              label.includes(d.name.toLowerCase()) || 
-              d.name.toLowerCase().includes(label)
-            );
-            if (deployMatch) {
-              type = 'deploy';
-              matchKey = deployMatch.name;
-            } else {
-              const nodeMatch = k8sResources.nodes.find(n => 
-                label.includes(n.name.toLowerCase()) || 
-                n.name.toLowerCase().includes(label)
-              );
-              if (nodeMatch) {
-                type = 'node';
-                matchKey = nodeMatch.name;
-              }
-            }
-          }
-        }
-      }
-    } else {
-      const match = nodeKey.match(/(docker|pod|svc|deploy|node)_([a-zA-Z0-9_.-]+)/);
-      if (match) {
-        type = match[1] as any;
-        const rawKey = match[2];
-        
-        if (type === 'docker') {
-          const c = dockerContainers.find(item => item.id.startsWith(rawKey) || item.name.replace(/[^a-zA-Z0-9]/g, '_') === rawKey);
-          if (c) matchKey = c.id;
-        } else {
-          if (type === 'pod') {
-            const p = k8sResources.pods.find(item => item.name.replace(/[^a-zA-Z0-9]/g, '_').includes(rawKey) || rawKey.includes(item.name.replace(/[^a-zA-Z0-9]/g, '_')));
-            if (p) matchKey = p.name;
-          } else if (type === 'svc') {
-            const s = k8sResources.services.find(item => item.name.replace(/[^a-zA-Z0-9]/g, '_').includes(rawKey) || rawKey.includes(item.name.replace(/[^a-zA-Z0-9]/g, '_')));
-            if (s) matchKey = s.name;
-          } else if (type === 'deploy') {
-            const d = k8sResources.deployments.find(item => item.name.replace(/[^a-zA-Z0-9]/g, '_').includes(rawKey) || rawKey.includes(item.name.replace(/[^a-zA-Z0-9]/g, '_')));
-            if (d) matchKey = d.name;
-          } else if (type === 'node') {
-            const n = k8sResources.nodes.find(item => item.name.replace(/[^a-zA-Z0-9]/g, '_').includes(rawKey) || rawKey.includes(item.name.replace(/[^a-zA-Z0-9]/g, '_')));
-            if (n) matchKey = n.name;
-          }
-        }
-      }
-    }
-
-    if (!type || !matchKey) {
-      setHoveredNode({
-        key: nodeKey,
-        x: clientX,
-        y: clientY,
-        resource: null
-      });
-      return;
-    }
-
-    let title = '';
-    let status: 'success' | 'warning' | 'error' | 'neutral' = 'neutral';
-    let statusLabel = '';
-    const details: Record<string, string | number> = {};
-
-    if (type === 'docker') {
-      const c = dockerContainers.find(item => item.id === matchKey);
-      if (c) {
-        title = c.name;
-        status = c.state === 'running' ? 'success' : 'error';
-        statusLabel = c.state.toUpperCase();
-        details['Image'] = c.image.split('@')[0];
-        details['Container ID'] = c.id.slice(0, 12);
-        details['Mapped Ports'] = c.ports || 'None';
-        details['Status'] = c.status;
-        details['Created'] = c.created;
-      }
-    } else if (type === 'pod') {
-      const p = k8sResources.pods.find(item => item.name === matchKey);
-      if (p) {
-        title = p.name;
-        status = p.status === 'Running' ? 'success' : p.status === 'Pending' ? 'warning' : 'error';
-        statusLabel = p.status;
-        details['Namespace'] = p.namespace;
-        details['Ready Containers'] = p.ready;
-        details['Pod IP'] = p.ip;
-        details['Scheduled Node'] = p.node;
-        details['Restarts'] = p.restarts;
-      }
-    } else if (type === 'svc') {
-      const s = k8sResources.services.find(item => item.name === matchKey);
-      if (s) {
-        title = s.name;
-        status = 'neutral';
-        statusLabel = 'SERVICE';
-        details['Namespace'] = s.namespace;
-        details['Type'] = s.type;
-        details['Cluster IP'] = s.clusterIp;
-        details['Ports'] = s.ports;
-      }
-    } else if (type === 'deploy') {
-      const d = k8sResources.deployments.find(item => item.name === matchKey);
-      if (d) {
-        title = d.name;
-        const parts = d.ready.split('/');
-        const isHealthy = parts[0] === parts[1] && parts[0] !== '0';
-        status = isHealthy ? 'success' : 'error';
-        statusLabel = `DEPLOY: ${d.ready}`;
-        details['Namespace'] = d.namespace;
-        details['Available Replicas'] = d.available;
-      }
-    } else if (type === 'node') {
-      const n = k8sResources.nodes.find(item => item.name === matchKey);
-      if (n) {
-        title = n.name;
-        status = n.status === 'Ready' ? 'success' : 'error';
-        statusLabel = `NODE: ${n.status}`;
-        details['Role'] = n.role;
-        details['IP Address'] = n.ip;
-        details['Kube Version'] = n.version;
-      }
-    }
-
-    setHoveredNode({
-      key: nodeKey,
-      x: clientX,
-      y: clientY,
-      resource: {
-        title,
-        type: type.toUpperCase(),
-        status,
-        statusLabel,
-        details
-      }
-    });
-  };
-
-  const chatEndRef = useRef<HTMLDivElement>(null);
+//   const chatEndRef = useRef<HTMLDivElement>(null);
   const hasDataRef = useRef<boolean>(false);
 
-  const handleScanImage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!securityTarget) return;
-    
-    const container = dockerContainers.find(c => c.id === securityTarget);
-    if (!container) return;
+  // ── Disabled: Image Hardener handlers ──
+//   const handleScanImage = async (e: React.FormEvent) => {
+//     e.preventDefault();
+//     if (!securityTarget) return;
+//
+//     const container = dockerContainers.find(c => c.id === securityTarget);
+//     if (!container) return;
+//
+//     setScanLoading(true);
+//     setScanResult(null);
+//     setFixOutput(null);
+//     try {
+//       const res = await fetch('/api/docker/scan', {
+//         method: 'POST',
+//         headers: { 'Content-Type': 'application/json' },
+//         body: JSON.stringify({ imageName: container.image })
+//       });
+//       const data = await res.json();
+//       if (res.ok) {
+//         setScanResult(data);
+//       } else {
+//         alert(`Scan failed: ${data.error || 'Unknown error'}`);
+//       }
+//     } catch (err: any) {
+//       alert(`Network error: ${err.message}`);
+//     } finally {
+//       setScanLoading(false);
+//     }
+//   };
+//
+//   const handleApplySecurityFix = async () => {
+//     if (!scanResult || !scanResult.fixAction || !securityTarget) return;
+//     if (!confirm(`Are you sure you want to apply the security fix? This will stop and recreate the container using ${scanResult.fixAction.targetImage}.`)) return;
+//
+//     setFixExecuting(true);
+//     setFixOutput(null);
+//     try {
+//       const res = await fetch('/api/docker/apply-fix', {
+//         method: 'POST',
+//         headers: { 'Content-Type': 'application/json' },
+//         body: JSON.stringify({
+//           containerId: securityTarget,
+//           targetImage: scanResult.fixAction.targetImage
+//         })
+//       });
+//       const data = await res.json();
+//       if (res.ok) {
+//         setFixOutput(`[OK] ${data.message}\nCommand executed: ${data.cmdRun}\nNew Container ID: ${data.newContainerId}`);
+//         fetchClusterState();
+//       } else {
+//         setFixOutput(`[FAIL] Upgrade failed: ${data.error}\nDetails: ${data.details || ''}`);
+//       }
+//     } catch (err: any) {
+//       setFixOutput(`[FAIL] Network error: ${err.message}`);
+//     } finally {
+//       setFixExecuting(false);
+//     }
+//   };
 
-    setScanLoading(true);
-    setScanResult(null);
-    setFixOutput(null);
-    try {
-      const res = await fetch('/api/docker/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageName: container.image })
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setScanResult(data);
-      } else {
-        alert(`Scan failed: ${data.error || 'Unknown error'}`);
-      }
-    } catch (err: any) {
-      alert(`Network error: ${err.message}`);
-    } finally {
-      setScanLoading(false);
-    }
-  };
-
-  const handleApplySecurityFix = async () => {
-    if (!scanResult || !scanResult.fixAction || !securityTarget) return;
-    if (!confirm(`Are you sure you want to apply the security fix? This will stop and recreate the container using ${scanResult.fixAction.targetImage}.`)) return;
-
-    setFixExecuting(true);
-    setFixOutput(null);
-    try {
-      const res = await fetch('/api/docker/apply-fix', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          containerId: securityTarget,
-          targetImage: scanResult.fixAction.targetImage
-        })
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setFixOutput(`[OK] ${data.message}\nCommand executed: ${data.cmdRun}\nNew Container ID: ${data.newContainerId}`);
-        fetchClusterState();
-      } else {
-        setFixOutput(`[FAIL] Upgrade failed: ${data.error}\nDetails: ${data.details || ''}`);
-      }
-    } catch (err: any) {
-      setFixOutput(`[FAIL] Network error: ${err.message}`);
-    } finally {
-      setFixExecuting(false);
-    }
-  };
-
-  // Auto-scroll chat
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatHistory, chatLoading]);
+//   // Auto-scroll chat
+//   useEffect(() => {
+//     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+//   }, [chatHistory, chatLoading]);
 
   // Fetch initial cluster state
   const fetchClusterState = async () => {
@@ -803,11 +844,12 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh, source, vmList.length]);
 
-  // Save API Key
-  const handleSaveApiKey = (key: string) => {
-    setApiKey(key);
-    localStorage.setItem('kalam_gemini_api_key', key);
-  };
+  // ── Disabled: settings modal handler ──
+//   // Save API Key
+//   const handleSaveApiKey = (key: string) => {
+//     setApiKey(key);
+//     localStorage.setItem('kalam_gemini_api_key', key);
+//   };
 
   // Fetch Logs
   const fetchLogs = async (type: 'docker' | 'k8s', id: string, namespace?: string) => {
@@ -907,195 +949,196 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
     }
   };
 
-  // Chat message submission
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!chatInput.trim()) return;
-
-    const userPrompt = chatInput;
-    setChatInput('');
-    setChatLoading(true);
-
-    // Append user message
-    const userMsg: ChatMessage = {
-      role: 'user',
-      content: userPrompt,
-      timestamp: new Date()
-    };
-    setChatHistory(prev => [...prev, userMsg]);
-
-    try {
-      // Call backend agent api
-      const response = await fetch('/api/agent/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: userPrompt,
-          chatHistory: chatHistory.map(h => ({ role: h.role, content: h.content })),
-          apiKey: apiKey,
-          provider: effProvider,
-          localUrl: effLocalUrl,
-          localModel: effLocalModel,
-          authKey: effAuthKey
-        })
-      });
-
-      const data = await response.json();
-      if (!response.ok) {
-        const errorMsg: ChatMessage = {
-          role: 'agent',
-          content: `**Error talking to backend:** ${data.error || 'Unknown error occurred'}\n\n*Details: ${data.details || 'Check console logs.'}*`,
-          timestamp: new Date()
-        };
-        setChatHistory(prev => [...prev, errorMsg]);
-        return;
-      }
-
-      // Parse the response to extract Actions and Mermaid diagrams
-      let text = data.content;
-      
-      // Extract [ACTION: {...}] definitions
-      const actions: any[] = [];
-      const actionRegex = /\[ACTION:\s*({.*?})\]/g;
-      let match;
-      while ((match = actionRegex.exec(text)) !== null) {
-        try {
-          actions.push(JSON.parse(match[1]));
-        } catch (err) {
-          console.error('Failed to parse action json:', match[1], err);
-        }
-      }
-      
-      // Strip actions from text display
-      text = text.replace(actionRegex, '').trim();
-
-      // Extract Mermaid block
-      const mermaidRegex = /```mermaid([\s\S]*?)```/g;
-      const mermaidMatch = mermaidRegex.exec(text);
-      if (mermaidMatch) {
-        const diagramCode = mermaidMatch[1].trim();
-        setAgentMermaidChart(diagramCode);
-      }
-
-      // Set initial state for actions statuses
-      const actionStatuses: Record<string, { status: 'idle' | 'running' | 'success' | 'error'; output?: string }> = {};
-      actions.forEach((_, idx) => {
-        actionStatuses[`act-${idx}`] = { status: 'idle' };
-      });
-
-      const agentMsg: ChatMessage = {
-        role: 'agent',
-        content: text,
-        timestamp: new Date(),
-        actions: actions.length > 0 ? actions : undefined,
-        actionStatuses: actions.length > 0 ? actionStatuses : undefined
-      };
-
-      setChatHistory(prev => [...prev, agentMsg]);
-    } catch (e: any) {
-      const errorMsg: ChatMessage = {
-        role: 'agent',
-        content: `**Failed to send message:** Network error. Make sure your server is running.\n\n*Details: ${e.message}*`,
-        timestamp: new Date()
-      };
-      setChatHistory(prev => [...prev, errorMsg]);
-    } finally {
-      setChatLoading(false);
-    }
-  };
-
-  // Run action recommended in chat
-  const handleExecuteAgentAction = async (msgIndex: number, actionIndex: number, action: any) => {
-    const actKey = `act-${actionIndex}`;
-    
-    // Update state to running
-    setChatHistory(prev => {
-      const copy = [...prev];
-      const msg = copy[msgIndex];
-      if (msg.actionStatuses) {
-        msg.actionStatuses[actKey] = { status: 'running' };
-      }
-      return copy;
-    });
-
-    try {
-      let url = '';
-      let body: any = {};
-
-      if (action.type.startsWith('docker_')) {
-        // Map type (e.g. docker_restart) to action string (e.g. restart)
-        const actStr = action.type.replace('docker_', '');
-        const host = hostFor('container', action.id);
-        if (isRemote) {
-          url = '/api/vms/action';
-          body = { name: host, kind: 'docker', action: actStr, id: action.id };
-        } else {
-          url = '/api/docker/action';
-          body = { action: actStr, containerId: action.id };
-        }
-      } else if (action.type.startsWith('k8s_')) {
-        // Map type (e.g. k8s_restart_deploy) to action string (e.g. restart_deploy)
-        const actStr = action.type.replace('k8s_', '');
-        const host = hostFor('k8s', action.name, action.namespace);
-        if (isRemote) {
-          url = '/api/vms/action';
-          body = { name: host, kind: 'k8s', action: actStr, id: action.name, namespace: action.namespace, replicas: action.replicas, workloadKind: workloadKindOf(action.name, action.namespace) };
-        } else {
-          url = '/api/k8s/action';
-          body = {
-            action: actStr,
-            name: action.name,
-            namespace: action.namespace,
-            replicas: action.replicas,
-            kind: workloadKindOf(action.name, action.namespace),
-          };
-        }
-      }
-      if (isRemote && !body.name) throw new Error('Could not tell which host this resource is on. Pick that host in the source selector and retry.');
-
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-
-      const data = await res.json();
-      
-      setChatHistory(prev => {
-        const copy = [...prev];
-        const msg = copy[msgIndex];
-        if (msg.actionStatuses) {
-          if (res.ok) {
-            msg.actionStatuses[actKey] = { 
-              status: 'success', 
-              output: data.message || 'Action executed successfully.' 
-            };
-          } else {
-            msg.actionStatuses[actKey] = { 
-              status: 'error', 
-              output: data.error || 'Action execution failed.' 
-            };
-          }
-        }
-        return copy;
-      });
-
-      // Refresh resource list
-      fetchClusterState();
-    } catch (e: any) {
-      setChatHistory(prev => {
-        const copy = [...prev];
-        const msg = copy[msgIndex];
-        if (msg.actionStatuses) {
-          msg.actionStatuses[actKey] = { 
-            status: 'error', 
-            output: `Network error: ${e.message}` 
-          };
-        }
-        return copy;
-      });
-    }
-  };
+  // ── Disabled: Agent Chat handlers ──
+//   // Chat message submission
+//   const handleSendMessage = async (e: React.FormEvent) => {
+//     e.preventDefault();
+//     if (!chatInput.trim()) return;
+//
+//     const userPrompt = chatInput;
+//     setChatInput('');
+//     setChatLoading(true);
+//
+//     // Append user message
+//     const userMsg: ChatMessage = {
+//       role: 'user',
+//       content: userPrompt,
+//       timestamp: new Date()
+//     };
+//     setChatHistory(prev => [...prev, userMsg]);
+//
+//     try {
+//       // Call backend agent api
+//       const response = await fetch('/api/agent/chat', {
+//         method: 'POST',
+//         headers: { 'Content-Type': 'application/json' },
+//         body: JSON.stringify({
+//           prompt: userPrompt,
+//           chatHistory: chatHistory.map(h => ({ role: h.role, content: h.content })),
+//           apiKey: apiKey,
+//           provider: effProvider,
+//           localUrl: effLocalUrl,
+//           localModel: effLocalModel,
+//           authKey: effAuthKey
+//         })
+//       });
+//
+//       const data = await response.json();
+//       if (!response.ok) {
+//         const errorMsg: ChatMessage = {
+//           role: 'agent',
+//           content: `**Error talking to backend:** ${data.error || 'Unknown error occurred'}\n\n*Details: ${data.details || 'Check console logs.'}*`,
+//           timestamp: new Date()
+//         };
+//         setChatHistory(prev => [...prev, errorMsg]);
+//         return;
+//       }
+//
+//       // Parse the response to extract Actions and Mermaid diagrams
+//       let text = data.content;
+//
+//       // Extract [ACTION: {...}] definitions
+//       const actions: any[] = [];
+//       const actionRegex = /\[ACTION:\s*({.*?})\]/g;
+//       let match;
+//       while ((match = actionRegex.exec(text)) !== null) {
+//         try {
+//           actions.push(JSON.parse(match[1]));
+//         } catch (err) {
+//           console.error('Failed to parse action json:', match[1], err);
+//         }
+//       }
+//
+//       // Strip actions from text display
+//       text = text.replace(actionRegex, '').trim();
+//
+//       // Extract Mermaid block
+//       const mermaidRegex = /```mermaid([\s\S]*?)```/g;
+//       const mermaidMatch = mermaidRegex.exec(text);
+//       if (mermaidMatch) {
+//         const diagramCode = mermaidMatch[1].trim();
+//         setAgentMermaidChart(diagramCode);
+//       }
+//
+//       // Set initial state for actions statuses
+//       const actionStatuses: Record<string, { status: 'idle' | 'running' | 'success' | 'error'; output?: string }> = {};
+//       actions.forEach((_, idx) => {
+//         actionStatuses[`act-${idx}`] = { status: 'idle' };
+//       });
+//
+//       const agentMsg: ChatMessage = {
+//         role: 'agent',
+//         content: text,
+//         timestamp: new Date(),
+//         actions: actions.length > 0 ? actions : undefined,
+//         actionStatuses: actions.length > 0 ? actionStatuses : undefined
+//       };
+//
+//       setChatHistory(prev => [...prev, agentMsg]);
+//     } catch (e: any) {
+//       const errorMsg: ChatMessage = {
+//         role: 'agent',
+//         content: `**Failed to send message:** Network error. Make sure your server is running.\n\n*Details: ${e.message}*`,
+//         timestamp: new Date()
+//       };
+//       setChatHistory(prev => [...prev, errorMsg]);
+//     } finally {
+//       setChatLoading(false);
+//     }
+//   };
+//
+//   // Run action recommended in chat
+//   const handleExecuteAgentAction = async (msgIndex: number, actionIndex: number, action: any) => {
+//     const actKey = `act-${actionIndex}`;
+//
+//     // Update state to running
+//     setChatHistory(prev => {
+//       const copy = [...prev];
+//       const msg = copy[msgIndex];
+//       if (msg.actionStatuses) {
+//         msg.actionStatuses[actKey] = { status: 'running' };
+//       }
+//       return copy;
+//     });
+//
+//     try {
+//       let url = '';
+//       let body: any = {};
+//
+//       if (action.type.startsWith('docker_')) {
+//         // Map type (e.g. docker_restart) to action string (e.g. restart)
+//         const actStr = action.type.replace('docker_', '');
+//         const host = hostFor('container', action.id);
+//         if (isRemote) {
+//           url = '/api/vms/action';
+//           body = { name: host, kind: 'docker', action: actStr, id: action.id };
+//         } else {
+//           url = '/api/docker/action';
+//           body = { action: actStr, containerId: action.id };
+//         }
+//       } else if (action.type.startsWith('k8s_')) {
+//         // Map type (e.g. k8s_restart_deploy) to action string (e.g. restart_deploy)
+//         const actStr = action.type.replace('k8s_', '');
+//         const host = hostFor('k8s', action.name, action.namespace);
+//         if (isRemote) {
+//           url = '/api/vms/action';
+//           body = { name: host, kind: 'k8s', action: actStr, id: action.name, namespace: action.namespace, replicas: action.replicas, workloadKind: workloadKindOf(action.name, action.namespace) };
+//         } else {
+//           url = '/api/k8s/action';
+//           body = {
+//             action: actStr,
+//             name: action.name,
+//             namespace: action.namespace,
+//             replicas: action.replicas,
+//             kind: workloadKindOf(action.name, action.namespace),
+//           };
+//         }
+//       }
+//       if (isRemote && !body.name) throw new Error('Could not tell which host this resource is on. Pick that host in the source selector and retry.');
+//
+//       const res = await fetch(url, {
+//         method: 'POST',
+//         headers: { 'Content-Type': 'application/json' },
+//         body: JSON.stringify(body)
+//       });
+//
+//       const data = await res.json();
+//
+//       setChatHistory(prev => {
+//         const copy = [...prev];
+//         const msg = copy[msgIndex];
+//         if (msg.actionStatuses) {
+//           if (res.ok) {
+//             msg.actionStatuses[actKey] = { 
+//               status: 'success', 
+//               output: data.message || 'Action executed successfully.' 
+//             };
+//           } else {
+//             msg.actionStatuses[actKey] = { 
+//               status: 'error', 
+//               output: data.error || 'Action execution failed.' 
+//             };
+//           }
+//         }
+//         return copy;
+//       });
+//
+//       // Refresh resource list
+//       fetchClusterState();
+//     } catch (e: any) {
+//       setChatHistory(prev => {
+//         const copy = [...prev];
+//         const msg = copy[msgIndex];
+//         if (msg.actionStatuses) {
+//           msg.actionStatuses[actKey] = { 
+//             status: 'error', 
+//             output: `Network error: ${e.message}` 
+//           };
+//         }
+//         return copy;
+//       });
+//     }
+//   };
 
 
 
@@ -1155,12 +1198,44 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
   const filteredK8sPods = useMemo(() => {
     return k8sResources.pods.filter(p => {
+      if (podStatusFilter !== 'all' && podStatusText(p) !== podStatusFilter) return false;
       return !globalSearch || 
         p.name.toLowerCase().includes(globalSearch.toLowerCase()) ||
         p.namespace.toLowerCase().includes(globalSearch.toLowerCase()) ||
+        podStatusText(p).toLowerCase().includes(globalSearch.toLowerCase()) ||
         (p.node && p.node.toLowerCase().includes(globalSearch.toLowerCase()));
     });
-  }, [k8sResources.pods, globalSearch]);
+  }, [k8sResources.pods, globalSearch, podStatusFilter]);
+
+  // "Running: 41 · CrashLoopBackOff: 2 · Pending: 1" — worst first, so a
+  // problem is the first thing read rather than the last.
+  const HEALTH_RANK: Record<string, number> = { failing: 0, progressing: 1, unknown: 2, healthy: 3, completed: 4 };
+  const podStatusCounts = useMemo(() => {
+    const m = new Map<string, { n: number; h: ReturnType<typeof podHealthOf> }>();
+    for (const p of k8sResources.pods) {
+      const st = podStatusText(p);
+      const cur = m.get(st) || { n: 0, h: podHealthOf(p) };
+      cur.n++;
+      m.set(st, cur);
+    }
+    return [...m.entries()]
+      .sort((a, b) => HEALTH_RANK[a[1].h] - HEALTH_RANK[b[1].h] || b[1].n - a[1].n)
+      .map(([st, v]) => [st, v.n, v.h] as const);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [k8sResources.pods]);
+  const workloadStatusCounts = useMemo(() => {
+    const m = new Map<string, { n: number; h: ReturnType<typeof workloadHealthOf> }>();
+    for (const d of k8sResources.deployments) {
+      const st = d.status || (workloadHealthOf(d) === 'healthy' ? 'Available' : 'Not ready');
+      const cur = m.get(st) || { n: 0, h: workloadHealthOf(d) };
+      cur.n++;
+      m.set(st, cur);
+    }
+    return [...m.entries()]
+      .sort((a, b) => HEALTH_RANK[a[1].h] - HEALTH_RANK[b[1].h] || b[1].n - a[1].n)
+      .map(([st, v]) => [st, v.n, v.h] as const);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [k8sResources.deployments]);
 
   const filteredK8sNodes = useMemo(() => {
     return k8sResources.nodes.filter(n => {
@@ -1172,11 +1247,14 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
   const filteredK8sDeployments = useMemo(() => {
     return k8sResources.deployments.filter(d => {
+      const st = d.status || (workloadHealthOf(d) === 'healthy' ? 'Available' : 'Not ready');
+      if (workloadStatusFilter !== 'all' && st !== workloadStatusFilter) return false;
       return !globalSearch || 
         d.name.toLowerCase().includes(globalSearch.toLowerCase()) ||
-        d.namespace.toLowerCase().includes(globalSearch.toLowerCase());
+        d.namespace.toLowerCase().includes(globalSearch.toLowerCase()) ||
+        st.toLowerCase().includes(globalSearch.toLowerCase());
     });
-  }, [k8sResources.deployments, globalSearch]);
+  }, [k8sResources.deployments, globalSearch, workloadStatusFilter]);
 
   const filteredK8sServices = useMemo(() => {
     return k8sResources.services.filter(s => {
@@ -1195,7 +1273,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
   const effLocalModel = provider === 'custom' ? customModel : localModel;
   const effAuthKey = provider === 'custom' ? customKey : undefined;
   const llmParams = { provider: effProvider, apiKey, localUrl: effLocalUrl, localModel: effLocalModel, authKey: effAuthKey };
-  const providerLabel = provider === 'gemini' ? 'Gemini' : provider === 'custom' ? (customModel || 'Endpoint') : localModel;
+//   const providerLabel = provider === 'gemini' ? 'Gemini' : provider === 'custom' ? (customModel || 'Endpoint') : localModel;
 
   return (
     <div className="app-shell">
@@ -1306,6 +1384,16 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               <span className="nav-item-badge">Map</span>
             </button>
             <button
+              className={`nav-item ${activeTab === 'gpu' ? 'active' : ''}`}
+              onClick={() => setActiveTab('gpu')}
+            >
+              <span className="nav-item-icon"><Zap size={18} /></span>
+              <span className="nav-item-text">GPU Utilization</span>
+              <span className="nav-item-badge">nvidia-smi</span>
+            </button>
+            {/* Disabled: Agent Chat / Agent Teamwork / PCAI Assistant navigation
+            {aiEnabled && <>
+            <button
               className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`}
               onClick={() => setActiveTab('chat')}
             >
@@ -1329,8 +1417,11 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               <span className="nav-item-text">PCAI Assistant</span>
               <span className="nav-item-badge">HPE AI</span>
             </button>
+            </>}
+            */}
           </div>
 
+          {/* Disabled: Image Hardener navigation
           <div className="nav-group">
             <span className="nav-group-label">Security & Audit</span>
             <button 
@@ -1342,6 +1433,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               <span className="nav-item-badge">CVE</span>
             </button>
           </div>
+          */}
         </nav>
 
         <div className="sidebar-footer">
@@ -1383,6 +1475,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 {activeTab === 'logs' && 'Host Logs — /var/log Collection & Issue Detection'}
                 {activeTab === 'metrics' && 'Observability — Host Telemetry Over Time'}
                 {activeTab === 'history' && 'Cluster Change History — What Changed, When, and Who'}
+                {activeTab === 'gpu' && 'GPU Utilization — Which Model Runs Where, and How Hard'}
                 {activeTab === 'chat' && 'Kalam Agentic DevOps Assistant'}
                 {activeTab === 'security' && 'Container Security & CVE Patching'}
                 {activeTab === 'agents' && 'Multi-Agent Swarm Visualizer'}
@@ -1478,10 +1571,22 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               <RefreshCw size={15} className={loading ? 'loader' : ''} />
             </button>
 
-            {/* Provider Pill */}
-            <span className="badge running" style={{ fontSize: '11px', padding: '6px 10px' }}>
-              HPE AI: {providerLabel}
-            </span>
+            {/* Disabled: "HPE AI: <model>" pill
+            {/* Provider Pill *\/}
+            {aiEnabled && (
+              <span className="badge running" style={{ fontSize: '11px', padding: '6px 10px' }}>
+                HPE AI: {providerLabel}
+              </span>
+            )}
+            */}
+
+            {/* Capture the current state: screenshot, JSON, or a history snapshot */}
+            <CaptureButton
+              pageName={activeTab}
+              source={source}
+              vmNames={vmList.map(v => v.name)}
+              snapshot={() => ({ status, containers: dockerContainers, kubernetes: k8sResources, error: errorMsg })}
+            />
 
             {/* Theme Toggle */}
             <button
@@ -1494,16 +1599,20 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
             </button>
 
-            {/* Settings Trigger */}
-            <button
-              type="button"
-              className="icon-btn primary"
-              onClick={() => setSettingsModalOpen(true)}
-              title="Configure Agent Settings"
-              style={{ padding: '8px' }}
-            >
-              <Sliders size={16} />
-            </button>
+            {/* Disabled: agent/model settings button
+            {/* Settings Trigger — every setting in it is an AI engine setting *\/}
+            {aiEnabled && (
+              <button
+                type="button"
+                className="icon-btn primary"
+                onClick={() => setSettingsModalOpen(true)}
+                title="Configure Agent Settings"
+                style={{ padding: '8px' }}
+              >
+                <Sliders size={16} />
+              </button>
+            )}
+            */}
           </div>
         </header>
 
@@ -1539,7 +1648,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                   </span>
                 )}
                 {!isAggregate && vmList.find(v => v.name === source)?.runsAsRoot === false && (
-                  <span className="badge warning" style={{ fontSize: 10 }} title="Some workloads stay invisible without root">
+                  <span className="badge badge-lc warning" style={{ fontSize: 10 }} title="Some workloads stay invisible without root">
                     not root — some workloads may be hidden
                   </span>
                 )}
@@ -1632,6 +1741,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                       source={source}
                       onSourceChange={pickSource}
                       sources={sourceOptions}
+                      defaultNamespace="kube-system"
                     />
                   ) : (
                     <div className="text-secondary" style={{ fontStyle: 'italic', padding: '32px', textAlign: 'center' }}>
@@ -1641,8 +1751,11 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 </div>
               </div>
 
+              {/* CPU / memory / GPU / pod capacity — used and requested */}
+              <ClusterMetrics k8sResources={k8sResources} source={source} vmNames={vmList.map(v => v.name)} compact />
+
               {/* Secondary Info Grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '16px' }}>
                 <div className="panel-card">
                   <div className="panel-card-title">
                     <h2><Activity size={18} /> Host and Daemon Health</h2>
@@ -1667,7 +1780,43 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                   </div>
                 </div>
 
+                {/* Pod and workload status, the way kubectl reports it */}
                 <div className="panel-card">
+                  <div className="panel-card-title">
+                    <h2><Layers size={18} /> Workload Status</h2>
+                    <button className="btn secondary" style={{ padding: '4px 10px', fontSize: 12 }}
+                      onClick={() => { setPodStatusFilter('all'); setWorkloadStatusFilter('all'); setActiveTab('k8s'); }}>
+                      Open Kubernetes
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginBottom: 6 }}>
+                    Pods ({k8sResources.pods.length}) — click a status to list those pods
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+                    {podStatusCounts.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>No pods on this source.</span>}
+                    {podStatusCounts.map(([st, n, h]) => (
+                      <button key={st} className={`badge ${HEALTH_BADGE[h]}`} style={{ textTransform: 'none', cursor: 'pointer' }}
+                        onClick={() => { setPodStatusFilter(st); setK8sSubTab('pods'); setActiveTab('k8s'); }}>
+                        {st}: {n}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginBottom: 6 }}>
+                    Deployments, StatefulSets and DaemonSets ({k8sResources.deployments.length})
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {workloadStatusCounts.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>No workloads on this source.</span>}
+                    {workloadStatusCounts.map(([st, n, h]) => (
+                      <button key={st} className={`badge ${HEALTH_BADGE[h]}`} style={{ textTransform: 'none', cursor: 'pointer' }}
+                        onClick={() => { setWorkloadStatusFilter(st); setK8sSubTab('deployments'); setActiveTab('k8s'); }}>
+                        {st}: {n}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Disabled: "Launch AI Console" card
+                {aiEnabled && <div className="panel-card">
                   <div className="panel-card-title">
                     <h2><Cpu size={18} /> Kalam AI Assistant</h2>
                   </div>
@@ -1682,7 +1831,8 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                     <Sparkles size={16} />
                     <span>Launch AI Console</span>
                   </button>
-                </div>
+                </div>}
+                */}
               </div>
             </div>
           )}
@@ -1690,7 +1840,15 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           {/* PCAI STACK VISUALIZER TAB */}
           {activeTab === 'pcaistack' && (
             <div className="tab-panel">
-              <PcaiStackView k8sResources={k8sResources} status={status} llm={llmParams} />
+              {/* aiEnabled={false}: the model settings are commented out, so the AI health read is hidden too. */}
+              <PcaiStackView k8sResources={k8sResources} status={status} llm={llmParams} aiEnabled={false} />
+            </div>
+          )}
+
+          {/* GPU UTILIZATION TAB */}
+          {activeTab === 'gpu' && (
+            <div className="tab-panel">
+              <GpuUtilization source={source} vmNames={vmList.map(v => v.name)} />
             </div>
           )}
 
@@ -1710,17 +1868,18 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
           {/* CLUSTER CHANGE HISTORY TAB */}
           {activeTab === 'metrics' && (
-            <Observability />
+            <Observability k8sResources={k8sResources} source={source} vmNames={vmList.map(v => v.name)} />
           )}
 
           {activeTab === 'history' && (
             <div className="tab-panel">
-              <ClusterHistory />
+              <ClusterHistory defaultSource={source} />
             </div>
           )}
 
-          {/* AGENTS TEAMWORK TAB */}
-          {activeTab === 'agents' && (
+          {/* Disabled: Agent Teamwork page
+          {/* AGENTS TEAMWORK TAB *\/}
+          {aiEnabled && activeTab === 'agents' && (
             <div className="tab-panel">
               <AgentTeamwork
                 containers={dockerContainers}
@@ -1733,6 +1892,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
               />
             </div>
           )}
+          */}
 
           {/* DOCKER TAB */}
           {activeTab === 'docker' && (
@@ -1886,6 +2046,13 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                     >
                       Services ({k8sResources.services.length})
                     </button>
+                    <button
+                      className={`subnav-pill-btn ${k8sSubTab === 'resources' ? 'active' : ''}`}
+                      onClick={() => setK8sSubTab('resources')}
+                      title="Certificates, InferenceServices, PVCs, ingresses, Istio, jobs, config, events, CRDs…"
+                    >
+                      Other Resources
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1952,39 +2119,66 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 >
                   <div className="k8s-section-title">
                     {expandedK8s.deployments ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                    <span>Deployments</span>
+                    <span>Workloads</span>
                     <span className="k8s-section-count">{filteredK8sDeployments.length}</span>
+                    {workloadStatusFilter !== 'all' && (
+                      <span className="badge neutral" style={{ textTransform: 'none', cursor: 'pointer' }} title="Clear the status filter"
+                        onClick={(e) => { e.stopPropagation(); setWorkloadStatusFilter('all'); }}>
+                        status: {workloadStatusFilter} ✕
+                      </span>
+                    )}
                   </div>
                 </div>
                 {expandedK8s.deployments && (
                   <div className="k8s-section-content">
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                      <button className={`badge ${workloadStatusFilter === 'all' ? 'running' : 'neutral'}`} style={{ textTransform: 'none', cursor: 'pointer' }}
+                        onClick={() => setWorkloadStatusFilter('all')}>All: {k8sResources.deployments.length}</button>
+                      {workloadStatusCounts.map(([st, n, h]) => (
+                        <button key={st} className={`badge ${HEALTH_BADGE[h]}`}
+                          style={{ textTransform: 'none', cursor: 'pointer', outline: workloadStatusFilter === st ? '2px solid var(--hpe-green)' : undefined }}
+                          onClick={() => setWorkloadStatusFilter(workloadStatusFilter === st ? 'all' : st)}>
+                          {st}: {n}
+                        </button>
+                      ))}
+                    </div>
                     <div className="table-wrapper">
                       <table className="resource-table">
                         <thead>
                           <tr>
-                            <th>Deployment Name</th>
+                            <th>Name</th>
+                            <th>Kind</th>
                             <th>Namespace</th>
-                            <th>Ready Replicas</th>
+                            <th>Status</th>
+                            <th>Ready</th>
                             <th>Available</th>
-                            <th>Updated</th>
+                            <th>Up-to-date</th>
+                            <th>Age</th>
                             <th>Actions</th>
                           </tr>
                         </thead>
                         <tbody>
                           {filteredK8sDeployments.length === 0 ? (
                             <tr>
-                              <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '24px' }}>
-                                No deployments detected or matching search.
+                              <td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '24px' }}>
+                                No workloads detected or matching the filters.
                               </td>
                             </tr>
                           ) : (
                             filteredK8sDeployments.map(d => (
                               <tr key={`${d.namespace}/${d.name}`}>
                                 <td><strong>{d.name}</strong></td>
+                                <td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{d.kind || 'Deployment'}</td>
                                 <td><span className="code-tag">{d.namespace}</span></td>
-                                <td><span className={`badge ${d.available > 0 ? 'running' : 'warning'}`}>{d.ready}</span></td>
+                                <td>
+                                  <span className={`badge ${HEALTH_BADGE[workloadHealthOf(d)]}`} style={{ textTransform: 'none' }}>
+                                    {d.status || (workloadHealthOf(d) === 'healthy' ? 'Available' : 'Not ready')}
+                                  </span>
+                                </td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}>{d.ready}</td>
                                 <td>{d.available}</td>
                                 <td>{d.updated}</td>
+                                <td style={{ fontSize: 12 }} title={d.created}>{ageOf(d.created)}</td>
                                 <td>
                                   <div className="action-btns">
                                     <button 
@@ -2079,10 +2273,27 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                     {expandedK8s.pods ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
                     <span>Pods</span>
                     <span className="k8s-section-count">{filteredK8sPods.length}</span>
+                    {podStatusFilter !== 'all' && (
+                      <span className="badge neutral" style={{ textTransform: 'none', cursor: 'pointer' }} title="Clear the status filter"
+                        onClick={(e) => { e.stopPropagation(); setPodStatusFilter('all'); }}>
+                        status: {podStatusFilter} ✕
+                      </span>
+                    )}
                   </div>
                 </div>
                 {expandedK8s.pods && (
                   <div className="k8s-section-content">
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                      <button className={`badge ${podStatusFilter === 'all' ? 'running' : 'neutral'}`} style={{ textTransform: 'none', cursor: 'pointer' }}
+                        onClick={() => setPodStatusFilter('all')}>All: {k8sResources.pods.length}</button>
+                      {podStatusCounts.map(([st, n, h]) => (
+                        <button key={st} className={`badge ${HEALTH_BADGE[h]}`}
+                          style={{ textTransform: 'none', cursor: 'pointer', outline: podStatusFilter === st ? '2px solid var(--hpe-green)' : undefined }}
+                          onClick={() => setPodStatusFilter(podStatusFilter === st ? 'all' : st)}>
+                          {st}: {n}
+                        </button>
+                      ))}
+                    </div>
                     <div className="table-wrapper">
                       <table className="resource-table">
                         <thead>
@@ -2091,17 +2302,18 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                             <th>Namespace</th>
                             <th>Status</th>
                             <th>Ready</th>
+                            <th>Restarts</th>
                             <th>IP</th>
                             <th>Node</th>
-                            <th>Restarts</th>
+                            <th>Age</th>
                             <th>Actions</th>
                           </tr>
                         </thead>
                         <tbody>
                           {filteredK8sPods.length === 0 ? (
                             <tr>
-                              <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '24px' }}>
-                                No pods detected or matching search.
+                              <td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '24px' }}>
+                                No pods detected or matching the filters.
                               </td>
                             </tr>
                           ) : (
@@ -2110,14 +2322,23 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                                 <td title={p.name}><strong>{p.name.length > 30 ? `${p.name.slice(0, 28)}...` : p.name}</strong></td>
                                 <td><span className="code-tag">{p.namespace}</span></td>
                                 <td>
-                                  <span className={`badge ${p.status.toLowerCase()}`}>
-                                    {p.status}
+                                  <span className={`badge ${HEALTH_BADGE[podHealthOf(p)]}`} style={{ textTransform: 'none' }}
+                                    title={podStatusText(p) !== p.status ? `Phase: ${p.status}` : undefined}>
+                                    {podStatusText(p)}
                                   </span>
                                 </td>
-                                <td>{p.ready}</td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}>{p.ready}</td>
+                                <td>
+                                  <span style={{ color: p.restarts >= 3 ? 'var(--status-error)' : p.restarts > 0 ? 'var(--status-warning)' : undefined, fontWeight: p.restarts > 0 ? 700 : undefined }}>
+                                    {p.restarts}
+                                  </span>
+                                  {p.lastReason && p.restarts > 0 && (
+                                    <span style={{ fontSize: 10.5, color: 'var(--text-muted)', marginLeft: 6 }} title="Why the last restart happened">({p.lastReason})</span>
+                                  )}
+                                </td>
                                 <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{p.ip}</td>
                                 <td style={{ fontSize: '13px' }}>{p.node}</td>
-                                <td>{p.restarts}</td>
+                                <td style={{ fontSize: 12 }} title={p.created}>{ageOf(p.created)}</td>
                                 <td>
                                   <div className="action-btns">
                                     <button 
@@ -2146,11 +2367,16 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 )}
               </div>
             )}
+            {/* OTHER RESOURCES — certificates, InferenceServices, PVCs, ingresses, Istio, jobs, config, events, CRDs */}
+            {(k8sSubTab === 'all' || k8sSubTab === 'resources') && (
+              <ClusterResources source={source} vmNames={vmList.map(v => v.name)} globalSearch={globalSearch} />
+            )}
           </div>
         )}
 
-        {/* CHAT TAB */}
-        {activeTab === 'chat' && (
+        {/* Disabled: Agent Chat page
+        {/* CHAT TAB *\/}
+        {aiEnabled && activeTab === 'chat' && (
           <HPEAgentChat
             chatHistory={chatHistory}
             setChatHistory={setChatHistory}
@@ -2167,9 +2393,11 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             handleNodeHover={handleNodeHover}
           />
         )}
+        */}
 
-        {/* PCAI ASSISTANT TAB */}
-        {activeTab === 'pcai' && (
+        {/* Disabled: PCAI Assistant page
+        {/* PCAI ASSISTANT TAB *\/}
+        {aiEnabled && activeTab === 'pcai' && (
           <PcaiAssistant
             provider={effProvider}
             apiKey={apiKey}
@@ -2179,8 +2407,10 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             authKey={effAuthKey}
           />
         )}
+        */}
 
-        {/* SECURITY TAB */}
+        {/* Disabled: Image Hardener page
+        {/* SECURITY TAB *\/}
         {activeTab === 'security' && (
           <div className="tab-panel">
             <div className="panel-card" style={{ marginBottom: '20px' }}>
@@ -2222,13 +2452,13 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
 
             {scanResult && (
               <div className="dashboard-grid" style={{ gridTemplateColumns: 'minmax(0, 1.2fr) minmax(0, 0.8fr)' }}>
-                {/* Vulnerability Details List */}
+                {/* Vulnerability Details List *\/}
                 <div className="panel-card">
                   <div className="panel-card-title">
                     <h3>Vulnerabilities Detected in <code>{scanResult.imageName}</code></h3>
                   </div>
 
-                  {/* Summary badges */}
+                  {/* Summary badges *\/}
                   <div style={{ display: 'flex', gap: '10px', margin: '14px 0', flexWrap: 'wrap' }}>
                     <div style={{ padding: '6px 12px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '6px', color: '#ef4444', fontSize: '12px', fontWeight: 'bold' }}>
                       {scanResult.summary.critical} Critical
@@ -2272,7 +2502,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                   </div>
                 </div>
 
-                {/* One-Place Fix Console */}
+                {/* One-Place Fix Console *\/}
                 <div className="panel-card" style={{ border: '2px solid rgba(168, 85, 247, 0.4)', background: 'rgba(168, 85, 247, 0.02)' }}>
                   <div className="panel-card-title">
                     <h3><Sparkles size={16} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> One-Place Secure Patch</h3>
@@ -2331,6 +2561,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             )}
           </div>
         )}
+        */}
 
         {/* KUBECTL CHEATSHEET TAB */}
         {activeTab === 'cheatsheet' && (
@@ -2410,7 +2641,8 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
         </div>
       )}
 
-      {/* AGENT SETTINGS MODAL */}
+      {/* Disabled: model / engine settings modal
+      {/* AGENT SETTINGS MODAL *\/}
       {settingsModalOpen && (
         <div className="modal-overlay" onClick={() => setSettingsModalOpen(false)}>
           <div className="modal-content" style={{ maxHeight: '88vh', maxWidth: '520px', display: 'flex', flexDirection: 'column' }} onClick={(e) => e.stopPropagation()}>
@@ -2424,7 +2656,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
             <div className="modal-body" style={{ padding: '20px', overflowY: 'auto', flex: 1 }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
 
-                {/* Provider Selector */}
+                {/* Provider Selector *\/}
                 <div className="form-group">
                   <label style={{ fontSize: '13px', fontWeight: '600' }}>LLM Provider</label>
                   <select
@@ -2444,7 +2676,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                 </div>
 
                 {provider === 'custom' ? (
-                  /* Custom OpenAI-compatible endpoint */
+                  /* Custom OpenAI-compatible endpoint *\/
                   <>
                     <div className="form-group">
                       <label style={{ fontSize: '13px', fontWeight: '600' }}>Endpoint Base URL</label>
@@ -2504,7 +2736,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                     </div>
                   </>
                 ) : provider === 'gemini' ? (
-                  /* Gemini Key Input */
+                  /* Gemini Key Input *\/
                   <div className="form-group">
                     <label style={{ fontSize: '13px', fontWeight: '600' }}>Gemini API Key</label>
                     <div style={{ display: 'flex', gap: '8px', position: 'relative' }}>
@@ -2530,7 +2762,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
                     </span>
                   </div>
                 ) : (
-                  /* Local LLM Inputs */
+                  /* Local LLM Inputs *\/
                   <>
                     <div className="form-group">
                       <label style={{ fontSize: '13px', fontWeight: '600' }}>Local Endpoint URL</label>
@@ -2588,8 +2820,10 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           </div>
         </div>
       )}
+      */}
 
-      {/* Floating Tooltip for Graph Hover */}
+      {/* Disabled: graph hover tooltip, only used by Agent Chat
+      {/* Floating Tooltip for Graph Hover *\/}
       {hoveredNode && (
         <div 
           className="graph-tooltip"
@@ -2630,6 +2864,7 @@ Please configure your agent (Gemini Cloud or Local LLM like Ollama) in the setti
           )}
         </div>
       )}
+      */}
     </div>
   );
 }

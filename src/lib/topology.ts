@@ -40,8 +40,10 @@ export const canvasSignature = (
 ): string =>
   JSON.stringify({
     c: (containers || []).map(c => [c.id, c.name, c.image, c.state, c.ports, stripDuration(c.status)]),
-    p: (k8s?.pods || []).map((p: any) => [p.name, p.namespace, p.status, p.ready, p.ip, p.restarts, p.node, p.labels]),
+    // displayStatus/health: a pod can go Running -> CrashLoopBackOff without its
+    // phase changing, and the card must follow.
+    p: (k8s?.pods || []).map((p: any) => [p.name, p.namespace, p.status, p.displayStatus, p.health, p.ready, p.ip, p.restarts, p.node, p.labels]),
     s: (k8s?.services || []).map((s: any) => [s.name, s.namespace, s.type, s.clusterIp, s.ports, s.selector]),
-    d: (k8s?.deployments || []).map((d: any) => [d.name, d.namespace, d.ready, d.replicas, d.available]),
-    n: (k8s?.nodes || []).map((n: any) => [n.name, n.status, n.role, n.ip]),
+    d: (k8s?.deployments || []).map((d: any) => [d.name, d.namespace, d.ready, d.replicas, d.available, d.status]),
+    n: (k8s?.nodes || []).map((n: any) => [n.name, n.status, n.role, n.ip, (n.pressure || []).join(','), n.schedulable]),
   });

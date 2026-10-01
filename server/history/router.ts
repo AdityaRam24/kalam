@@ -46,7 +46,9 @@ function queryFrom(req: any): HistoryQuery {
     kind: req.query.kind ? String(req.query.kind) : undefined,
     objectKind: req.query.objectKind ? String(req.query.objectKind) : undefined,
     namespace: req.query.namespace ? String(req.query.namespace) : undefined,
+    name: req.query.name ? String(req.query.name) : undefined,
     severity: req.query.severity ? String(req.query.severity) : undefined,
+    actor: req.query.actor ? String(req.query.actor) : undefined,
     q: req.query.q ? String(req.query.q) : undefined,
     deep: req.query.deep === '1' || req.query.deep === 'true',
   };
@@ -194,6 +196,80 @@ historyRouter.get('/api/history/summary', async (req, res) => {
     }
   }
   res.json({ ok: true, readOnly: true, source, since: since ? new Date(since).toISOString() : undefined, byKey });
+});
+
+/**
+ * What the timeline can be sliced by, for one source and window: namespaces
+ * (every namespace Kalam tracks, so a quiet one is still selectable), object
+ * kinds, writers, the busiest objects, and an activity histogram.
+ *
+ * Pure so it is unit-tested; the route below only feeds it.
+ */
+export function buildFacets(
+  changes: Array<{ at: string; actualAt?: string; namespace?: string; objectKind: string; name: string; actor?: string; severity: string; kind: string }>,
+  trackedObjects: Array<{ namespace?: string }>,
+  sinceMs: number | undefined,
+  now = Date.now(),
+) {
+  const count = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) || 0) + 1);
+  const ns = new Map<string, number>();
+  const tracked = new Map<string, number>();
+  const kinds = new Map<string, number>();
+  const actors = new Map<string, number>();
+  const objects = new Map<string, number>();
+  for (const o of trackedObjects) if (o.namespace) count(tracked, o.namespace);
+  for (const c of changes) {
+    count(ns, c.namespace || '(cluster-scoped)');
+    count(kinds, c.objectKind);
+    if (c.actor) count(actors, c.actor);
+    count(objects, `${c.objectKind}|${c.namespace || ''}|${c.name}`);
+  }
+
+  // Hourly buckets for a window up to two days, daily beyond — enough bars to
+  // see a spike, few enough to read.
+  const start = sinceMs ?? Math.min(now - 86_400_000, ...changes.map((c) => Date.parse(c.at)).filter((t) => !Number.isNaN(t)));
+  const span = Math.max(1, now - start);
+  const bucketMs = span <= 2 * 86_400_000 ? 3_600_000 : 86_400_000;
+  const nBuckets = Math.min(60, Math.max(1, Math.ceil(span / bucketMs)));
+  const first = now - nBuckets * bucketMs;
+  const buckets = Array.from({ length: nBuckets }, (_, i) => ({ start: new Date(first + i * bucketMs).toISOString(), total: 0, warning: 0 }));
+  for (const c of changes) {
+    const t = Date.parse(c.at);
+    if (Number.isNaN(t) || t < first) continue;
+    const i = Math.min(nBuckets - 1, Math.floor((t - first) / bucketMs));
+    buckets[i].total++;
+    if (c.severity === 'warning') buckets[i].warning++;
+  }
+
+  const allNs = new Set([...tracked.keys(), ...ns.keys()]);
+  const sorted = (m: Map<string, number>) => [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return {
+    namespaces: [...allNs]
+      .map((name) => ({ name, changes: ns.get(name) || 0, objects: tracked.get(name) || 0 }))
+      .sort((a, b) => b.changes - a.changes || a.name.localeCompare(b.name)),
+    objectKinds: sorted(kinds).map(([kind, n]) => ({ kind, changes: n })),
+    actors: sorted(actors).map(([actor, n]) => ({ actor, changes: n })),
+    topObjects: sorted(objects).slice(0, 10).map(([k, n]) => {
+      const [objectKind, namespace, name] = k.split('|');
+      return { objectKind, namespace: namespace || undefined, name, changes: n };
+    }),
+    buckets,
+    bucketMs,
+    total: changes.length,
+    warnings: changes.filter((c) => c.severity === 'warning').length,
+  };
+}
+
+historyRouter.get('/api/history/facets', async (req, res) => {
+  const source = sourceOf(req.query.source);
+  try {
+    const since = parseSince(req.query.since);
+    const changes = await readChanges(source, { limit: 2000, since, deep: !since });
+    const snapshot = await loadSnapshot(source);
+    res.json({ ok: true, readOnly: true, source, ...buildFacets(changes, Object.values(snapshot?.objects || {}), since) });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Could not read the history log.' });
+  }
 });
 
 historyRouter.get('/api/history/status', async (_req, res) => {

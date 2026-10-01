@@ -79,6 +79,11 @@ rbac:
   # true  → also permits the write verbs behind those buttons:
   #         deployment restart/scale, pod delete.
   allowWrite: false
+  # GPU Utilization page: runs `nvidia-smi` inside GPU pods (kubectl exec).
+  # That needs create on pods/exec, which in principle allows running any
+  # command in any pod — set false to keep Kalam strictly read-only (the page
+  # then shows GPU requests and allocation, without live nvidia-smi readings).
+  allowGpuExec: true
   # Cluster-wide read (all namespaces) vs a Role limited to this namespace.
   clusterWide: true
 
@@ -93,6 +98,9 @@ serviceAccount:
 # name; for Gemini it needs egress to the internet. These are the defaults a
 # fresh browser starts with — anyone can still change them under Settings.
 llm:
+  # false hides every AI feature (Agent Chat, Agent Teamwork, PCAI Assistant,
+  # Settings, the stack health read) and the server refuses their routes.
+  enabled: true
   provider: local                       # local | gemini
   localUrl: http://ollama.ai.svc.cluster.local:11434/v1
   localModel: qwen2.5-coder:7b

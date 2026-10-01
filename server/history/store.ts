@@ -144,6 +144,8 @@ export interface HistoryQuery {
   namespace?: string;
   name?: string;
   severity?: string;
+  /** Exact writer, from managedFields (e.g. "helm", "kubectl-edit"). */
+  actor?: string;
   /** Free-text across summary/name/actor. */
   q?: string;
   /** Include the rotated archive when the live log is not enough. */
@@ -192,6 +194,7 @@ function matches(e: ChangeEvent, q: HistoryQuery, sinceMs: number): boolean {
   if (q.namespace && e.namespace !== q.namespace) return false;
   if (q.name && e.name !== q.name) return false;
   if (q.severity && e.severity !== q.severity) return false;
+  if (q.actor && (e.actor || '') !== q.actor) return false;
   if (q.q) {
     const hay = `${e.summary} ${e.name} ${e.namespace || ''} ${e.actor || ''} ${e.objectKind}`.toLowerCase();
     if (!hay.includes(q.q.toLowerCase())) return false;

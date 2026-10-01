@@ -67,6 +67,7 @@ SSH_KEY=""
 KNOWN_HOSTS=""
 LLM_URL=""
 LLM_MODEL=""
+NO_LLM=false
 GEMINI_KEY="${GEMINI_API_KEY:-}"
 EXTRA_ARGS=()
 DRY_RUN=false
@@ -109,6 +110,7 @@ What it can do
       --llm-url URL         OpenAI-compatible endpoint, e.g. http://ollama.ai:11434/v1
       --llm-model NAME      model on that endpoint
       --gemini-key KEY      use Gemini instead (or env GEMINI_API_KEY)
+      --no-llm              hide every AI feature (chat, assistant, settings)
 
 State
       --persistence on|off  keep inventory/KB/history on a PVC (default: auto)
@@ -158,6 +160,7 @@ while [ $# -gt 0 ]; do
     --llm-url) LLM_URL="$2"; shift 2 ;;
     --llm-model) LLM_MODEL="$2"; shift 2 ;;
     --gemini-key) GEMINI_KEY="$2"; shift 2 ;;
+    --no-llm) NO_LLM=true; shift ;;
     --persistence) PERSISTENCE="$2"; shift 2 ;;
     --storage-class) STORAGE_CLASS="$2"; shift 2 ;;
     -f|--values) EXTRA_ARGS+=(-f "$(np "$2")"); shift 2 ;;
@@ -383,7 +386,11 @@ VALUES="$WORK/values.yaml"
   echo "persistence:"
   echo "  enabled: $([ "$PERSISTENCE" = on ] && echo true || echo false)"
   [ -n "$STORAGE_CLASS" ] && echo "  storageClass: \"$STORAGE_CLASS\""
-  if [ -n "$LLM_URL" ] || [ -n "$LLM_MODEL" ] || [ -n "$GEMINI_KEY" ]; then
+  if $NO_LLM; then
+    printf 'llm:
+  enabled: false
+'
+  elif [ -n "$LLM_URL" ] || [ -n "$LLM_MODEL" ] || [ -n "$GEMINI_KEY" ]; then
     echo "llm:"
     if [ -n "$GEMINI_KEY" ] && [ -z "$LLM_URL" ]; then
       echo "  provider: gemini"
@@ -410,9 +417,15 @@ cp "$VALUES" "$OUT/values-$RELEASE.yaml"
 step "PCAI import chart"
 mkdir -p "$WORK/pkg"
 tar -xzf - -C "$WORK/pkg" <"$CHART"   # stdin: GNU tar reads "C:/x" as host:path
-awk -v repo="$IMG_REPO" -v dig="$IMG_DIGEST" -v ps="$PULL_SECRET" '
+awk -v repo="$IMG_REPO" -v dig="$IMG_DIGEST" -v ps="$PULL_SECRET" -v nollm="$NO_LLM" -v lurl="$LLM_URL" -v lmodel="$LLM_MODEL" '
   /^image:/ { inimg=1 }
   /^[a-zA-Z]/ && !/^image:/ { inimg=0 }
+  /^llm:/ { inllm=1 }
+  /^[a-zA-Z]/ && !/^llm:/ { inllm=0 }
+  inllm && nollm == "true" && /^  enabled:/ { print "  enabled: false   # set by install.sh --no-llm"; next }
+  inllm && lurl != "" && /^  provider:/ { print "  provider: local"; next }
+  inllm && lurl != "" && /^  localUrl:/ { print "  localUrl: \"" lurl "\""; next }
+  inllm && lmodel != "" && /^  localModel:/ { print "  localModel: \"" lmodel "\""; next }
   inimg && /^  repository:/ { print "  repository: " repo "   # set by install.sh"; next }
   inimg && /^  digest:/ { print "  digest: \"" dig "\""; next }
   ps != "" && /^imagePullSecrets: \[\]/ { print "imagePullSecrets:"; print "  - name: " ps; next }

@@ -8,12 +8,15 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
-import { llmRouter } from './llm.js';
+import { llmRouter, llmEnabled, LLM_ROUTES } from './llm.js';
 import { vmsRouter } from './vms.js';
 import { logsRouter } from './hostlogs/router.js';
 import { shellRouter } from './shell.js';
 import { graphRouter } from './graph/router.js';
 import { inspectRouter } from './k8s/inspect.js';
+import { resourcesRouter } from './k8s/resources.js';
+import { topRouter } from './k8s/top.js';
+import { gpuRouter } from './k8s/gpu.js';
 import { normalizeClusterItems, parseReplicaSetOwners } from './k8s/workloads.js';
 import { historyRouter } from './history/router.js';
 import { pollerState, startHistoryPoller } from './history/poller.js';
@@ -39,6 +42,14 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '2mb' })); // allow pasting large logs/stack traces
 
+// AI switched off for this deployment: refuse model-backed routes outright,
+// so hiding them in the UI is not the only thing keeping them off.
+if (!llmEnabled()) {
+  app.use(LLM_ROUTES, (_req, res) => {
+    res.status(404).json({ error: 'AI features are disabled in this deployment.' });
+  });
+}
+
 // HPE Private Cloud AI assistant (RAG knowledge base + grounded chat).
 app.use(pcaiRouter);
 // Local LLM model discovery + pull (Ollama / LM Studio).
@@ -54,6 +65,11 @@ app.use(graphRouter);
 // Deep inspect for a single object: YAML, describe, events, and what it is
 // connected to. Backs the topology map's detail drawer.
 app.use(inspectRouter);
+// Every other resource kind (certs, InferenceServices, PVCs, ingresses, …),
+// live CPU/memory from the metrics API, and per-model GPU utilization.
+app.use(resourcesRouter);
+app.use(topRouter);
+app.use(gpuRouter);
 // Cluster change history: what changed, when, and who did it.
 app.use(historyRouter);
 

@@ -169,17 +169,101 @@ export function parseResources(block: any): ResourceAmounts {
   return { cpuMilli: parseCpu(b.cpu), memBytes: parseMemory(b.memory), gpu };
 }
 
+// ---------------------------------------------------------------------------
+// Status as an operator reads it
+//
+// `status.phase` is "Running" for a pod whose container is in CrashLoopBackOff,
+// and "Pending" for one stuck on ImagePullBackOff — the phase alone hides
+// exactly the failures people go looking for. `kubectl get pods` prints a
+// derived STATUS column instead; podDisplayStatus reproduces that derivation
+// (kubectl's printPod) so Kalam says what kubectl would say.
+// ---------------------------------------------------------------------------
+
+export type Health = 'healthy' | 'progressing' | 'failing' | 'completed' | 'unknown';
+
+export function podDisplayStatus(item: any): string {
+  const metadata = item?.metadata || {};
+  const status = item?.status || {};
+  const spec = item?.spec || {};
+  let reason: string = status.reason || status.phase || 'Unknown';
+
+  // Init containers run first, in order; the first one not finished cleanly
+  // is what the pod is waiting on.
+  const initStatuses: any[] = status.initContainerStatuses || [];
+  const initTotal = (spec.initContainers || []).length || initStatuses.length;
+  let initializing = false;
+  for (let i = 0; i < initStatuses.length; i++) {
+    const st = initStatuses[i]?.state || {};
+    if (st.terminated && st.terminated.exitCode === 0) continue;
+    initializing = true;
+    if (st.terminated) {
+      reason = st.terminated.reason
+        ? `Init:${st.terminated.reason}`
+        : st.terminated.signal ? `Init:Signal:${st.terminated.signal}` : `Init:ExitCode:${st.terminated.exitCode}`;
+    } else if (st.waiting?.reason && st.waiting.reason !== 'PodInitializing') {
+      reason = `Init:${st.waiting.reason}`;
+    } else {
+      reason = `Init:${i}/${initTotal}`;
+    }
+    break;
+  }
+
+  if (!initializing) {
+    let hasRunning = false;
+    const cs: any[] = status.containerStatuses || [];
+    for (let i = cs.length - 1; i >= 0; i--) {
+      const st = cs[i]?.state || {};
+      if (st.waiting?.reason) reason = st.waiting.reason;
+      else if (st.terminated?.reason) reason = st.terminated.reason;
+      else if (st.terminated) reason = st.terminated.signal ? `Signal:${st.terminated.signal}` : `ExitCode:${st.terminated.exitCode}`;
+      else if (cs[i]?.ready && st.running) hasRunning = true;
+    }
+    // A pod with one finished and one running container is still running.
+    if (reason === 'Completed' && hasRunning) {
+      const ready = (status.conditions || []).some((c: any) => c.type === 'Ready' && c.status === 'True');
+      reason = ready ? 'Running' : 'NotReady';
+    }
+  }
+
+  if (metadata.deletionTimestamp) reason = status.reason === 'NodeLost' ? 'Unknown' : 'Terminating';
+  return reason;
+}
+
+const FAILING_POD = /BackOff|Err|Error|OOMKilled|Evicted|Failed|Invalid|ExitCode|Signal|ContainerCannotRun|DeadlineExceeded|NodeLost|Unknown/i;
+
+/** Health bucket for a pod's display status. Restarts alone never fail a pod. */
+export function podHealth(displayStatus: string, ready?: string): Health {
+  const s = displayStatus || '';
+  if (s === 'Completed' || s === 'Succeeded') return 'completed';
+  if (FAILING_POD.test(s)) return 'failing';
+  if (s === 'Running') {
+    const [r, t] = String(ready || '').split('/').map(Number);
+    return Number.isFinite(r) && Number.isFinite(t) && t > 0 && r < t ? 'progressing' : 'healthy';
+  }
+  if (/Pending|ContainerCreating|PodInitializing|Init:|Terminating/i.test(s)) return 'progressing';
+  return 'unknown';
+}
+
 export function normalizePod(item: any, replicaSets: Map<string, any> = new Map()): any {
   const metadata = item?.metadata || {};
   const status = item?.status || {};
   const spec = item?.spec || {};
   const cs = status.containerStatuses || [];
+  const ready = `${cs.filter((c: any) => c.ready).length}/${cs.length}`;
+  const displayStatus = podDisplayStatus(item);
+  // Why the last restart happened — "OOMKilled" explains a crash loop at a glance.
+  const lastReason = cs
+    .map((c: any) => c?.lastState?.terminated?.reason)
+    .find((r: any) => typeof r === 'string' && r) || undefined;
 
   return {
     name: metadata.name,
     namespace: metadata.namespace || 'default',
     status: status.phase || 'Unknown',
-    ready: `${cs.filter((c: any) => c.ready).length}/${cs.length}`,
+    displayStatus,
+    health: podHealth(displayStatus, ready),
+    ...(lastReason ? { lastReason } : {}),
+    ready,
     node: spec.nodeName || 'None',
     restarts: cs.reduce((a: number, c: any) => a + (c.restartCount || 0), 0),
     ip: status.podIP || 'None',
@@ -223,6 +307,25 @@ export function normalizeService(item: any): any {
 }
 
 /**
+ * One word for a workload's rollout state, from the same numbers
+ * `kubectl rollout status` reads. A Deployment whose rollout hit its progress
+ * deadline is Failed even while old pods keep it partly available.
+ */
+export function workloadStatus(w: {
+  desired: number; ready: number; available: number; updated: number; conditions: any[];
+}): { status: string; health: Health } {
+  const deadline = w.conditions.some(
+    (c: any) => c?.type === 'Progressing' && c?.status === 'False' && c?.reason === 'ProgressDeadlineExceeded',
+  );
+  if (deadline) return { status: 'Failed', health: 'failing' };
+  if (w.desired === 0) return { status: 'ScaledToZero', health: 'completed' };
+  if (w.ready >= w.desired && w.available >= w.desired && w.updated >= w.desired) return { status: 'Available', health: 'healthy' };
+  if (w.ready === 0) return { status: 'Unavailable', health: 'failing' };
+  if (w.updated < w.desired) return { status: 'Updating', health: 'progressing' };
+  return { status: 'Degraded', health: 'progressing' };
+}
+
+/**
  * Deployments, StatefulSets and DaemonSets share one shape. They are all
  * "the thing that owns these pods", and a map that only knows Deployments
  * leaves every StatefulSet pod (databases, queues — the interesting ones)
@@ -244,14 +347,25 @@ export function normalizeWorkload(item: any): any {
   const available = kind === 'DaemonSet'
     ? (status.numberAvailable ?? 0)
     : (status.availableReplicas ?? 0);
+  const updated = kind === 'DaemonSet' ? (status.updatedNumberScheduled ?? 0) : (status.updatedReplicas ?? 0);
+  // An absent "updated" count (older API servers, OnDelete StatefulSets) is not
+  // evidence of a rollout in progress, so it does not drive the verdict.
+  const updatedRaw = kind === 'DaemonSet' ? status.updatedNumberScheduled : status.updatedReplicas;
+  const { status: rollout, health } = workloadStatus({
+    desired, ready, available,
+    updated: typeof updatedRaw === 'number' ? updatedRaw : desired,
+    conditions: status.conditions || [],
+  });
 
   return {
     name: metadata.name,
     namespace: metadata.namespace || 'default',
     kind,
+    status: rollout,
+    health,
     ready: `${ready}/${desired}`,
     available,
-    updated: kind === 'DaemonSet' ? (status.updatedNumberScheduled ?? 0) : (status.updatedReplicas ?? 0),
+    updated,
     replicas: desired,
     selector: encodeSelector(spec.selector?.matchLabels),
     created: metadata.creationTimestamp,
@@ -266,9 +380,24 @@ export function normalizeNode(item: any): any {
   const labels = metadata.labels || {};
   const ip = (status.addresses || []).find((a: any) => a.type === 'InternalIP');
 
+  const cap = status.capacity || {};
+  const alloc = status.allocatable || {};
+  // Pressure conditions are what make a Ready node still a problem.
+  const pressure = conds
+    .filter((c: any) => c.type !== 'Ready' && c.status === 'True')
+    .map((c: any) => String(c.type));
+
   return {
     name: metadata.name,
     status: ready ? (ready.status === 'True' ? 'Ready' : 'NotReady') : 'Unknown',
+    schedulable: !item?.spec?.unschedulable,
+    pressure,
+    capacity: { cpuMilli: parseCpu(cap.cpu), memBytes: parseMemory(cap.memory), gpu: parseResources(cap).gpu, pods: Number(cap.pods) || 0 },
+    allocatable: { cpuMilli: parseCpu(alloc.cpu), memBytes: parseMemory(alloc.memory), gpu: parseResources(alloc).gpu, pods: Number(alloc.pods) || 0 },
+    kernel: status.nodeInfo?.kernelVersion,
+    runtime: status.nodeInfo?.containerRuntimeVersion,
+    osImage: status.nodeInfo?.osImage,
+    gpuProduct: labels['nvidia.com/gpu.product'],
     role: 'node-role.kubernetes.io/control-plane' in labels || 'node-role.kubernetes.io/master' in labels
       ? 'control-plane'
       : (labels['kubernetes.io/role'] || 'worker'),

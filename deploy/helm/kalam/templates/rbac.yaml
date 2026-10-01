@@ -29,6 +29,48 @@ rules:
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get, list]
+  # Kubernetes page → "Other Resources". Optional APIs (cert-manager, KServe,
+  # Istio, Kubeflow, Ray) are granted by name; a cluster without them simply
+  # shows those kinds as n/a. Secrets are still not granted.
+  - apiGroups: [""]
+    resources: [persistentvolumes, resourcequotas]
+    verbs: [get, list, watch]
+  - apiGroups: ["batch"]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  - apiGroups: ["autoscaling"]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  - apiGroups: ["policy"]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch]
+  - apiGroups: ["storage.k8s.io"]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: [customresourcedefinitions]
+    verbs: [get, list]
+  - apiGroups: ["cert-manager.io"]
+    resources: [certificates, issuers, clusterissuers]
+    verbs: [get, list, watch]
+  - apiGroups: ["serving.kserve.io"]
+    resources: [inferenceservices, servingruntimes, clusterservingruntimes]
+    verbs: [get, list, watch]
+  - apiGroups: ["networking.istio.io"]
+    resources: [virtualservices, gateways, destinationrules]
+    verbs: [get, list, watch]
+  - apiGroups: ["kubeflow.org"]
+    resources: [notebooks]
+    verbs: [get, list, watch]
+  - apiGroups: ["ray.io"]
+    resources: [rayclusters]
+    verbs: [get, list, watch]
+  {{- if .Values.rbac.allowGpuExec }}
+  # GPU Utilization: `kubectl exec <gpu pod> -- nvidia-smi …` (fixed queries).
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create, get]
+  {{- end }}
   {{- if .Values.rbac.clusterWide }}
   # Health endpoints are not resources, so they need their own grant. Without
   # it a reachability probe reports "cannot reach the cluster" on a cluster
