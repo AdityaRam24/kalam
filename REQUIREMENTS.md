@@ -1,21 +1,21 @@
-# Kalam: System & Software Requirements
+# Trinetra: System & Software Requirements
 
-This document outlines the prerequisite software, system tools, and environment configurations required to build, run, and interact with the **Kalam Agentic Cluster Console**.
+This document outlines the prerequisite software, system tools, and environment configurations required to build, run, and interact with the **Trinetra Agentic Cluster Console**.
 
 ---
 
 ## 💻 System Prerequisites
 
-To run Kalam locally, you need the following system tools installed and running:
+To run Trinetra locally, you need the following system tools installed and running:
 
 1. **Node.js & npm**
    - **Recommended Version**: Node.js `v18.x` or higher (tested on `v20+` / `v22+`).
    - **Package Manager**: `npm` (packaged with Node.js) or `yarn` / `pnpm`.
 
 2. **Container runtime — optional**
-   - Kalam does **not** depend on Docker. It discovers containers from whichever runtime a machine has: Docker, containerd (via `crictl`), nerdctl or podman, and merges them into one list tagged by runtime.
+   - Trinetra does **not** depend on Docker. It discovers containers from whichever runtime a machine has: Docker, containerd (via `crictl`), nerdctl or podman, and merges them into one list tagged by runtime.
    - A machine with no runtime at all is a normal case: add your VMs on the Virtual Machines tab and the dashboard, topology map and container views read them over SSH ("All hosts" merges every VM into one view).
-   - Docker-only extras: image security scans and auto-hardening use `docker scout` / `docker pull` / `docker run` and need a Docker daemon on the machine running Kalam.
+   - Docker-only extras: image security scans and auto-hardening use `docker scout` / `docker pull` / `docker run` and need a Docker daemon on the machine running Trinetra.
    - Every local probe has a timeout, so an installed-but-stopped Docker Desktop cannot stall the dashboard.
 
 3. **Kubernetes (kubectl) — optional on this machine**
@@ -24,7 +24,7 @@ To run Kalam locally, you need the following system tools installed and running:
 
 ---
 
-## 📁 Where Kalam writes state
+## 📁 Where Trinetra writes state
 
 Four files/directories are written at runtime. Each path is overridable, which
 is what lets the container image stay read-only and keep its state on a mounted
@@ -33,10 +33,10 @@ restart.
 
 | Variable | Default | Holds |
 | --- | --- | --- |
-| `KALAM_VMS_PATH` | `server/vms.json` | the SSH inventory (hosts, users, credentials) |
-| `KALAM_LEARNED_PATH` | `server/pcai/learned.json` | the learned knowledge base |
-| `KALAM_HISTORY_DIR` | `server/history/data` | change-history snapshots and changelog |
-| `KALAM_METRICS_DIR` | `server/metrics/data` | host telemetry samples for the Observability page |
+| `TRINETRA_VMS_PATH` | `server/vms.json` | the SSH inventory (hosts, users, credentials) |
+| `TRINETRA_LEARNED_PATH` | `server/pcai/learned.json` | the learned knowledge base |
+| `TRINETRA_HISTORY_DIR` | `server/history/data` | change-history snapshots and changelog |
+| `TRINETRA_METRICS_DIR` | `server/metrics/data` | host telemetry samples for the Observability page |
 
 All four are git-ignored at their defaults. The Helm chart sets them to a
 volume automatically when `persistence.enabled=true`.
@@ -45,7 +45,7 @@ volume automatically when `persistence.enabled=true`.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `KALAM_KUBECTL_TIMEOUT_MS` | `120000` | Ceiling on a bulk cluster read. `kubectl` gets its own `--request-timeout` derived from this and set below it, so a slow or unreachable API server returns a readable error instead of being killed. Raise it if a very large cluster reports `timed-out`. |
+| `TRINETRA_KUBECTL_TIMEOUT_MS` | `120000` | Ceiling on a bulk cluster read. `kubectl` gets its own `--request-timeout` derived from this and set below it, so a slow or unreachable API server returns a readable error instead of being killed. Raise it if a very large cluster reports `timed-out`. |
 
 This is deliberately separate from the 8-second probe timeout used for
 `docker`/`kubectl` version checks. That short bound exists because a stopped
@@ -55,14 +55,14 @@ to a bulk cluster read is what once made a large cluster report itself empty.
 ## 📈 Observability — recording host telemetry
 
 The Observability tab charts numeric samples taken from each host over SSH. Like
-the change-history poller, **nothing is sampled unless you opt in** — Kalam does
+the change-history poller, **nothing is sampled unless you opt in** — Trinetra does
 not start SSHing into an estate on a timer because it was launched.
 
 ```bash
-KALAM_METRICS=1                    # opt in
-KALAM_METRICS_INTERVAL_SEC=30      # how often (default 30s, floor 10s)
-KALAM_METRICS_SOURCES=all          # `all` = every inventory VM, or a comma list
-KALAM_METRICS_RETENTION_HOURS=48   # how far back samples are kept
+TRINETRA_METRICS=1                    # opt in
+TRINETRA_METRICS_INTERVAL_SEC=30      # how often (default 30s, floor 10s)
+TRINETRA_METRICS_SOURCES=all          # `all` = every inventory VM, or a comma list
+TRINETRA_METRICS_RETENTION_HOURS=48   # how far back samples are kept
 ```
 
 Each sample is **one short SSH command** — `/proc/stat`, `/proc/loadavg`,
@@ -95,13 +95,13 @@ on the Virtual Machines tab; the page says so whenever it is not running as root
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `KALAM_LOG_BUNDLE_MAX_MB` | `50` | Cap on a `/var/log` bundle, single-file or journal download. A download that hits it is flagged as incomplete, never silently cut. |
+| `TRINETRA_LOG_BUNDLE_MAX_MB` | `50` | Cap on a `/var/log` bundle, single-file or journal download. A download that hits it is flagged as incomplete, never silently cut. |
 
 ---
 
 ## 🔑 AI LLM Provider Configuration
 
-Kalam requires one of the following to activate its agentic DevOps Chatbot:
+Trinetra requires one of the following to activate its agentic DevOps Chatbot:
 
 * **Google Gemini API Key**:
   - Get a key from Google AI Studio.

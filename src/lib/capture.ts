@@ -1,7 +1,7 @@
-// Screenshots of Kalam itself — "capture the current state" as an image.
+// Screenshots of Trinetra itself — "capture the current state" as an image.
 //
 // html-to-image clones the DOM into an SVG foreignObject and rasterises it, so
-// it captures exactly what Kalam drew (including the React Flow canvas) with
+// it captures exactly what Trinetra drew (including the React Flow canvas) with
 // no screen-share prompt. Two limits are handled here rather than left to fail
 // silently: browsers cap canvas size (a long page at 2x can exceed it and come
 // back blank), and cross-origin web-font CSS can make the font-embedding step

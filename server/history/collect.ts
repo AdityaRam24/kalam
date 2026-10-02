@@ -14,7 +14,7 @@
 //     pod, which keeps a 5000-pod cluster inside the SSH buffer.
 //   - ConfigMaps and Secrets are fetched as `name|resourceVersion` lines only.
 //     resourceVersion moves on every write and on nothing else, so it answers
-//     "was this edited?" without Kalam reading — let alone storing — a single
+//     "was this edited?" without Trinetra reading — let alone storing — a single
 //     byte of their contents.
 //
 // Every step is read-only, and every step is optional: a cluster with no
@@ -39,6 +39,8 @@ const POD_COLUMNS = [
   'READY:.status.containerStatuses[*].ready',
   'CREATED:.metadata.creationTimestamp',
   'UID:.metadata.uid',
+  // Appended last so older parsers (and old tables) still line up.
+  'WAITING:.status.containerStatuses[*].state.waiting.reason',
 ].join(',');
 
 /** `ns|name|resourceVersion` — the cheapest possible "did this change?". */
@@ -90,6 +92,51 @@ const STEPS: CaptureStep[] = [
   {
     tag: 'CLUSTER',
     args: ['get', 'nodes,ns,pv,storageclass,priorityclass', '-o', 'json'],
+    managedFields: true,
+    optional: true,
+    parse: (raw) => fingerprintList(parseJson(raw)),
+  },
+  // The contract-bearing CRDs: what issues certificates, serves models and
+  // routes mesh traffic. Separate steps, because one `kubectl get a,b` fails
+  // whole when either API is missing — and most clusters lack some of them.
+  {
+    tag: 'CERTS',
+    args: ['get', 'certificates.cert-manager.io,issuers.cert-manager.io', '-A', '-o', 'json'],
+    managedFields: true,
+    optional: true,
+    parse: (raw) => fingerprintList(parseJson(raw)),
+  },
+  {
+    tag: 'CLUSTERISSUERS',
+    args: ['get', 'clusterissuers.cert-manager.io', '-o', 'json'],
+    managedFields: true,
+    optional: true,
+    parse: (raw) => fingerprintList(parseJson(raw)),
+  },
+  {
+    tag: 'KSERVE',
+    args: ['get', 'inferenceservices.serving.kserve.io,servingruntimes.serving.kserve.io', '-A', '-o', 'json'],
+    managedFields: true,
+    optional: true,
+    parse: (raw) => fingerprintList(parseJson(raw)),
+  },
+  {
+    tag: 'CLUSTERRUNTIMES',
+    args: ['get', 'clusterservingruntimes.serving.kserve.io', '-o', 'json'],
+    managedFields: true,
+    optional: true,
+    parse: (raw) => fingerprintList(parseJson(raw)),
+  },
+  {
+    tag: 'ISTIO',
+    args: ['get', 'virtualservices.networking.istio.io,gateways.networking.istio.io', '-A', '-o', 'json'],
+    managedFields: true,
+    optional: true,
+    parse: (raw) => fingerprintList(parseJson(raw)),
+  },
+  {
+    tag: 'INGRESSCLASSES',
+    args: ['get', 'ingressclasses.networking.k8s.io', '-o', 'json'],
     managedFields: true,
     optional: true,
     parse: (raw) => fingerprintList(parseJson(raw)),
@@ -207,13 +254,16 @@ export async function captureCluster(source: string): Promise<CaptureResult> {
   }
 
   return {
-    snapshot: { version: 1, source, at, sections, objects },
+    snapshot: { version: 1, source, at, sections, objects, features: [...CAPTURE_FEATURES] },
     missing,
     degraded,
     error: first.error,
     durationMs: Date.now() - started,
   };
 }
+
+/** Optional fingerprint families every capture now records (see Snapshot.features). */
+export const CAPTURE_FEATURES = ['meta', 'podWaiting'] as const;
 
 /** Kinds a capture covers, for the UI's filter list and the status endpoint. */
 export const CAPTURED_SECTIONS = STEPS.map((s) => s.tag);

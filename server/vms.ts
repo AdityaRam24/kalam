@@ -1,4 +1,4 @@
-// Virtual Machine monitoring + SSH for Kalam.
+// Virtual Machine monitoring + SSH for Trinetra.
 //
 // A manual SSH inventory (persisted to server/vms.json, git-ignored) plus live
 // health probing. Connecting works the way MobaXterm does: give a host/IP, a
@@ -39,7 +39,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Where the SSH inventory lives. Overridable because in a container the
 // image is read-only and this file has to land on a mounted volume, or every
 // host the user adds disappears on the next restart.
-const VMS_PATH = process.env.KALAM_VMS_PATH || path.join(__dirname, 'vms.json');
+const VMS_PATH = process.env.TRINETRA_VMS_PATH || path.join(__dirname, 'vms.json');
 
 const NAME_RE = /^[a-zA-Z0-9_.-]+$/;
 const HOST_RE = /^[a-zA-Z0-9_.:-]+$/; // hostname or IPv4/IPv6-ish
@@ -51,7 +51,7 @@ export interface VmEntry {
   password?: string;  // stored in vms.json (git-ignored); never sent to the client
   keyPath?: string;   // alternative to the password
   via?: string;       // name of another inventory VM to use as an SSH jump host
-  // Root access for a non-root login: every command Kalam runs on this host is
+  // Root access for a non-root login: every command Trinetra runs on this host is
   // wrapped in sudo / su. Discovery needs it — crictl, containerd and most of
   // /var/log are root-only, which is why an ordinary login sees "nothing here".
   elevate?: Elevation;
@@ -767,7 +767,7 @@ export const DISCOVER_HOST_CMD = [
   "echo @@KUBECHECK@@",
   "(kubectl get nodes -o name --request-timeout=10s 2>&1 | head -c 300 || true)",
   // Which kubeconfig and identity are in play — the usual cause of "works in
-  // my shell, empty in Kalam" is a different HOME or a service account.
+  // my shell, empty in Trinetra" is a different HOME or a service account.
   "echo @@KUBECTX@@",
   "(kubectl config current-context 2>&1 | head -c 160 || true)",
   "echo @@KUBEAUTH@@",
@@ -782,7 +782,7 @@ export const DISCOVER_HOST_CMD = [
 // kubectl's own bound on each API call, set below the outer SSH timeout so a
 // slow or dead API server returns a readable error instead of the whole round
 // trip being killed. kubectl defaults this to 0, meaning it waits forever.
-const K8S_REQ = `--request-timeout=${Math.max(5, Math.floor((Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000) * 0.6) / 1000))}s`;
+const K8S_REQ = `--request-timeout=${Math.max(5, Math.floor((Number(process.env.TRINETRA_KUBECTL_TIMEOUT_MS || 120_000) * 0.6) / 1000))}s`;
 
 // Cluster objects, in their own round trip with a buffer sized for a real
 // cluster. Ordered SMALLEST FIRST on purpose: if an unusually large cluster
@@ -816,7 +816,7 @@ export const DISCOVER_K8S_CMD = [
 
 /** Bulk cluster JSON needs far more than sshRun's 4 MB default. */
 export const K8S_MAX_BUFFER = 96 * 1024 * 1024;
-export const K8S_TIMEOUT_MS = Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000);
+export const K8S_TIMEOUT_MS = Number(process.env.TRINETRA_KUBECTL_TIMEOUT_MS || 120_000);
 
 export function section(text: string, tag: string): string {
   const start = text.indexOf(`@@${tag}@@`);

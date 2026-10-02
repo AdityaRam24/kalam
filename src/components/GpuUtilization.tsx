@@ -225,7 +225,7 @@ export const GpuUtilization: React.FC<Props> = ({ source, vmNames }) => {
         </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', fontSize: 12, color: 'var(--text-muted)' }}>
           {at && <span>updated {at}</span>}
-          {skipped > 0 && <span className="badge warning" style={{ textTransform: 'none' }}>{skipped} running GPU containers not probed (limit KALAM_GPU_MAX_PROBES)</span>}
+          {skipped > 0 && <span className="badge warning" style={{ textTransform: 'none' }}>{skipped} running GPU containers not probed (limit TRINETRA_GPU_MAX_PROBES)</span>}
           <span>Data: Kubernetes GPU requests + <code className="code-tag">kubectl exec &lt;pod&gt; -- nvidia-smi --query-gpu=…</code></span>
         </div>
         {error && (

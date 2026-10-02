@@ -6,9 +6,10 @@
 //   GET  /api/history/summary                      key -> last change (heatmap)
 //   GET  /api/history/status                       poller + storage state
 //   POST /api/history/capture   { source }         capture now
+//   GET  /api/history/why                          current failures + suspect changes
 //
 // Everything is read-only with respect to the cluster: a capture runs
-// `kubectl get` and writes only to Kalam's own history files.
+// `kubectl get` and writes only to Trinetra's own history files.
 
 import { Router } from 'express';
 import { loadVms } from '../vms.js';
@@ -17,6 +18,8 @@ import { CAPTURED_SECTIONS } from './collect.js';
 import { captureOnce, pollerState } from './poller.js';
 import { listSources, loadSnapshot, readChanges, type HistoryQuery } from './store.js';
 import { objectKey } from './model.js';
+import { cachedWhyInput, contractsFor, explainCluster, metadataContracts, rawObject } from '../k8s/why.js';
+import { suspectsFor } from './suspects.js';
 
 export const historyRouter = Router();
 
@@ -133,7 +136,7 @@ historyRouter.get('/api/history/object/:kind/:name', (req, res) =>
  * for you: every rollout leaves a ReplicaSet behind, numbered by the
  * `deployment.kubernetes.io/revision` annotation, and `kubernetes.io/change-cause`
  * carries whatever note the person who did it left. Diffing consecutive
- * revisions' images shows the change even if Kalam was not running at the time.
+ * revisions' images shows the change even if Trinetra was not running at the time.
  */
 export async function rolloutRevisions(source: string, namespace: string, name: string) {
   const vm = source === 'local' ? undefined : source;
@@ -200,7 +203,7 @@ historyRouter.get('/api/history/summary', async (req, res) => {
 
 /**
  * What the timeline can be sliced by, for one source and window: namespaces
- * (every namespace Kalam tracks, so a quiet one is still selectable), object
+ * (every namespace Trinetra tracks, so a quiet one is still selectable), object
  * kinds, writers, the busiest objects, and an activity histogram.
  *
  * Pure so it is unit-tested; the route below only feeds it.
@@ -291,5 +294,80 @@ historyRouter.post('/api/history/capture', async (req, res) => {
     res.json({ ok: true, readOnly: true, ...outcome });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || 'Capture failed.' });
+  }
+});
+
+/**
+ * What is failing right now, and which recorded changes most likely caused it.
+ *
+ *   GET /api/history/why?source=                       every current finding
+ *   GET /api/history/why?source=&kind=&namespace=&name= one object (drawer)
+ *
+ * Findings come from the why-engine; suspects are ranked by suspects.ts over
+ * the last seven days of this source's history.
+ */
+historyRouter.get('/api/history/why', async (req, res) => {
+  const source = sourceOf(req.query.source);
+  const vm = source === 'local' ? undefined : source;
+  const kind = req.query.kind ? String(req.query.kind).toLowerCase() : undefined;
+  const namespace = req.query.namespace ? String(req.query.namespace) : undefined;
+  const name = req.query.name ? String(req.query.name) : undefined;
+  try {
+    const [input, changes] = await Promise.all([
+      cachedWhyInput(vm),
+      readChanges(source, { limit: 2000, since: Date.now() - 7 * 86_400_000 }),
+    ]);
+    if (!input.read.size) {
+      return res.json({ ok: false, error: input.error || 'Nothing could be read from the cluster.', findings: [] });
+    }
+    const report = explainCluster(input);
+    const pods = new Map<string, any>();
+    for (const p of input.pods || []) pods.set(objectKey('Pod', p?.metadata?.name, p?.metadata?.namespace || 'default'), p);
+    const workloads = new Set((input.workloads || []).map((w: any) => objectKey(w?.kind || 'Deployment', w?.metadata?.name, w?.metadata?.namespace)));
+    const ctx = {
+      ownerOf: (podKey: string) => {
+        const p = pods.get(podKey);
+        const o = p?.metadata?.ownerReferences?.[0];
+        if (!o) return undefined;
+        const ns = p.metadata.namespace;
+        if (o.kind === 'ReplicaSet') {
+          const dep = objectKey('Deployment', String(o.name).replace(/-[a-z0-9]{5,10}$/, ''), ns);
+          if (workloads.has(dep)) return dep;
+        }
+        return objectKey(o.kind, o.name, ns);
+      },
+      nodeOf: (podKey: string) => pods.get(podKey)?.spec?.nodeName,
+    };
+    let findings = report.findings;
+    let focus: Record<string, unknown> = {};
+    if (kind && name) {
+      const canon = kind === 'isvc' ? 'inferenceservice' : kind === 'k8s-node' ? 'node' : kind;
+      findings = findings.filter((f) => f.object.kind.toLowerCase() === canon && f.object.name === name && (!namespace || canon === 'node' || f.object.namespace === namespace));
+      // The chain: findings on the objects that are this one's root cause.
+      const causes = report.findings.filter((c) => findings.some((f) => f.rootCause && f.rootCause.kind === c.object.kind && f.rootCause.name === c.object.name));
+      const display = canon === 'inferenceservice' ? 'InferenceService' : canon.charAt(0).toUpperCase() + canon.slice(1);
+      const obj = rawObject(input, canon, namespace, name);
+      focus = {
+        causes,
+        contracts: contractsFor(input, display, namespace, name),
+        metadata: obj ? metadataContracts(obj) : [],
+        found: !!obj,
+      };
+    }
+    // Info-level findings (expected states) never need a suspect.
+    const withSuspects = findings.slice(0, 300).map((f) => ({ ...f, suspects: f.severity === 'info' ? [] : suspectsFor(f, changes, ctx) }));
+    res.json({
+      ok: true,
+      readOnly: true,
+      source,
+      ...focus,
+      findings: withSuspects,
+      counts: report.counts,
+      read: report.read,
+      historyWindow: { since: new Date(Date.now() - 7 * 86_400_000).toISOString(), changes: changes.length },
+      at: new Date().toISOString(),
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Could not correlate failures with changes.' });
   }
 });

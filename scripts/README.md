@@ -1,10 +1,10 @@
-# Kalam — Linux scripts
+# Trinetra — Linux scripts
 
-Everything needed to set up and run Kalam on a Linux machine. These are the
+Everything needed to set up and run Trinetra on a Linux machine. These are the
 POSIX equivalents of the `.bat` files in the repo root.
 
 ```bash
-git clone <repo> && cd kalam
+git clone <repo> && cd trinetra
 chmod +x scripts/*.sh          # once, if git didn't preserve the exec bit
 ./scripts/setup.sh             # install Node deps, create .env, build dist/
 ./scripts/start.sh             # run it → http://127.0.0.1:3001
@@ -15,9 +15,9 @@ chmod +x scripts/*.sh          # once, if git didn't preserve the exec bit
 | `setup.sh` | One-time setup: prerequisite checks, `.env`, `npm install`, frontend build, optional CLI link. Flags: `--no-build`, `--link`, `--clean`. |
 | `start.sh` | Production run. One process on one port — Express serves `dist/`, so **no Vite and no :5173**. Flags: `--rebuild`, `--lan`, `--force`, `--port N`, `--no-open`. |
 | `dev.sh` | Development run with hot reload: API on 3001 + Vite on 5173. Flags: `--lan`, `--force`, `--port N`, `--client-port N`, `--no-open`. |
-| `stop.sh` | Kills whatever is listening on the Kalam ports. Accepts explicit ports. |
+| `stop.sh` | Kills whatever is listening on the Trinetra ports. Accepts explicit ports. |
 | `doctor.sh` | Diagnoses connection failures (including `ECONNREFUSED 0.0.0.0:5173`) and prints the fix. `--fix` frees ports / reinstalls deps. |
-| `install-cli.sh` | Registers the global `kalam` command via `npm link`. `--uninstall` reverses it. |
+| `install-cli.sh` | Registers the global `trinetra` command via `npm link`. `--uninstall` reverses it. |
 | `lib/common.sh` | Shared helpers — sourced, not run. |
 
 Requirements: **Node.js 20+** (Vite 8 / TypeScript 6) and npm. `curl`, `lsof`
@@ -90,16 +90,16 @@ Fastest way out, in order:
 ## Running as a service (optional)
 
 ```ini
-# /etc/systemd/system/kalam.service
+# /etc/systemd/system/trinetra.service
 [Unit]
-Description=Kalam
+Description=Trinetra
 After=network.target
 
 [Service]
 Type=simple
 User=YOUR_USER
-WorkingDirectory=/opt/kalam
-ExecStart=/opt/kalam/scripts/start.sh --no-open
+WorkingDirectory=/opt/trinetra
+ExecStart=/opt/trinetra/scripts/start.sh --no-open
 Restart=on-failure
 
 [Install]
@@ -107,8 +107,8 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl daemon-reload && sudo systemctl enable --now kalam
-journalctl -u kalam -f
+sudo systemctl daemon-reload && sudo systemctl enable --now trinetra
+journalctl -u trinetra -f
 ```
 
 ## Diagnosing a host that shows nothing
@@ -118,10 +118,10 @@ and parsers the server uses — and reports every stage. Use it whenever the
 dashboard or topology map is emptier than the cluster is.
 
 ```bash
-npm run diagnose -- --local                 # this machine (Kalam on a cluster node)
+npm run diagnose -- --local                 # this machine (Trinetra on a cluster node)
 npm run diagnose -- <name-from-inventory>   # a host reached over SSH
 npm run diagnose -- --host 10.1.2.3 --user ubuntu --key ~/.ssh/id_rsa
-KALAM_SSH_PASSWORD=... npm run diagnose -- --host 10.1.2.3 --user ubuntu
+TRINETRA_SSH_PASSWORD=... npm run diagnose -- --host 10.1.2.3 --user ubuntu
 ```
 
 Add `--root` to elevate, `--via <name>` for a jump host, `--json` to dump the
@@ -135,11 +135,11 @@ map with no explanation:
 
 | What it prints | What it means |
 | --- | --- |
-| `The connection to the server localhost:8080 was refused` | no kubeconfig for the user Kalam runs as |
+| `The connection to the server localhost:8080 was refused` | no kubeconfig for the user Trinetra runs as |
 | `You must be logged in to the server (Unauthorized)` | credentials expired or wrong context |
 | `Forbidden: pods is forbidden: User "system:serviceaccount:..."` | the identity may not list that kind |
 | `sh: kubectl: command not found` | not on the non-interactive SSH `PATH` |
-| `too-large` / `timed-out` / `cut-short` | the read exceeded a limit — raise `KALAM_KUBECTL_TIMEOUT_MS` |
+| `too-large` / `timed-out` / `cut-short` | the read exceeded a limit — raise `TRINETRA_KUBECTL_TIMEOUT_MS` |
 
 ## Checking the topology map
 

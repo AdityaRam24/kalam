@@ -2,13 +2,15 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   History, RefreshCw, Camera, AlertTriangle, Filter, Search, X, Clock, User,
   Layers, ChevronRight, Server, Database, Shield, Network, Box, Activity,
-  Download, ChevronsDownUp, ChevronsUpDown, FolderTree, BarChart3, Flame,
+  Download, ChevronsDownUp, ChevronsUpDown, FolderTree, BarChart3, Flame, Tag, Crosshair, ShieldCheck, Lightbulb,
 } from 'lucide-react';
 import { downloadText, stamp, toCsv } from '../lib/health';
+import { sanitizeFinding, type WhyFinding } from '../lib/sanitize';
+import { FindingCard } from './WhyPanel';
 
 // The cluster changelog.
 //
-// Everything else in Kalam shows the cluster as it is now. This view is the
+// Everything else in Trinetra shows the cluster as it is now. This view is the
 // only one that answers "what changed?" — and it can only answer it because
 // the backend has been quietly fingerprinting the cluster and diffing the
 // result. Two things follow from that, and the UI has to be honest about both:
@@ -19,7 +21,7 @@ import { downloadText, stamp, toCsv } from '../lib/health';
 //     the header says so and offers the button that fixes it.
 //
 // Slicing: namespace, object kind and writer come from /api/history/facets,
-// which lists every namespace Kalam tracks (so a quiet namespace is still
+// which lists every namespace Trinetra tracks (so a quiet namespace is still
 // selectable) plus an activity histogram for the window.
 
 interface FieldChange { path: string; from?: string; to?: string }
@@ -42,7 +44,29 @@ interface ChangeEvent {
   revision?: string;
   owner?: string;
   causedBy?: string;
+  /** What this change does to the rest of the cluster (server: impact.ts). */
+  impact?: string[];
 }
+
+interface WhyNow {
+  findings: WhyFinding[];
+  counts: { critical: number; warning: number; info: number };
+  error?: string;
+  changesScanned: number;
+}
+
+// FindingCard is shared with the topology drawer, which has its own palette;
+// this maps its variables onto the app theme so it reads right in light mode.
+const THEME_BRIDGE = {
+  '--tp-text': 'var(--text-primary)',
+  '--tp-text-3': 'var(--text-secondary)',
+  '--tp-muted': 'var(--text-muted)',
+  '--tp-ns': 'var(--hpe-blue, #00A3E0)',
+  '--tp-w03': 'var(--bg-secondary)',
+  '--tp-w06': 'var(--border-color)',
+  '--tp-w08': 'var(--border-color)',
+  '--tp-badge-rose': 'var(--status-error)',
+} as React.CSSProperties;
 
 interface Poller {
   enabled: boolean;
@@ -82,6 +106,8 @@ const KIND_STYLE: Record<string, { color: string; label: string; icon: React.Com
   cordon:    { color: '#E5484D', label: 'cordon',     icon: Server },
   taint:     { color: '#FF8300', label: 'taint',      icon: Server },
   version:   { color: '#7630EA', label: 'version',    icon: Server },
+  label:     { color: '#A78BFA', label: 'label',      icon: Tag },
+  annotation:{ color: '#C084FC', label: 'annotation', icon: Tag },
 };
 
 const SINCE_OPTIONS = [
@@ -94,6 +120,31 @@ const SINCE_OPTIONS = [
 ];
 
 const CLUSTER_SCOPED = '(cluster-scoped)';
+
+/**
+ * One card per CAUSE, not per victim: a missing ConfigMap that breaks five
+ * pods and their Deployment is one problem with six symptoms. Findings sharing
+ * a root-cause object group together; the rest group by what went wrong. The
+ * suspects of every member are merged, best first.
+ */
+function groupByCause(findings: WhyFinding[]): Array<{ key: string; finding: WhyFinding; objects: WhyFinding['object'][] }> {
+  const out = new Map<string, { key: string; finding: WhyFinding; objects: WhyFinding['object'][] }>();
+  for (const f of findings) {
+    const rc = f.rootCause;
+    const key = rc ? `rc:${rc.kind}/${rc.namespace || ''}/${rc.name}` : `t:${f.severity}:${f.category}:${f.title}`;
+    const g = out.get(key);
+    if (!g) { out.set(key, { key, finding: { ...f, suspects: [...f.suspects] }, objects: [f.object] }); continue; }
+    g.objects.push(f.object);
+    // The most severe member speaks for the group.
+    if (f.severity === 'critical' && g.finding.severity !== 'critical') g.finding = { ...f, suspects: [...g.finding.suspects, ...f.suspects] };
+    else g.finding.suspects.push(...f.suspects);
+  }
+  return [...out.values()].map((g) => {
+    const seen = new Set<string>();
+    const suspects = g.finding.suspects.sort((a, b) => b.score - a.score).filter((sp) => !seen.has(sp.change.id) && !!seen.add(sp.change.id)).slice(0, 3);
+    return { ...g, finding: { ...g.finding, suspects } };
+  }).sort((a, b) => (a.finding.severity === 'critical' ? 0 : 1) - (b.finding.severity === 'critical' ? 0 : 1) || b.objects.length - a.objects.length);
+}
 const PAGE = 400;
 
 function ago(iso?: string): string {
@@ -201,6 +252,46 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
   const [capturing, setCapturing] = useState(false);
   const [captureNote, setCaptureNote] = useState('');
 
+  // What is failing right now and which recorded changes explain it.
+  const [whyNow, setWhyNow] = useState<WhyNow | null>(null);
+  const [whyLoading, setWhyLoading] = useState(false);
+  const [whyTick, setWhyTick] = useState(0);
+  const [whyShowAll, setWhyShowAll] = useState(false);
+  const [linkedOnly, setLinkedOnly] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setWhyLoading(true);
+    fetch(`/api/history/why?source=${encodeURIComponent(source)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        const findings = (Array.isArray(d?.findings) ? d.findings : []).map(sanitizeFinding).filter((f: WhyFinding | undefined): f is WhyFinding => !!f);
+        setWhyNow({
+          findings,
+          counts: { critical: Number(d?.counts?.critical) || 0, warning: Number(d?.counts?.warning) || 0, info: Number(d?.counts?.info) || 0 },
+          error: d?.ok === false || d?.error ? String(d?.error || 'Could not analyse the cluster.') : undefined,
+          changesScanned: Number(d?.historyWindow?.changes) || 0,
+        });
+      })
+      .catch((e) => { if (!cancelled) setWhyNow({ findings: [], counts: { critical: 0, warning: 0, info: 0 }, error: e?.message || 'Could not analyse the cluster.', changesScanned: 0 }); })
+      .finally(() => { if (!cancelled) setWhyLoading(false); });
+    return () => { cancelled = true; };
+  }, [source, whyTick]);
+
+  // change id → the current failures it is a suspect for.
+  const suspectOf = useMemo(() => {
+    const m = new Map<string, Array<{ title: string; object: string; reason: string; score: number }>>();
+    for (const f of whyNow?.findings || []) {
+      for (const sp of f.suspects) {
+        const list = m.get(sp.change.id) || [];
+        list.push({ title: f.title, object: `${f.object.kind} ${f.object.namespace ? `${f.object.namespace}/` : ''}${f.object.name}`, reason: sp.reason, score: sp.score });
+        m.set(sp.change.id, list);
+      }
+    }
+    return m;
+  }, [whyNow]);
+
   useEffect(() => {
     fetch('/api/history/status')
       .then((r) => r.json())
@@ -257,7 +348,7 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
 
   useEffect(() => {
     if (!autoRefresh) return;
-    const id = setInterval(() => { if (!document.hidden) void load(); }, 30_000);
+    const id = setInterval(() => { if (!document.hidden) { void load(); setWhyTick((t) => t + 1); } }, 30_000);
     return () => clearInterval(id);
   }, [autoRefresh, load]);
 
@@ -280,6 +371,7 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
             : notes || `No changes since the last capture (${d.objects} objects, ${d.durationMs}ms).`
         );
         await load();
+        setWhyTick((t) => t + 1);
       }
     } catch (e: any) {
       setCaptureNote(e.message);
@@ -296,13 +388,14 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
     return changes.filter((c) => {
       if (namespace === CLUSTER_SCOPED && c.namespace) return false;
       if (hideConsequences && c.causedBy) return false;
+      if (linkedOnly && !suspectOf.has(c.id)) return false;
       if (bucket) {
         const t = Date.parse(c.at);
         if (t < start || t >= end) return false;
       }
       return true;
     });
-  }, [changes, namespace, bucket, facets, hideConsequences]);
+  }, [changes, namespace, bucket, facets, hideConsequences, linkedOnly, suspectOf]);
 
   const grouped = useMemo(() => {
     const keyOf = (c: ChangeEvent) =>
@@ -352,16 +445,19 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
     severity !== 'all' && { label: `severity: ${severity}`, clear: () => setSeverity('all') },
     bucket && { label: `time: ${new Date(bucket).toLocaleString()}`, clear: () => setBucket(null) },
     search.trim() && { label: `"${search.trim()}"`, clear: () => setSearch('') },
+    linkedOnly && { label: 'linked to current failures', clear: () => setLinkedOnly(false) },
   ].filter(Boolean) as Array<{ label: string; clear: () => void }>;
 
   const clearAll = () => {
     setNamespace('all'); setObjectKind('all'); setActor('all'); setCategory('all');
-    setSeverity('all'); setBucket(null); setSearch(''); setHideConsequences(false);
+    setSeverity('all'); setBucket(null); setSearch(''); setHideConsequences(false); setLinkedOnly(false);
   };
 
   const exportCsv = () => {
-    const header = ['Observed', 'Happened', 'Source', 'Severity', 'Change', 'Kind', 'Namespace', 'Name', 'Summary', 'Changed by', 'Operation', 'Revision', 'Change cause', 'Fields'];
-    const body = visible.map((c) => [c.at, c.actualAt, c.source, c.severity, c.kind, c.objectKind, c.namespace, c.name, c.summary, c.actor, c.actorOp, c.revision, c.cause,
+    const header = ['Observed', 'Happened', 'Source', 'Severity', 'Change', 'Kind', 'Namespace', 'Name', 'Summary', 'Impact', 'Suspected cause of', 'Changed by', 'Operation', 'Revision', 'Change cause', 'Fields'];
+    const body = visible.map((c) => [c.at, c.actualAt, c.source, c.severity, c.kind, c.objectKind, c.namespace, c.name, c.summary,
+      (c.impact || []).join(' | '), (suspectOf.get(c.id) || []).map((s) => `${s.object}: ${s.title}`).join(' | '),
+      c.actor, c.actorOp, c.revision, c.cause,
       c.fields.map((f) => `${f.path}: ${f.from ?? '—'} -> ${f.to ?? '—'}`).join('; ')]);
     downloadText(toCsv([header, ...body]), `trinetra-history-${source}-${stamp()}.csv`, 'text/csv');
   };
@@ -392,7 +488,7 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
             <button className="btn secondary" onClick={captureNow} disabled={capturing} style={{ padding: '5px 12px', fontSize: 12 }}>
               {capturing ? <RefreshCw size={13} className="animate-spin" /> : <Camera size={13} />} Capture now
             </button>
-            <button className="btn secondary" onClick={load} disabled={loading} style={{ padding: '5px 12px', fontSize: 12 }}>
+            <button className="btn secondary" onClick={() => { void load(); setWhyTick((t) => t + 1); }} disabled={loading} style={{ padding: '5px 12px', fontSize: 12 }}>
               <RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh
             </button>
           </div>
@@ -417,9 +513,9 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
         {!poller?.enabled && (
           <p style={{ margin: '10px 0 0 0', fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
             History only advances while something captures the cluster. Use <strong>Capture now</strong> for a
-            point-in-time comparison, or set <code className="code-tag">KALAM_HISTORY=1</code> (optionally
-            <code className="code-tag">KALAM_HISTORY_INTERVAL_SEC=300</code> and
-            <code className="code-tag">KALAM_HISTORY_SOURCES=all</code>) before starting the server to record
+            point-in-time comparison, or set <code className="code-tag">TRINETRA_HISTORY=1</code> (optionally
+            <code className="code-tag">TRINETRA_HISTORY_INTERVAL_SEC=300</code> and
+            <code className="code-tag">TRINETRA_HISTORY_SOURCES=all</code>) before starting the server to record
             continuously. Captures are read-only: they run <code className="code-tag">kubectl get</code> and nothing else.
           </p>
         )}
@@ -433,6 +529,82 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
           </div>
         )}
       </div>
+
+      {/* ─── Why things are failing now — and which change did it ─── */}
+      {(() => {
+        const active = (whyNow?.findings || []).filter((f) => f.severity !== 'info');
+        const linked = active.filter((f) => f.suspects.length > 0).length;
+        const groups = groupByCause(active);
+        const shown = whyShowAll ? groups : groups.slice(0, 6);
+        const border = active.some((f) => f.severity === 'critical') ? 'var(--status-error)' : active.length ? 'var(--status-warning, #f59e0b)' : 'var(--hpe-green)';
+        return (
+          <div className="panel-card" style={{ borderLeft: `3px solid ${border}`, ...THEME_BRIDGE }}>
+            <div className="panel-card-title">
+              <h2><Crosshair size={17} /> Why things are failing now</h2>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginLeft: 'auto', flexWrap: 'wrap', fontSize: 12 }}>
+                {whyLoading && <RefreshCw size={12} className="animate-spin" style={{ color: 'var(--text-muted)' }} />}
+                {active.length > 0 && (
+                  <>
+                    {whyNow!.counts.critical > 0 && <span className="badge error">{whyNow!.counts.critical} failing</span>}
+                    {whyNow!.counts.warning > 0 && <span className="badge warning">{whyNow!.counts.warning} at risk</span>}
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: 'var(--text-secondary)', cursor: linked ? 'pointer' : 'default' }}
+                      title="Show only the timeline entries Trinetra links to a current failure">
+                      <input type="checkbox" checked={linkedOnly} disabled={!linked && !linkedOnly} onChange={(e) => setLinkedOnly(e.target.checked)} />
+                      Only changes linked to these ({suspectOf.size})
+                    </label>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {whyNow?.error && !active.length && (
+              <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)' }}>Failure analysis unavailable: {whyNow.error}</p>
+            )}
+            {whyNow && !whyNow.error && !active.length && (
+              <p style={{ margin: 0, fontSize: 12.5, color: 'var(--hpe-green)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <ShieldCheck size={14} /> Nothing is failing in {source === 'local' ? 'this cluster' : source} right now — every reference, selector and issuer checked out.
+              </p>
+            )}
+            {active.length > 0 && (
+              <>
+                <p style={{ margin: '0 0 10px 0', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                  <Lightbulb size={12} style={{ verticalAlign: -2, marginRight: 4 }} />
+                  {active.length} problem{active.length === 1 ? '' : 's'} from {groups.length} distinct cause{groups.length === 1 ? '' : 's'}, explained from the live cluster — the cause, the object that is really at fault, and the fix.
+                  {linked > 0
+                    ? ` ${linked} of them line up with ${linked === 1 ? 'a change' : 'changes'} recorded in the last 7 days (${whyNow!.changesScanned} scanned).`
+                    : whyNow!.changesScanned ? ` None line up with the ${whyNow!.changesScanned} changes recorded in the last 7 days — the cause predates the history, or came from outside the cluster.` : ' No changes are recorded yet to correlate against.'}
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 10 }}>
+                  {shown.map((g) => (
+                    <div key={g.key} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+                        {g.objects.length > 1 && <span style={{ fontWeight: 600 }}>Affects {g.objects.length}:</span>}
+                        {g.objects.slice(0, 6).map((o) => (
+                          <button key={`${o.kind}/${o.namespace || ''}/${o.name}`} type="button" className="btn secondary"
+                            style={{ padding: '0 6px', fontSize: 10.5, fontFamily: 'var(--font-mono)' }}
+                            title={`Show the changes to ${o.kind} ${o.name} in the timeline`}
+                            onClick={() => { setSearch(o.name); if (o.namespace) setNamespace(o.namespace); setObjectKind(o.kind); }}>
+                            {o.kind} {o.namespace ? `${o.namespace}/` : ''}{o.name}
+                          </button>
+                        ))}
+                        {g.objects.length > 6 && <span>+{g.objects.length - 6} more</span>}
+                      </div>
+                      <FindingCard f={g.finding} onJump={(r) => { setSearch(r.name); if (r.namespace) setNamespace(r.namespace); setObjectKind(r.kind); }} />
+                    </div>
+                  ))}
+                </div>
+                {groups.length > shown.length || whyShowAll ? (
+                  <div style={{ textAlign: 'center', marginTop: 8 }}>
+                    <button className="btn secondary" style={{ padding: '3px 10px', fontSize: 11.5 }} onClick={() => setWhyShowAll((v) => !v)}>
+                      {whyShowAll ? 'Show fewer' : `Show all ${groups.length} causes`}
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ─── Overview: numbers, activity, hot spots ─── */}
       {facets && facets.total > 0 && (
@@ -668,10 +840,22 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
                         <User size={9} style={{ verticalAlign: -1 }} /> {c.actor}
                       </span>
                     )}
+                    {suspectOf.has(c.id) && (
+                      <span className="badge error" style={{ fontSize: 9, flexShrink: 0, textTransform: 'none' }}
+                        title={suspectOf.get(c.id)!.map((s) => `${s.object}: ${s.title} — ${s.reason}`).join('\n')}>
+                        <Crosshair size={9} style={{ verticalAlign: -1, marginRight: 3 }} />likely cause
+                      </span>
+                    )}
                     <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap', flexShrink: 0 }} title={new Date(when).toLocaleString()}>
                       {ago(when)}
                     </span>
                   </div>
+                  {!open && c.impact && c.impact.length > 0 && (
+                    <div onClick={() => toggle(c.id)} style={{ padding: '0 11px 7px 34px', fontSize: 11.5, color: 'var(--text-secondary)', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                      title={c.impact.join('\n')}>
+                      → {c.impact[0]}{c.impact.length > 1 ? ` (+${c.impact.length - 1})` : ''}
+                    </div>
+                  )}
 
                   {open && (
                     <div style={{ padding: '2px 12px 11px 34px', borderTop: '1px solid var(--border-color)' }}>
@@ -685,6 +869,29 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
                         )}
                         {c.revision && <> · deployment revision <code className="code-tag">{c.revision}</code></>}
                       </div>
+
+                      {suspectOf.has(c.id) && (
+                        <div style={{ fontSize: 11.5, marginBottom: 9, padding: '7px 10px', borderRadius: 5, border: '1px solid var(--status-error)', background: 'var(--bg-secondary)' }}>
+                          <div style={{ fontWeight: 650, marginBottom: 3, display: 'flex', alignItems: 'center', gap: 5 }}>
+                            <Crosshair size={12} style={{ color: 'var(--status-error)' }} /> Linked to what is failing now
+                          </div>
+                          {suspectOf.get(c.id)!.map((s, i) => (
+                            <div key={i} style={{ color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                              <strong>{s.object}</strong>: {s.title}
+                              <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>Why linked: {s.reason}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {c.impact && c.impact.length > 0 && (
+                        <div style={{ fontSize: 11.5, marginBottom: 9, padding: '7px 10px', borderRadius: 5, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)' }}>
+                          <div style={{ fontWeight: 650, marginBottom: 3 }}>What this change means</div>
+                          <ul style={{ margin: 0, paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            {c.impact.map((line, i) => <li key={i} style={{ color: 'var(--text-secondary)', lineHeight: 1.5 }}>{line}</li>)}
+                          </ul>
+                        </div>
+                      )}
 
                       {c.cause && (
                         <div style={{ fontSize: 11.5, marginBottom: 9, padding: '6px 9px', background: 'var(--bg-secondary)', borderRadius: 5, border: '1px solid var(--border-color)' }}>

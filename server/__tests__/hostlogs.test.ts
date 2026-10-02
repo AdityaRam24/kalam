@@ -110,7 +110,7 @@ describe('safeLogPath', () => {
 
 describe('splitMarked', () => {
   it('splits marker blocks and keeps "@@" in log text', () => {
-    const out = splitMarked('===KALAM:UID===\n0\n===KALAM:FILE:/var/log/syslog===\nerror @@x@@\n===KALAM:END===\n');
+    const out = splitMarked('===TRINETRA:UID===\n0\n===TRINETRA:FILE:/var/log/syslog===\nerror @@x@@\n===TRINETRA:END===\n');
     expect(out.map((b) => b.tag)).toEqual(['UID', 'FILE', 'END']);
     expect(out[1].arg).toBe('/var/log/syslog');
     expect(out[1].body).toEqual(['error @@x@@']);

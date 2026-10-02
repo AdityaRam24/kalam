@@ -8,7 +8,7 @@ import { Server, utils } from 'ssh2';
 import type { AddressInfo } from 'net';
 import { sshExec, sshCheck, friendly, buildRemoteCommand, friendlyElevation } from '../ssh.js';
 
-const USER = 'kalam';
+const USER = 'trinetra';
 const PASS = 'correct-horse';
 
 let server: Server;

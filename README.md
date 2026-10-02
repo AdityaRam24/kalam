@@ -14,7 +14,7 @@ Trinetra is an **Agentic DevOps Dashboard & Chatbot** that captures containers a
 * **📖 Kubectl Reference Guide & Tools**: A searchable catalog of ~90 commands where every entry is labelled by what it can do to your cluster (read-only / changes state / destructive), fills in its own `<placeholders>`, and — when it is read-only — runs against a connected VM with the output inline. Plus a validating command builder, eight diagnostic runbooks, and a practice quiz.
 * **🕸️ Dependency Graph & Root-Cause Analysis**: Builds a typed graph of what depends on what (VMs → nodes → pods → services/PVCs, plus platform dependencies like SPIRE, CNI and CSI drivers) from one read-only SSH pass. Turns fourteen red pods into one cause with thirteen casualties, and answers "what breaks if I stop this?" before you stop it.
 * **🧬 PCAI Stack Visualizer — down to how each service runs**: Classifies live workloads into the AI Essentials layers (MLIS, MLDM, MLDE, lakehouse, Keycloak, GPU operator, ingress) and lets you expand any layer to see how it is actually running: its **endpoints** (service type, cluster IP, ports), its workloads and pods with status/readiness/restarts/node, the **images** it runs, the **PersistentVolumeClaims** it mounts, the nodes it spreads across, and what it has **requested** — CPU, memory and GPUs. The GPU tile reads `requested/capacity` rather than capacity alone, because capacity never told you whether any was left. Each recognised component is explained from an offline catalog (what it is, what stops working if it goes down) — no LLM required, so it works air-gapped.
-* **📈 Observability — telemetry over time**: A dedicated page that samples every host over SSH (CPU, load, memory, swap, every filesystem, GPU utilisation/memory/temperature/power, failed units) and charts it. One card per host with sparklines, plus one metric overlaid across hosts. CPU is a true rate derived from `/proc/stat` counters, so a reboot leaves a gap instead of a spike, and an unreachable host **breaks the line** rather than drawing through the outage. Off by default — `KALAM_METRICS=1` to record continuously, or press **Sample now**.
+* **📈 Observability — telemetry over time**: A dedicated page that samples every host over SSH (CPU, load, memory, swap, every filesystem, GPU utilisation/memory/temperature/power, failed units) and charts it. One card per host with sparklines, plus one metric overlaid across hosts. CPU is a true rate derived from `/proc/stat` counters, so a reboot leaves a gap instead of a spike, and an unreachable host **breaks the line** rather than drawing through the outage. Off by default — `TRINETRA_METRICS=1` to record continuously, or press **Sample now**.
 * **🧠 One understanding, not four lists**: Trinetra sees a host four ways — the health checklist, the `/var/log` rule findings, the metric thresholds, and the dependency graph. Those are rarely four problems; they are usually one problem seen four ways. The insight engine maps every signal onto a shared vocabulary and merges them, so `/var` at 97% + "No space left on device" ×412 + a failing disk check becomes **one** issue marked *corroborated by 3 sources*, ranked above anything only a single source noticed.
 * **🕓 Cluster Change History**: Answers "what changed, when, and who did it" — the question Kubernetes itself cannot, since its events expire after about an hour. Trinetra fingerprints the cluster (workloads, pods, nodes, networking, storage, config and RBAC), diffs each capture against the last, and keeps a durable changelog with field-level before→after values, the writer named from `managedFields`, and Deployment rollout revisions. Read-only, opt-in, and it never stores secret contents.
 * **📜 Host Logs — the whole machine, not just the cluster**: Pick any VM from the SSH inventory and get one page that answers "what is wrong with this host?":
@@ -32,7 +32,7 @@ Trinetra is an **Agentic DevOps Dashboard & Chatbot** that captures containers a
 
 ## 📋 System Requirements
 
-Please refer to the [REQUIREMENTS.md](file:///c:/Users/Steve/Desktop/kalam/REQUIREMENTS.md) file for complete prerequisite details.
+Please refer to the [REQUIREMENTS.md](REQUIREMENTS.md) file for complete prerequisite details.
 
 * **Node.js**: `v20.x` or higher (Vite 8 / TypeScript 6)
 * **Optional — a container runtime on this machine**: Docker, containerd (`crictl`), nerdctl or podman. Not needed at all if your workloads live on VMs.
@@ -90,10 +90,10 @@ to take them. Press **Capture now** whenever you like, or record continuously by
 setting these before starting the server:
 
 ```bash
-KALAM_HISTORY=1                  # opt in — nothing polls your cluster otherwise
-KALAM_HISTORY_INTERVAL_SEC=300   # how often to capture (default 5 minutes)
-KALAM_HISTORY_SOURCES=local      # or: all — this machine plus every inventory VM
-KALAM_HISTORY_RETENTION_DAYS=30  # how far back the changelog is kept
+TRINETRA_HISTORY=1                  # opt in — nothing polls your cluster otherwise
+TRINETRA_HISTORY_INTERVAL_SEC=300   # how often to capture (default 5 minutes)
+TRINETRA_HISTORY_SOURCES=local      # or: all — this machine plus every inventory VM
+TRINETRA_HISTORY_RETENTION_DAYS=30  # how far back the changelog is kept
 ```
 
 Captures only ever run `kubectl get`. They are stored in `server/history/data/`
@@ -132,7 +132,7 @@ Trinetra ships a global `trinetra` command — a streaming, Claude-Code-style te
 
 ### Install the `trinetra` command
 
-> The command was previously called `kalam`; that name still works as an alias.
+> Upgrading from before the rename? Saved CLI settings move to `~/.trinetra.json` on first run, old environment variables are still read (rename them when convenient), and the installer migrates an old cluster install's data into the `trinetra` release.
 
 Install it once so you can type `trinetra` from anywhere:
 
@@ -150,7 +150,7 @@ Then open a **new** terminal so the updated `PATH` is picked up, and run:
 trinetra help
 ```
 
-> Not ready to install globally? Every command works via `node bin/kalam.cjs <command>` or `npm run cli -- <command>` from the project root.
+> Not ready to install globally? Every command works via `node bin/trinetra.cjs <command>` or `npm run cli -- <command>` from the project root.
 
 ### No setup required
 
@@ -232,7 +232,7 @@ Run a single task without entering the REPL:
 
 > Anything unrecognized is treated as a question, e.g. `trinetra what is MLIS?`.
 
-Your chosen provider, model, mode, and Gemini key persist across sessions in `~/.kalam.json`.
+Your chosen provider, model, mode, and Gemini key persist across sessions in `~/.trinetra.json`.
 
 ### Examples
 

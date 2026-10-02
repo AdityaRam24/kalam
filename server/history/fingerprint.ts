@@ -3,7 +3,7 @@
 //
 // This is the judgement layer of the history feature. Every field included
 // here becomes a line an operator may be woken up by; every field left out is
-// a change Kalam will never notice. The bar is: "would I want this in a
+// a change Trinetra will never notice. The bar is: "would I want this in a
 // changelog?" So `spec.template.spec.containers[0].image` is in, and
 // `metadata.resourceVersion`, `status.observedGeneration` and the churn of
 // pod-template hashes are deliberately out.
@@ -23,6 +23,7 @@
 
 import type { Fingerprint } from './model.js';
 import { objectKey } from './model.js';
+import { isNoisyAnnotation, isNoisyLabel } from '../k8s/contracts.js';
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -61,6 +62,29 @@ function clean(spec: Record<string, string | undefined>): Record<string, string>
   }
   return out;
 }
+
+/**
+ * Labels and annotations as `label.<key>` / `annotation.<key>` fields.
+ *
+ * They are contracts, not notes: a Service routes by a label, cert-manager
+ * issues a certificate because of an annotation, Istio injects a sidecar
+ * because of a namespace label. A metadata edit is one of the commonest causes
+ * of "nothing changed but it broke", so every key is tracked — except the ones
+ * that move on their own (contracts.ts), which would bury the rest.
+ */
+export function metaFields(labels: any, annotations: any, prefix = ''): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
+  if (labels && typeof labels === 'object') {
+    for (const [k, v] of Object.entries(labels)) if (!isNoisyLabel(k)) out[`${prefix}label.${k}`] = capped(String(v ?? ''), 120) || '""';
+  }
+  if (annotations && typeof annotations === 'object') {
+    for (const [k, v] of Object.entries(annotations)) if (!isNoisyAnnotation(k)) out[`${prefix}annotation.${k}`] = capped(String(v ?? ''), 120) || '""';
+  }
+  return out;
+}
+
+/** Field families that only exist when a capture recorded them (Snapshot.features). */
+export const META_PREFIXES = ['label.', 'annotation.', 'podAnnotation.'];
 
 /**
  * Who last wrote this object, from `metadata.managedFields`.
@@ -159,6 +183,11 @@ export function templateFields(template: any): Record<string, string | undefined
   out['priorityClass'] = str(spec.priorityClassName);
   out['runtimeClass'] = str(spec.runtimeClassName);
   out['templateLabels'] = sortedPairs(template?.metadata?.labels) || undefined;
+  // Pod-template annotations steer sidecar injection, scraping and restarts
+  // (`kubectl rollout restart` is literally an annotation edit here).
+  for (const [k, v] of Object.entries(template?.metadata?.annotations || {})) {
+    if (!isNoisyAnnotation(k)) out[`podAnnotation.${k}`] = capped(String(v ?? ''), 120) || '""';
+  }
   return out;
 }
 
@@ -367,7 +396,75 @@ const EXTRACT: Record<string, Extract> = {
     scope: str(o?.spec?.scope),
     versions: (o?.spec?.versions || []).map((v: any) => `${v.name}${v.served ? '' : '(unserved)'}`).sort().join(','),
   }),
+
+  // cert-manager. `ready` flipping is an event in its own right: it is the
+  // moment HTTPS starts (or stops) working.
+  Certificate: (o) => ({
+    issuer: o?.spec?.issuerRef ? `${o.spec.issuerRef.kind || 'Issuer'}/${o.spec.issuerRef.name}` : undefined,
+    dnsNames: capped((o?.spec?.dnsNames || []).slice().sort().join(',')) || undefined,
+    secretName: str(o?.spec?.secretName),
+    ready: readyOf(o),
+  }),
+  Issuer: (o) => issuerFields(o),
+  ClusterIssuer: (o) => issuerFields(o),
+  IngressClass: (o) => ({
+    controller: str(o?.spec?.controller),
+    default: o?.metadata?.annotations?.['ingressclass.kubernetes.io/is-default-class'] === 'true' ? 'true' : undefined,
+  }),
+
+  // KServe — a model swap is a deploy, so storageUri is tracked like an image.
+  InferenceService: (o) => {
+    const p = o?.spec?.predictor || {};
+    const m = p.model || {};
+    return {
+      format: str(m.modelFormat?.name),
+      runtime: str(m.runtime),
+      storageUri: str(m.storageUri),
+      minReplicas: str(p.minReplicas),
+      maxReplicas: str(p.maxReplicas),
+      resources: m.resources ? `${sortedPairs(m.resources.requests)}|${sortedPairs(m.resources.limits)}` : undefined,
+      ready: readyOf(o),
+      url: str(o?.status?.url),
+    };
+  },
+  ServingRuntime: (o) => runtimeFields(o),
+  ClusterServingRuntime: (o) => runtimeFields(o),
+
+  // Istio.
+  VirtualService: (o) => ({
+    hosts: (o?.spec?.hosts || []).slice().sort().join(',') || undefined,
+    gateways: (o?.spec?.gateways || []).slice().sort().join(',') || undefined,
+    routes: o?.spec?.http || o?.spec?.tcp || o?.spec?.tls ? digest(JSON.stringify([o.spec.http, o.spec.tcp, o.spec.tls])) : undefined,
+  }),
+  Gateway: (o) => ({
+    selector: sortedPairs(o?.spec?.selector) || undefined,
+    servers: capped((o?.spec?.servers || []).map((sv: any) => `${sv?.port?.number}/${sv?.port?.protocol}:${(sv?.hosts || []).join('+')}${sv?.tls?.credentialName ? `@${sv.tls.credentialName}` : ''}`).sort().join(',')) || undefined,
+  }),
 };
+
+function readyOf(o: any): string | undefined {
+  const c = (o?.status?.conditions || []).find((x: any) => x?.type === 'Ready');
+  return str(c?.status);
+}
+
+function issuerFields(o: any): Record<string, string | undefined> {
+  const sp = o?.spec || {};
+  const type = sp.acme ? 'acme' : sp.ca ? 'ca' : sp.selfSigned ? 'selfSigned' : sp.vault ? 'vault' : sp.venafi ? 'venafi' : Object.keys(sp)[0];
+  return {
+    type: str(type),
+    server: str(sp.acme?.server || sp.vault?.server),
+    caSecret: str(sp.ca?.secretName),
+    ready: readyOf(o),
+  };
+}
+
+function runtimeFields(o: any): Record<string, string | undefined> {
+  return {
+    formats: (o?.spec?.supportedModelFormats || []).map((f: any) => `${f?.name}${f?.version ? `@${f.version}` : ''}${f?.autoSelect ? '*' : ''}`).sort().join(',') || undefined,
+    images: (o?.spec?.containers || []).map((c: any) => c?.image).filter(Boolean).sort().join(',') || undefined,
+    disabled: o?.spec?.disabled ? 'true' : undefined,
+  };
+}
 
 /** Anything we have no opinion about still gets tracked, by spec digest. */
 const genericExtract: Extract = (o) => ({
@@ -392,7 +489,7 @@ export function fingerprintObject(obj: any, kindHint?: string): Fingerprint | un
     createdAt: meta.creationTimestamp,
     generation: typeof meta.generation === 'number' ? meta.generation : undefined,
     observed: typeof obj?.status?.observedGeneration === 'number' ? obj.status.observedGeneration : undefined,
-    spec: clean(extract(obj)),
+    spec: clean({ ...extract(obj), ...metaFields(meta.labels, meta.annotations) }),
     ...attribution(meta),
     cause: meta.annotations?.['kubernetes.io/change-cause'],
     revision: meta.annotations?.['deployment.kubernetes.io/revision'],
@@ -438,7 +535,7 @@ export function parsePodTable(text: string): Fingerprint[] {
     if (!t || t.startsWith('NS ') || t.startsWith('No resources')) continue;
     const c = t.split(/\s+/);
     if (c.length < 10) continue;
-    const [ns, name, node, phase, ownerKind, ownerName, images, restarts, ready, created, uid] = c;
+    const [ns, name, node, phase, ownerKind, ownerName, images, restarts, ready, created, uid, waiting] = c;
     const restartTotal = (col(restarts) || '')
       .split(',')
       .reduce((a, n) => a + (parseInt(n, 10) || 0), 0);
@@ -455,6 +552,10 @@ export function parsePodTable(text: string): Fingerprint[] {
         images: col(images),
         restarts: String(restartTotal),
         ready: col(ready),
+        // Why a container is not running: ImagePullBackOff, CrashLoopBackOff,
+        // CreateContainerConfigError… The moment this appears is the moment
+        // something broke, which is what the history is for.
+        waiting: col(waiting),
       }),
     });
   }
@@ -466,7 +567,7 @@ export function parsePodTable(text: string): Fingerprint[] {
  *
  * ConfigMaps and Secrets are tracked by resourceVersion alone: it moves on
  * every write and on nothing else, so it answers "was this edited?" without
- * Kalam ever reading — let alone storing — the contents.
+ * Trinetra ever reading — let alone storing — the contents.
  */
 export function parseRvTable(text: string, kind: string, namespaced = true): Fingerprint[] {
   const out: Fingerprint[] = [];

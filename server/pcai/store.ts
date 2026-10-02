@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 import { cosineSimilarity, EmbedConfig } from './embed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const KB_PATH = process.env.KALAM_KB_PATH || path.join(__dirname, 'kb.json');
+export const KB_PATH = process.env.TRINETRA_KB_PATH || path.join(__dirname, 'kb.json');
 
 export interface Chunk {
   id: string;
@@ -71,7 +71,7 @@ export function chunkText(text: string, maxLen = 1200, overlap = 150): string[] 
 // and auto-captured solved cases. Kept in their own file so a full retrain
 // (which rebuilds kb.json from scratch) re-includes them instead of losing them.
 // ---------------------------------------------------------------------------
-export const LEARNED_PATH = process.env.KALAM_LEARNED_PATH || path.join(__dirname, 'learned.json');
+export const LEARNED_PATH = process.env.TRINETRA_LEARNED_PATH || path.join(__dirname, 'learned.json');
 
 export interface LearnedDoc {
   title: string;

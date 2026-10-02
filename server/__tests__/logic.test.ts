@@ -1,4 +1,4 @@
-// Unit tests for Kalam's pure logic: the diagnosis rule engine, SSH output
+// Unit tests for Trinetra's pure logic: the diagnosis rule engine, SSH output
 // section parsing, KB chunking/tokenizing/search, and learned-doc classification.
 // Run with: npm test
 
@@ -183,7 +183,7 @@ describe('matchNode (SSH host -> cluster node)', () => {
 });
 
 
-// Kalam must visualize a host that has no Docker at all. A stock Kubernetes
+// Trinetra must visualize a host that has no Docker at all. A stock Kubernetes
 // node runs containerd only, so if container discovery is docker-shaped the
 // dashboard and topology come up empty on exactly the machines that matter.
 describe('parseContainers (runtime-agnostic container discovery)', () => {

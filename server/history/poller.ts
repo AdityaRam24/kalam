@@ -1,12 +1,12 @@
 // The background capture loop.
 //
-// OFF BY DEFAULT. Kalam is a dashboard people run on a laptop against someone
+// OFF BY DEFAULT. Trinetra is a dashboard people run on a laptop against someone
 // else's production cluster; it does not get to start polling a cluster every
-// five minutes because it was launched. Set KALAM_HISTORY=1 to opt in.
+// five minutes because it was launched. Set TRINETRA_HISTORY=1 to opt in.
 //
-//   KALAM_HISTORY=1                    enable
-//   KALAM_HISTORY_INTERVAL_SEC=300     how often (default 5 min)
-//   KALAM_HISTORY_SOURCES=local,vm-a   what to capture; `all` = local + every VM
+//   TRINETRA_HISTORY=1                    enable
+//   TRINETRA_HISTORY_INTERVAL_SEC=300     how often (default 5 min)
+//   TRINETRA_HISTORY_SOURCES=local,vm-a   what to capture; `all` = local + every VM
 //
 // Five minutes is chosen against the Kubernetes event TTL (~1 hour): frequent
 // enough that events are still alive when a change is noticed, rare enough to
@@ -42,7 +42,7 @@ export interface PollerState {
 
 const state: PollerState = {
   enabled: false,
-  intervalSec: Number(process.env.KALAM_HISTORY_INTERVAL_SEC || 300),
+  intervalSec: Number(process.env.TRINETRA_HISTORY_INTERVAL_SEC || 300),
   sources: [],
   running: false,
   last: {},
@@ -90,7 +90,7 @@ export async function captureOnce(source: string): Promise<CaptureOutcome> {
 }
 
 async function resolveSources(): Promise<string[]> {
-  const raw = (process.env.KALAM_HISTORY_SOURCES || 'local').trim();
+  const raw = (process.env.TRINETRA_HISTORY_SOURCES || 'local').trim();
   if (raw !== 'all') return raw.split(',').map((s) => s.trim()).filter(Boolean);
   const vms = await loadVms();
   return ['local', ...vms.map((v) => v.name)];
@@ -124,7 +124,7 @@ let timer: NodeJS.Timeout | undefined;
 
 /** Called once at startup. Returns whether the loop actually started. */
 export function startHistoryPoller(): boolean {
-  const flag = (process.env.KALAM_HISTORY || '').toLowerCase();
+  const flag = (process.env.TRINETRA_HISTORY || '').toLowerCase();
   state.enabled = flag === '1' || flag === 'true' || flag === 'yes';
   if (!state.enabled || timer) return false;
 

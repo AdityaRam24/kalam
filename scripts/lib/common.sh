@@ -1,4 +1,4 @@
-# Shared helpers for the Kalam Linux scripts.
+# Shared helpers for the Trinetra Linux scripts.
 # Sourced, never executed:  . "$(dirname "$0")/lib/common.sh"
 
 # ---------------------------------------------------------------- paths ----
@@ -24,7 +24,7 @@ hint()  { printf '%s\n' "    ${C_DIM}$*${C_RESET}"; }
 
 banner() {
     printf '%s\n' "==================================================="
-    printf '%s\n' "  KALAM  -  $1"
+    printf '%s\n' "  TRINETRA  -  $1"
     printf '%s\n' "==================================================="
 }
 
@@ -156,7 +156,7 @@ ensure_env_file() {
     [ -f "${ROOT_DIR}/.env" ] && return 0
     info "Creating a default .env ..."
     cat > "${ROOT_DIR}/.env" <<'EOF'
-# Kalam Configuration
+# Trinetra Configuration
 PORT=3001
 
 # Bind address for the backend. 127.0.0.1 keeps the API (which can run
@@ -166,11 +166,11 @@ HOST=127.0.0.1
 # Vite dev-server port (dev mode only).
 CLIENT_PORT=5173
 
-# Serving Kalam through a cluster ingress? Uncomment and set these.
+# Serving Trinetra through a cluster ingress? Uncomment and set these.
 # CLIENT_HOST/HOST must be 0.0.0.0 or the ingress cannot reach the process, and
 # the hostname must be allowlisted or Vite answers "Blocked request".
 # CLIENT_ALLOWED_HOSTS=.pcaicoe.com,.ext.hpe.com
-# CLIENT_PUBLIC_HOST=kalam.example.pcaicoe.com
+# CLIENT_PUBLIC_HOST=trinetra.example.pcaicoe.com
 
 # Add your Google Gemini API Key here to enable the conversational DevOps Agent
 GEMINI_API_KEY=

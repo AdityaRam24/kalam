@@ -1,7 +1,7 @@
 // Tests for the kubectl guide's pure logic.
 //
 // These matter more than typical UI tests: `canRun` is the gate that decides
-// whether Kalam sends a command to a real cluster, and `buildCommand` produces
+// whether Trinetra sends a command to a real cluster, and `buildCommand` produces
 // text an operator may paste into a production terminal. Both are held to the
 // rule that a mistake must fail closed.
 
@@ -148,7 +148,7 @@ describe('hasShellSideEffects', () => {
   });
 });
 
-describe('canRun — the gate before Kalam touches a live cluster', () => {
+describe('canRun — the gate before Trinetra touches a live cluster', () => {
   it('allows a resolved, read-only, metacharacter-free command', () => {
     expect(canRun('kubectl get pods -A -o wide')).toEqual({ runnable: true });
   });

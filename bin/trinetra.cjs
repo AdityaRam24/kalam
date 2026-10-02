@@ -28,11 +28,22 @@ const colors = {
 const PROJECT_ROOT = path.join(__dirname, '..');
 const PORT = process.env.PORT || 3001;
 const BACKEND_URL = `http://localhost:${PORT}`;
-const CONFIG_PATH = path.join(os.homedir(), '.kalam.json');
+const CONFIG_PATH = path.join(os.homedir(), '.trinetra.json');
+
+// MIGRATION SHIM — the CLI was called kalam before the rename. Adopt its
+// KALAM_* environment variables and move ~/.kalam.json to ~/.trinetra.json
+// once, so saved providers, models and keys carry over.
+for (const [k, v] of Object.entries(process.env)) {
+  if (k.startsWith('KALAM_') && process.env['TRINETRA_' + k.slice(6)] === undefined) process.env['TRINETRA_' + k.slice(6)] = v;
+}
+try {
+  const legacyConfig = path.join(os.homedir(), '.kalam.json');
+  if (!fs.existsSync(CONFIG_PATH) && fs.existsSync(legacyConfig)) fs.renameSync(legacyConfig, CONFIG_PATH);
+} catch (_) { /* best effort: a fresh config works too */ }
 const VERSION = require(path.join(PROJECT_ROOT, 'package.json')).version || '0.0.0';
 
 // ---------------------------------------------------------------------------
-// Settings: merge .env (secrets) + ~/.kalam.json (user's saved preferences) so
+// Settings: merge .env (secrets) + ~/.trinetra.json (user's saved preferences) so
 // the model/provider you pick in the REPL sticks across sessions.
 // ---------------------------------------------------------------------------
 function loadFileEnv() {
@@ -66,9 +77,9 @@ let userCfg = loadUserConfig();
 // Live, mutable session settings (start from env + saved config).
 const session = {
   geminiKey: process.env.GEMINI_API_KEY || fileEnv.GEMINI_API_KEY || userCfg.geminiKey || '',
-  provider: process.env.KALAM_PROVIDER || userCfg.provider || (process.env.GEMINI_API_KEY || fileEnv.GEMINI_API_KEY ? 'gemini' : 'local'),
-  localUrl: process.env.KALAM_LOCAL_URL || userCfg.localUrl || fileEnv.LOCAL_LLM_URL || 'http://localhost:11434/v1',
-  localModel: process.env.KALAM_LOCAL_MODEL || userCfg.localModel || fileEnv.LOCAL_LLM_MODEL || 'qwen2.5-coder:7b',
+  provider: process.env.TRINETRA_PROVIDER || userCfg.provider || (process.env.GEMINI_API_KEY || fileEnv.GEMINI_API_KEY ? 'gemini' : 'local'),
+  localUrl: process.env.TRINETRA_LOCAL_URL || userCfg.localUrl || fileEnv.LOCAL_LLM_URL || 'http://localhost:11434/v1',
+  localModel: process.env.TRINETRA_LOCAL_MODEL || userCfg.localModel || fileEnv.LOCAL_LLM_MODEL || 'qwen2.5-coder:7b',
   embedModel: userCfg.embedModel || 'nomic-embed-text',
   mode: userCfg.mode || 'auto', // auto | ask | diagnose | devops
 };
@@ -861,7 +872,7 @@ async function fixContainer(target) {
 
 // ---------------------------------------------------------------------------
 // Knowledge-base learning: feed any file (runbook, log, diagram, postmortem)
-// into the assistant's memory. `kalam learn file1 file2` or pipe via stdin.
+// into the assistant's memory. `trinetra learn file1 file2` or pipe via stdin.
 // ---------------------------------------------------------------------------
 async function learnFiles(files) {
   if (!(await ensureServer())) return;
@@ -1051,7 +1062,7 @@ async function vmGraph(name) {
 
 // The cluster changelog: what changed, when, and who did it.
 //
-// Kalam can only report what it has captured, so this command is explicit
+// Trinetra can only report what it has captured, so this command is explicit
 // about that — an empty timeline on a fresh install means "no baseline yet",
 // not "nothing happened", and saying so saves a support question.
 async function historyCli(args) {
@@ -1073,7 +1084,7 @@ async function historyCli(args) {
 ${colors.bold}🕓 Change history · ${source}${colors.reset}  ${colors.gray}last ${since}${colors.reset}`);
     console.log(`   ${colors.gray}${d.trackedObjects || 0} objects tracked${d.capturedAt ? ` · last capture ${new Date(d.capturedAt).toLocaleString()}` : ''}${colors.reset}`);
     if (d.poller && !d.poller.enabled) {
-      console.log(`   ${colors.gray}Background capture is off. Set KALAM_HISTORY=1 before starting the server, or run: trinetra history capture${colors.reset}`);
+      console.log(`   ${colors.gray}Background capture is off. Set TRINETRA_HISTORY=1 before starting the server, or run: trinetra history capture${colors.reset}`);
     }
 
     if (!changes.length) {
@@ -1480,7 +1491,7 @@ async function main() {
   const rest = args.slice(1);
 
   switch (cmd) {
-    case '': await startRepl(); break; // bare `kalam` → interactive
+    case '': await startRepl(); break; // bare `trinetra` → interactive
     case 'help': case '-h': case '--help': showHelp(); break;
 
     case 'ask': case 'pcai-ask': {
@@ -1555,7 +1566,7 @@ async function main() {
     case 'fix': await fixContainer(rest[0]); break;
 
     default:
-      // Treat unknown input as a question: `kalam what is MLIS?`
+      // Treat unknown input as a question: `trinetra what is MLIS?`
       await singleShot(args.join(' '), null);
       break;
   }

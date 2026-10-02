@@ -1,4 +1,4 @@
-// Run Kalam's REAL discovery pipeline against a real host and report exactly
+// Run Trinetra's REAL discovery pipeline against a real host and report exactly
 // what happens at every stage.
 //
 // This is not a test and uses no fixtures. It calls the same functions the
@@ -10,13 +10,14 @@
 //   npm run diagnose -- <name-from-inventory>
 //   npm run diagnose -- --host 10.1.2.3 --user ubuntu --key ~/.ssh/id_rsa
 //   npm run diagnose -- --host 10.1.2.3 --user ubuntu          # password via env
-//   KALAM_SSH_PASSWORD=... npm run diagnose -- --host ... --user ...
+//   TRINETRA_SSH_PASSWORD=... npm run diagnose -- --host ... --user ...
 //
 // Optional: --via <inventory-name> to hop through a jump host,
 //           --root to run commands elevated (sudo), --json for raw output.
 //
 // Nothing secret is printed.
 
+import '../server/legacy-env.js';
 import fs from 'fs';
 import path from 'path';
 import {
@@ -52,7 +53,7 @@ async function resolveTarget(): Promise<{ vm: VmEntry; via?: VmEntry }> {
       user: flag('user') || 'root',
     } as VmEntry;
     if (keyPath) (vm as any).keyPath = keyPath.replace(/^~/, process.env.HOME || process.env.USERPROFILE || '~');
-    const pw = process.env.KALAM_SSH_PASSWORD || flag('password');
+    const pw = process.env.TRINETRA_SSH_PASSWORD || flag('password');
     if (pw) (vm as any).password = pw;
     if (has('root') && vm.user !== 'root') (vm as any).elevate = 'sudo';
     const viaName = flag('via');
@@ -76,7 +77,7 @@ async function resolveTarget(): Promise<{ vm: VmEntry; via?: VmEntry }> {
 }
 
 /**
- * Diagnose the machine Kalam itself is running on — the path used when Kalam
+ * Diagnose the machine Trinetra itself is running on — the path used when Trinetra
  * is deployed onto a cluster node, where kubectl is local and no SSH is
  * involved. Runs the same commands `/api/k8s/resources` runs.
  */
@@ -87,7 +88,7 @@ async function diagnoseLocal() {
   const problems: string[] = [];
   const BUF = 256 * 1024 * 1024;
 
-  console.log(`\n\x1b[1mKalam local diagnosis\x1b[0m — this machine, no SSH`);
+  console.log(`\n\x1b[1mTrinetra local diagnosis\x1b[0m — this machine, no SSH`);
   console.log('Runs the same commands /api/k8s/resources runs.');
 
   head('1. Tooling');
@@ -182,7 +183,7 @@ async function main() {
   const { vm, via } = await resolveTarget();
   const problems: string[] = [];
 
-  console.log(`\n\x1b[1mKalam host diagnosis\x1b[0m — ${vm.user}@${vm.host}${via ? ` via ${via.name}` : ''}`);
+  console.log(`\n\x1b[1mTrinetra host diagnosis\x1b[0m — ${vm.user}@${vm.host}${via ? ` via ${via.name}` : ''}`);
   console.log('Runs the same code the application runs. No fixtures, no mocks.');
 
   // ── 1. Can we log in at all? ──────────────────────────────────────────────

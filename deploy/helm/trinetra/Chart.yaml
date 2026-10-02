@@ -4,7 +4,6 @@ description: Agentic DevOps dashboard, cluster topology map and PCAI assistant
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
-home: https://github.com/AdityaRam24/kalam
 kubeVersion: ">=1.24.0-0"
 keywords:
   - devops

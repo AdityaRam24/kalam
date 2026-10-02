@@ -1,12 +1,12 @@
 // Turn two snapshots into a changelog.
 //
-// This module decides what Kalam will claim happened to the cluster, so it is
+// This module decides what Trinetra will claim happened to the cluster, so it is
 // written defensively. Three guards come before any diffing at all, because
 // the failure mode of a naive diff is not a missing entry — it is a confident,
 // wrong one:
 //
 //   1. BASELINE. With no previous snapshot there is no change to report. The
-//      first capture is a silent baseline; otherwise starting Kalam would
+//      first capture is a silent baseline; otherwise starting Trinetra would
 //      announce that all 500 objects were just created.
 //   2. SECTION. A kind is only diffed when the query that produces it
 //      succeeded on BOTH sides. Lose RBAC read permission, or run against a
@@ -23,6 +23,9 @@
 // Pure — snapshots in, events out — so all of it is tested from fixtures.
 
 import type { ChangeEvent, ChangeKind, FieldChange, Fingerprint, Severity, Snapshot } from './model.js';
+import { meaningOf } from '../k8s/contracts.js';
+import { META_PREFIXES } from './fingerprint.js';
+import { annotateImpact } from './impact.js';
 
 export interface DiffOptions {
   /** Stop after this many events, adding one marker. Protects the log. */
@@ -47,7 +50,7 @@ interface Rule {
   /** Field path, or a prefix ending in "." to match a family (image.*). */
   match: string;
   kind: ChangeKind;
-  severity?: Severity;
+  severity?: Severity | ((c: FieldChange, fp: Fingerprint) => Severity);
   /** Overrides the generic "x → y" phrasing. */
   phrase?: (c: FieldChange, fp: Fingerprint) => string;
 }
@@ -77,13 +80,64 @@ const RULES: Rule[] = [
   { match: 'node', kind: 'schedule', severity: 'notice', phrase: (c) => (c.from ? `moved from node ${c.from} to ${c.to}` : `scheduled onto ${c.to}`) },
   { match: 'restarts', kind: 'restarted', severity: 'warning', phrase: (c) => `container restarted (${c.from} → ${c.to})` },
   { match: 'phase', kind: 'lifecycle', phrase: (c) => `phase ${c.from} → ${c.to}` },
-  { match: 'ready', kind: 'lifecycle', phrase: (c) => `readiness ${c.from} → ${c.to}` },
+  {
+    match: 'ready',
+    kind: 'lifecycle',
+    // Pods carry per-container "true,false"; the CRDs carry the Ready condition.
+    severity: (c, fp) => (fp.kind === 'Pod' ? 'info' : c.to === 'True' ? 'notice' : 'warning'),
+    phrase: (c, fp) =>
+      fp.kind === 'Pod' ? `readiness ${c.from} → ${c.to}`
+      : fp.kind === 'Node' ? (c.to === 'True' ? `Ready again (${c.from} → True)` : `NotReady (Ready ${c.from} → ${c.to})`)
+      : c.to === 'True' ? 'became Ready'
+      : `no longer Ready (Ready=${c.to || 'unknown'})`,
+  },
+  {
+    match: 'waiting',
+    kind: 'lifecycle',
+    severity: (c) => (c.to ? 'warning' : 'notice'),
+    phrase: (c) => (c.to ? `container waiting: ${c.to}` : `recovered from ${c.from}`),
+  },
+
+  // Labels and annotations. Keys another component reads (contracts.ts) are
+  // raised: they are how a one-word metadata edit breaks something elsewhere.
+  { match: 'label.', kind: 'label', severity: (c) => metaSeverity(c.path.slice(6)), phrase: (c) => metaPhrase('label', c.path.slice(6), c) },
+  { match: 'annotation.', kind: 'annotation', severity: (c) => metaSeverity(c.path.slice(11)), phrase: (c) => metaPhrase('annotation', c.path.slice(11), c) },
+  { match: 'podAnnotation.', kind: 'annotation', severity: (c) => metaSeverity(c.path.slice(14)), phrase: (c) => metaPhrase('pod annotation', c.path.slice(14), c) },
+
+  // cert-manager.
+  { match: 'issuer', kind: 'network', severity: 'warning', phrase: (c) => `issuer ${c.from || 'none'} → ${c.to || 'none'}` },
+  { match: 'dnsNames', kind: 'network', severity: 'notice', phrase: (c) => `DNS names ${c.from || 'none'} → ${c.to || 'none'}` },
+  { match: 'secretName', kind: 'network', severity: 'notice', phrase: (c) => `TLS secret ${c.from || 'none'} → ${c.to || 'none'}` },
+  { match: 'caSecret', kind: 'config', severity: 'warning', phrase: (c) => `CA secret ${c.from || 'none'} → ${c.to || 'none'}` },
+  { match: 'server', kind: 'config', severity: 'notice', phrase: (c) => `issuer server ${c.from || 'none'} → ${c.to || 'none'}` },
+
+  // KServe — a new storageUri is a model deploy.
+  { match: 'storageUri', kind: 'image', severity: 'notice', phrase: (c) => `model ${c.from || 'none'} → ${c.to || 'none'}` },
+  { match: 'format', kind: 'spec', severity: 'notice', phrase: (c) => `model format ${c.from || 'none'} → ${c.to || 'none'}` },
+  { match: 'formats', kind: 'spec', severity: 'notice', phrase: (c) => `supported formats ${c.from || 'none'} → ${c.to || 'none'}` },
+  { match: 'images', kind: 'image', severity: 'notice', phrase: (c, fp) => (fp.kind === 'Pod' ? `images ${c.from || 'none'} → ${c.to || 'none'}` : `runtime image ${c.from || 'none'} → ${c.to || 'none'}`) },
+  { match: 'disabled', kind: 'spec', severity: 'warning', phrase: (c) => (c.to ? 'runtime disabled' : 'runtime enabled') },
+  { match: 'minReplicas', kind: 'scaled', severity: 'notice', phrase: (c) => `min replicas ${c.from || 'default'} → ${c.to || 'default'}` },
+  { match: 'maxReplicas', kind: 'scaled', severity: 'notice', phrase: (c) => `max replicas ${c.from || 'default'} → ${c.to || 'default'}` },
+  { match: 'url', kind: 'network', phrase: (c) => `URL ${c.from || 'none'} → ${c.to || 'none'}` },
+
+  // Istio.
+  { match: 'gateways', kind: 'network', severity: 'warning', phrase: (c) => `gateways ${c.from || 'none'} → ${c.to || 'none'}` },
+  { match: 'hosts', kind: 'network', severity: 'notice', phrase: (c) => `hosts ${c.from || 'none'} → ${c.to || 'none'}` },
+  { match: 'routes', kind: 'network', severity: 'notice', phrase: () => 'routes changed' },
+  { match: 'servers', kind: 'network', severity: 'notice', phrase: () => 'gateway servers changed' },
+  { match: 'controller', kind: 'network', severity: 'notice' },
 
   // Nodes.
   { match: 'unschedulable', kind: 'cordon', severity: 'warning', phrase: (c) => (c.to ? 'cordoned — no new pods will schedule here' : 'uncordoned') },
   { match: 'taints', kind: 'taint', severity: 'notice', phrase: (c) => `taints ${c.from || 'none'} → ${c.to || 'none'}` },
   { match: 'kubelet', kind: 'version', severity: 'notice', phrase: (c) => `kubelet ${c.from} → ${c.to}` },
-  { match: 'runtime', kind: 'version', severity: 'notice', phrase: (c) => `container runtime ${c.from} → ${c.to}` },
+  {
+    match: 'runtime',
+    kind: 'version',
+    severity: 'notice',
+    phrase: (c, fp) => (fp.kind === 'InferenceService' ? `serving runtime ${c.from || 'auto'} → ${c.to || 'auto'}` : `container runtime ${c.from} → ${c.to}`),
+  },
   { match: 'kernel', kind: 'version', severity: 'notice' },
   { match: 'os', kind: 'version', severity: 'notice' },
   { match: 'gpu', kind: 'version', severity: 'warning', phrase: (c) => `GPU capacity ${c.from || '0'} → ${c.to || '0'}` },
@@ -141,6 +195,16 @@ function short(image?: string): string {
   return parts[parts.length - 1] || noDigest;
 }
 
+function metaSeverity(key: string): Severity {
+  return meaningOf(key) ? 'warning' : 'info';
+}
+
+function metaPhrase(type: string, key: string, c: FieldChange): string {
+  if (c.from === undefined) return `${type} ${key}=${c.to} added`;
+  if (c.to === undefined) return `${type} ${key} removed (was ${c.from})`;
+  return `${type} ${key}: ${c.from} → ${c.to}`;
+}
+
 function ruleFor(path: string): Rule | undefined {
   // Longest match wins so "init.image.x" beats "image." and "podSelector"
   // is never swallowed by "selector".
@@ -160,7 +224,7 @@ function pickPrimary(changes: FieldChange[], fp: Fingerprint): { kind: ChangeKin
       c,
       rule,
       kind: rule?.kind ?? 'spec',
-      severity: rule?.severity ?? 'info',
+      severity: (typeof rule?.severity === 'function' ? rule.severity(c, fp) : rule?.severity) ?? 'info',
       text: rule?.phrase ? rule.phrase(c, fp) : `${c.path} ${c.from ?? 'none'} → ${c.to ?? 'none'}`,
     };
   });
@@ -228,6 +292,22 @@ export function diffSnapshots(prev: Snapshot | undefined, next: Snapshot, option
   }
 
   const inScope = (fp: Fingerprint | undefined) => !!fp && usable.has(sectionOf(fp));
+
+  // Field families only one side recorded are dropped from both (see
+  // Snapshot.features) — an upgrade must not read as "every label was added".
+  const both = (f: string) => !!prev.features?.includes(f) && !!next.features?.includes(f);
+  const dropMeta = !both('meta');
+  const dropWaiting = !both('podWaiting');
+  const gate = (spec: Record<string, string>): Record<string, string> => {
+    if (!dropMeta && !dropWaiting) return spec;
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(spec)) {
+      if (dropMeta && META_PREFIXES.some((p) => k.startsWith(p))) continue;
+      if (dropWaiting && k === 'waiting') continue;
+      out[k] = v;
+    }
+    return out;
+  };
   const prevKeys = Object.keys(prev.objects).filter((k) => inScope(prev.objects[k]));
   const nextKeys = Object.keys(next.objects).filter((k) => inScope(next.objects[k]));
 
@@ -273,7 +353,7 @@ export function diffSnapshots(prev: Snapshot | undefined, next: Snapshot, option
       continue;
     }
 
-    const changes = fieldChanges(before.spec, now.spec);
+    const changes = fieldChanges(gate(before.spec), gate(now.spec));
     if (!changes.length) continue;
 
     const { kind, severity, summary } = pickPrimary(changes, now);
@@ -283,7 +363,7 @@ export function diffSnapshots(prev: Snapshot | undefined, next: Snapshot, option
     // Attribution without a clock: managedFields carries the API server's own
     // timestamp on both sides, so a NEWER stamp than last capture means this
     // manager performed the write we just noticed. No comparison against
-    // Kalam's clock, so host/cluster skew cannot mislead it.
+    // Trinetra's clock, so host/cluster skew cannot mislead it.
     //
     // If the stamp did NOT move, the change came from something managedFields
     // does not attribute (a controller writing status, a field the API server
@@ -316,6 +396,9 @@ export function diffSnapshots(prev: Snapshot | undefined, next: Snapshot, option
   // --- fold pod churn under the rollout that caused it -------------------
   attributePodChurn(events);
 
+  // --- what each change does to the rest of the cluster ------------------
+  annotateImpact(prev, next, events);
+
   // --- cap ---------------------------------------------------------------
   const rank: Record<Severity, number> = { info: 0, notice: 1, warning: 2 };
   events.sort((a, b) => rank[b.severity] - rank[a.severity]);
@@ -347,6 +430,9 @@ export const SECTION_BY_KIND: Record<string, string> = {
   Node: 'CLUSTER', Namespace: 'CLUSTER', PersistentVolume: 'CLUSTER',
   StorageClass: 'CLUSTER', PriorityClass: 'CLUSTER',
   CustomResourceDefinition: 'CRDS',
+  Certificate: 'CERTS', Issuer: 'CERTS', ClusterIssuer: 'CLUSTERISSUERS',
+  InferenceService: 'KSERVE', ServingRuntime: 'KSERVE', ClusterServingRuntime: 'CLUSTERRUNTIMES',
+  VirtualService: 'ISTIO', Gateway: 'ISTIO', IngressClass: 'INGRESSCLASSES',
 };
 
 /** Field-by-field comparison of two fingerprints' spec maps. */

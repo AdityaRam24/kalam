@@ -2,7 +2,7 @@
 //
 // Four surfaces over one shared idea: a command is not just text to copy, it is
 // something with a risk level, placeholders to fill, and — when it is read-only
-// and fully resolved — something Kalam can actually run against a connected VM
+// and fully resolved — something Trinetra can actually run against a connected VM
 // and show you the output of.
 //
 // All catalog data and the rules that decide what may execute live in
@@ -93,7 +93,7 @@ const Highlight: React.FC<{ text: string; terms: string[] }> = ({ text, terms })
 interface VmTarget { name: string; host: string; via?: string }
 
 /**
- * Kalam runs commands through the existing read-only SSH path
+ * Trinetra runs commands through the existing read-only SSH path
  * (POST /api/vms/exec) against a VM from the inventory. There is deliberately
  * no "run on this machine" option: that would mean adding a general local
  * shell endpoint, and the guide is not worth that attack surface.
@@ -288,7 +288,7 @@ export const KubectlCheatSheet: React.FC = () => {
 
   useEffect(() => {
     try {
-      setHighScore(Number(localStorage.getItem('kalam_kubectl_quiz_highscore') || '0'));
+      setHighScore(Number(localStorage.getItem('trinetra_kubectl_quiz_highscore') || '0'));
     } catch { /* storage disabled (private mode) — the quiz just won't persist */ }
   }, []);
 
@@ -350,7 +350,7 @@ export const KubectlCheatSheet: React.FC = () => {
     if (score > highScore) {
       setHighScore(score);
       try {
-        localStorage.setItem('kalam_kubectl_quiz_highscore', String(score));
+        localStorage.setItem('trinetra_kubectl_quiz_highscore', String(score));
       } catch { /* storage disabled */ }
     }
   };

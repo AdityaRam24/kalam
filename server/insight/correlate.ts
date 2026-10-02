@@ -1,6 +1,6 @@
 // Turning four separate lists into one understanding of a system.
 //
-// Kalam already knows four things about a host, and until now it told you them
+// Trinetra already knows four things about a host, and until now it told you them
 // four times, in four places, in four vocabularies:
 //
 //   * the health checklist   ("Disk /var 93% full")            — hostlogs/system.ts
@@ -32,7 +32,7 @@ export type Concern =
 export type Severity = 'critical' | 'warning' | 'info';
 
 export interface Evidence {
-  /** Which of Kalam's four eyes saw this. */
+  /** Which of Trinetra's four eyes saw this. */
   kind: 'log' | 'health' | 'metric' | 'graph';
   severity: Severity;
   summary: string;

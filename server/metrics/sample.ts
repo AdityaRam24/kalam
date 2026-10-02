@@ -119,7 +119,7 @@ export function parseSample(source: string, at: number, stdout: string): Sample 
 export async function collectSample(vm: VmEntry, at = Date.now()): Promise<Sample> {
   try {
     const { stdout, stderr, ok } = await sshRun(vm, SAMPLE_CMD, SAMPLE_TIMEOUT_MS);
-    if (!ok && !stdout.includes('===KALAM:')) {
+    if (!ok && !stdout.includes('===TRINETRA:')) {
       return {
         at, source: vm.name, reachable: false,
         error: (stderr.split('\n')[0] || 'SSH failed').slice(0, 200),

@@ -17,6 +17,8 @@ if %errorlevel% neq 0 (
 )
 
 echo [1/2] Registering 'trinetra' globally via npm link...
+:: MIGRATION: drop the pre-rename global command, if any
+call npm unlink -g kalam >nul 2>&1
 call npm link
 if %errorlevel% neq 0 (
     echo.

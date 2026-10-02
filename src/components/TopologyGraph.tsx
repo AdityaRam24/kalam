@@ -57,6 +57,8 @@ import {
 import { layoutCluster, orderPods, CARD_H } from '../lib/layout';
 import { podHealthOf, workloadHealthOf, podStatusText } from '../lib/health';
 import { captureElement, captureName, downloadDataUrl } from '../lib/capture';
+import { sanitizeInspect, sanitizeObjectHistory, sanitizeChangeIndex, sanitizeContainerDetail, sanitizeWhyIndex, type WhyRef } from '../lib/sanitize';
+import WhyPanel from './WhyPanel';
 
 interface Container {
   id: string;
@@ -255,9 +257,22 @@ MiniTag.displayName = 'MiniTag';
 
 StatChip.displayName = 'StatChip';
 
+/** A card's key in the why-engine's index (same shape as the history's objectKey). */
+function whyKeyOf(d: any): string {
+  if (!d?.name) return '';
+  switch (d.type) {
+    case 'pod': return `Pod/${d.namespace}/${d.name}`;
+    case 'service': return `Service/${d.namespace}/${d.name}`;
+    case 'deployment': return `${d.kind || 'Deployment'}/${d.namespace}/${d.name}`;
+    case 'isvc': return `InferenceService/${d.namespace}/${d.name}`;
+    case 'k8s-node': return `Node/${d.name}`;
+    default: return '';
+  }
+}
+
 // ─── Custom Premium DevOps Card Node ────────────────────────────────────────
 const DevOpsNode = memo(({ id, data }: NodeProps) => {
-  const { type, name, status, ip, ports, image, ready, replicas, role, state, isHovered, isFocused, onHover, heatmapMode, restarts, created, changeInfo } = data;
+  const { type, name, status, ip, ports, image, ready, replicas, role, state, isHovered, isFocused, onHover, heatmapMode, restarts, created, changeInfo, whyInfo } = data;
 
   // Theme configuration per resource type — one flat accent color each, no gradients
   const themes: Record<string, { icon: LucideIcon; color: string; label: string }> = {
@@ -310,6 +325,18 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
     accentColor = '#f43f5e';
     statusDotColor = '#f43f5e';
     ledMode = 'blink-fast';
+  }
+
+  // What the why-engine found. A Service whose selector matches nothing, or a
+  // Certificate whose issuer is gone, has no "status" of its own that says so
+  // — the card must still read as broken.
+  const why = whyInfo && whyInfo.severity !== 'info' ? whyInfo : undefined;
+  if (why && ledMode === 'glow') {
+    const c = why.severity === 'critical' ? '#f43f5e' : '#fbbf24';
+    accentColor = c;
+    statusDotColor = c;
+    ledMode = why.severity === 'critical' ? 'blink-fast' : 'blink-slow';
+    if (!statusText) statusText = why.severity === 'critical' ? 'Failing' : 'At risk';
   }
 
   // Heatmap overlays
@@ -497,6 +524,19 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
                 {showMeta && <MetaRow narrow={isPortType} label="IP" value={ip || 'N/A'} mono />}
               </>
             )}
+            {/* Why — one line at rest (the layout leaves room for it), the
+                full cause in the drawer. */}
+            {why && (
+              <div
+                title={`${why.title}${why.count > 1 ? ` (+${why.count - 1} more)` : ''} — click for the cause, evidence and fix`}
+                style={{
+                  fontSize: '9.5px', lineHeight: 1.3, color: why.severity === 'critical' ? 'var(--tp-badge-rose, #fda4af)' : 'var(--tp-badge-amber, #fde68a)',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '1px',
+                }}
+              >
+                ⚠ {why.title}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -534,28 +574,28 @@ const LedStyles = () => (
     /* Travelling dot: "data is moving through this link". One CSS animation per
        edge, no per-frame JS or SMIL evaluation, so it stays smooth with every
        edge on the canvas animating at once. */
-    @keyframes kalam-flow-travel {
+    @keyframes trinetra-flow-travel {
       from { offset-distance: 0%; }
       to { offset-distance: 100%; }
     }
-    .kalam-flow-dot {
+    .trinetra-flow-dot {
       offset-distance: 0%;
-      animation: kalam-flow-travel 1.6s linear infinite;
+      animation: trinetra-flow-travel 1.6s linear infinite;
     }
 
     /* Fallback for engines without offset-path: a dash travelling the same way.
        Dash period is 4+8=12, so one period of offset gives a seamless loop. */
-    @keyframes kalam-flow-dashmove {
+    @keyframes trinetra-flow-dashmove {
       to { stroke-dashoffset: -12; }
     }
-    .kalam-flow-dash {
+    .trinetra-flow-dash {
       stroke-dasharray: 4 8;
       stroke-dashoffset: 0;
-      animation: kalam-flow-dashmove 0.75s linear infinite;
+      animation: trinetra-flow-dashmove 0.75s linear infinite;
     }
 
     @media (prefers-reduced-motion: reduce) {
-      .kalam-flow-dot, .kalam-flow-dash { animation: none; }
+      .trinetra-flow-dot, .trinetra-flow-dash { animation: none; }
     }
 
     /* Healthy = steady light. Animating every healthy LED was ~40% of the
@@ -669,7 +709,7 @@ const FlowEdge = memo(({
       {!!animated && (
         SUPPORTS_OFFSET_PATH ? (
           <circle
-            className="kalam-flow-dot"
+            className="trinetra-flow-dot"
             r={3}
             fill={strokeColor}
             style={{
@@ -683,7 +723,7 @@ const FlowEdge = memo(({
           <path
             d={edgePath}
             fill="none"
-            className="kalam-flow-dash"
+            className="trinetra-flow-dash"
             stroke={strokeColor}
             strokeWidth={((style as any)?.strokeWidth ?? 1.5) + 0.6}
             strokeLinecap="round"
@@ -760,10 +800,10 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   const [changeIndex, setChangeIndex] = useState<Record<string, { count: number; lastAt: string; kind: string; severity: string; summary: string }>>({});
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [mapTheme, setMapTheme] = useState<'dark' | 'light'>(() => {
-    try { return localStorage.getItem('kalam_topology_theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
+    try { return localStorage.getItem('trinetra_topology_theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
   });
   useEffect(() => {
-    try { localStorage.setItem('kalam_topology_theme', mapTheme); } catch { /* storage unavailable */ }
+    try { localStorage.setItem('trinetra_topology_theme', mapTheme); } catch { /* storage unavailable */ }
   }, [mapTheme]);
   const svgColors = TOPO_SVG[mapTheme];
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -800,6 +840,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   const [sampling, setSampling] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [problemsOnly, setProblemsOnly] = useState(false);
+  // Why-engine verdicts per object ("Kind/ns/name" → worst finding). One small
+  // index for the whole canvas, refreshed after each sample.
+  const [whyIndex, setWhyIndex] = useState<Record<string, { severity: 'critical' | 'warning' | 'info'; title: string; count: number }>>({});
   const [layoutMode, setLayoutMode] = useState<'columns' | 'auto'>('columns');
 
   // Flow animation. Measured: dots on every edge were the single largest idle
@@ -809,12 +852,12 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   // InferenceService → Service → workload → pods → node — and nothing else.
   const [flowMode, setFlowMode] = useState<'focus' | 'all' | 'off'>(() => {
     try {
-      const v = localStorage.getItem('kalam_topology_flow');
+      const v = localStorage.getItem('trinetra_topology_flow');
       return v === 'all' || v === 'off' ? v : 'focus';
     } catch { return 'focus'; }
   });
   useEffect(() => {
-    try { localStorage.setItem('kalam_topology_flow', flowMode); } catch { /* storage unavailable */ }
+    try { localStorage.setItem('trinetra_topology_flow', flowMode); } catch { /* storage unavailable */ }
   }, [flowMode]);
   const prefersReducedMotion = useRef(
     typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
@@ -948,15 +991,24 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   const frozenEmpty = isEmpty(frozen.containers, frozen.k8s);
   // After a source switch the snapshot waits for that source's data to land.
   const [resampleFrom, setResampleFrom] = useState<string | null>(null);
+  // Why the snapshot is waiting: right after mount the app may still be
+  // publishing its first full read (containers can land before the cluster),
+  // and after a source switch the new source's data has not arrived yet.
+  const [resampleReason, setResampleReason] = useState<'initial' | 'source'>('initial');
   const resampleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // In a steady snapshot nothing about the live data is even fingerprinted —
   // polls from the rest of the app cost the map nothing at all.
   const watchLive = live || resampleFrom !== null || frozenEmpty;
   const liveSig = watchLive ? canvasSignature(liveContainers, liveK8s) : '';
 
-  const firstSource = useRef(true);
+  const lastSource = useRef<string | null>(null);
+  // On mount, too: the first snapshot follows the data until the first full read
+  // has landed, instead of freezing whatever partial picture existed at mount.
+  // (Compared by value, so a development double-run of this effect still reads
+  // as the initial load, not as a source switch.)
   useEffect(() => {
-    if (firstSource.current) { firstSource.current = false; return; }
+    setResampleReason(lastSource.current === null || lastSource.current === source ? 'initial' : 'source');
+    lastSource.current = source;
     const { containers: c, k8s } = liveRef.current;
     setResampleFrom(canvasSignature(c, k8s));
     clearTimeout(resampleTimer.current);
@@ -1027,7 +1079,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   const [copied, setCopied] = useState(false);
 
   // This object's recorded change history (see server/history). Separate from
-  // `inspect` because it comes from Kalam's own log, not from the cluster.
+  // `inspect` because it comes from Trinetra's own log, not from the cluster.
   const [objectHistory, setObjectHistory] = useState<any | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -1414,13 +1466,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   // ── Problems-only focus: unhealthy resources plus everything they touch ──
   const isProblemNode = useCallback((n: Node) => {
     const d: any = n.data || {};
+    const verdict = whyIndex[whyKeyOf(d)];
+    if (verdict && verdict.severity !== 'info') return true;
     if (d.type === 'pod') return d.health === 'failing' || d.health === 'progressing' || (d.restarts || 0) >= 3;
     if (d.type === 'docker') return d.state && d.state !== 'running';
     if (d.type === 'k8s-node') return d.health !== 'healthy';
     if (d.type === 'deployment') return d.health === 'failing' || d.health === 'progressing';
     if (d.type === 'isvc') return d.health === 'failing' || d.health === 'progressing';
     return false;
-  }, []);
+  }, [whyIndex]);
 
   const problemVisibleIds = useMemo(() => {
     if (!problemsOnly) return null; // null = show everything
@@ -1591,11 +1645,13 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         : d.type === 'k8s-node' ? `Node/${d.name}`
         : '';
       const changeInfo = historyKey ? changeIndex[historyKey] : undefined;
+      const whyInfo = whyIndex[whyKeyOf(d)];
       const dragged = draggedPositions[node.id];
 
       const sig = [
         isHovered, isFocused, isSearchHighlighted, isDimmed, heatmapMode,
         changeInfo ? `${changeInfo.count}@${changeInfo.lastAt}` : '',
+        whyInfo ? `${whyInfo.severity}:${whyInfo.title}:${whyInfo.count}` : '',
         dragged ? `${dragged.x},${dragged.y}` : '',
         size ? `${size.width}x${size.height}` : ''
       ].join('|');
@@ -1614,6 +1670,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           isSearchHighlighted,
           heatmapMode,
           changeInfo,
+          whyInfo,
           onHover: setHoveredNodeId
         },
         style: {
@@ -1633,7 +1690,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     if (prev.length === out.length && prev.every((n, i) => n === out[i])) return prev;
     prevFlowNodes.current = out;
     return out;
-  }, [layoutedNodes, problemVisibleIds, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode, changeIndex, draggedPositions, measured]);
+  }, [layoutedNodes, problemVisibleIds, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode, changeIndex, whyIndex, draggedPositions, measured]);
 
   // Map raw edges & inject states (hover paths)
   const edgeCache = useRef(new Map<string, { base: Edge; sig: string; out: Edge }>());
@@ -1799,15 +1856,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       .then(d => {
         if (cancelled) return;
         if (d.error) setInspectError(d.error);
-        else setInspect(d);
+        else setInspect(sanitizeInspect(d));
       })
       .catch(e => { if (!cancelled) setInspectError(e.message || 'Inspect failed.'); })
       .finally(() => { if (!cancelled) setInspectLoading(false); });
     return () => { cancelled = true; };
   }, [inspectTarget, source]);
 
-  // What Kalam has recorded happening to this object. Kubernetes itself cannot
-  // answer this — the entries come from Kalam's own capture log, so an empty
+  // What Trinetra has recorded happening to this object. Kubernetes itself cannot
+  // answer this — the entries come from Trinetra's own capture log, so an empty
   // result means "nothing captured yet", not "nothing ever happened".
   useEffect(() => {
     if (!selectedResource || selectedResource.type === 'docker' || selectedResource.type === 'port') {
@@ -1824,7 +1881,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     setHistoryLoading(true);
     fetch(`${path}?source=${encodeURIComponent(source)}`)
       .then(r => r.json())
-      .then(h => { if (!cancelled) setObjectHistory(h); })
+      .then(h => { if (!cancelled) setObjectHistory(sanitizeObjectHistory(h)); })
       .catch(() => { if (!cancelled) setObjectHistory(null); })
       .finally(() => { if (!cancelled) setHistoryLoading(false); });
     return () => { cancelled = true; };
@@ -1837,10 +1894,30 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     let cancelled = false;
     fetch(`/api/history/summary?source=${encodeURIComponent(source)}&since=24h`)
       .then(r => r.json())
-      .then(d => { if (!cancelled) setChangeIndex(d.byKey || {}); })
+      .then(d => { if (!cancelled) setChangeIndex(sanitizeChangeIndex(d?.byKey)); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [heatmapMode, source, lastRefresh]);
+
+  // What is failing and why, for the card reasons and Problems view. Runs
+  // after each sample; in live mode at most every 30 s, since one analysis
+  // reads the whole cluster. The merged "all hosts" view has no single
+  // cluster to analyse, so it shows statuses only.
+  const lastWhyAt = useRef<{ source: string; at: number }>({ source: '', at: 0 });
+  useEffect(() => {
+    if (source === 'all') { setWhyIndex({}); return; }
+    const sameSource = lastWhyAt.current.source === source;
+    if (!sameSource) setWhyIndex({});
+    if (sameSource && Date.now() - lastWhyAt.current.at < 30_000) return;
+    lastWhyAt.current = { source, at: Date.now() };
+    let cancelled = false;
+    const q = source === 'local' ? '' : `?vm=${encodeURIComponent(source)}`;
+    fetch(`/api/k8s/why${q}`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setWhyIndex(sanitizeWhyIndex(d?.byObject)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [source, lastRefresh]);
 
   // Jump from a related object straight to its card on the canvas.
   const focusRelated = useCallback((item: any) => {
@@ -1855,6 +1932,29 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     fitView({ nodes: [{ id }], duration: 500, padding: 1.2, maxZoom: 1 });
     return true;
   }, [rawNodes, fitView]);
+
+  // The why-panel's subject: Kubernetes objects only, on the host they live on.
+  const whyTarget = useMemo(() => {
+    if (!selectedResource) return null;
+    const d: any = selectedResource.data || {};
+    const kind = selectedResource.type === 'pod' ? 'pod'
+      : selectedResource.type === 'service' ? 'service'
+      : selectedResource.type === 'deployment' ? String(d.kind || 'Deployment').toLowerCase()
+      : selectedResource.type === 'k8s-node' ? 'node'
+      : selectedResource.type === 'isvc' ? 'isvc'
+      : '';
+    const host = d.host || (source === 'all' ? '' : source);
+    if (!kind || !d.name || !host) return null;
+    return { source: host, kind, namespace: d.namespace || undefined, name: String(d.name) };
+  }, [selectedResource, source]);
+
+  // "Root cause: Secret shop/regcred" → its card, when it is on the canvas.
+  const jumpToRef = useCallback((r: WhyRef) => {
+    const focus = r.kind === 'Pod' ? 'pod' : r.kind === 'Service' ? 'service'
+      : ['Deployment', 'StatefulSet', 'DaemonSet'].includes(r.kind) ? 'deployment'
+      : r.kind === 'Node' ? 'k8s-node' : '';
+    if (focus) focusRelated({ focus, name: r.name, namespace: r.namespace });
+  }, [focusRelated]);
 
   const relationGroups: Array<{ title: string; items: any[] }> = inspect?.groups || [];
   const relatedCount = relationGroups.reduce((n, g) => n + g.items.length, 0);
@@ -2039,9 +2139,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
 
   // Container list for the details pane: the live object's view when the deep
   // inspect succeeded, otherwise the thinner list-endpoint shape.
+  // The list shape carries requests/limits as {cpuMilli, memBytes, gpu}; the
+  // drawer prints text. Rendering that object while the details were still
+  // loading crashed the map on every pod click — so both shapes go through the
+  // same formatter.
   const detailContainers: any[] = inspect?.containers?.length
     ? inspect.containers
-    : ((selectedResource?.data as any)?.containers || []);
+    : (Array.isArray((selectedResource?.data as any)?.containers) ? (selectedResource!.data as any).containers : [])
+        .filter((c: any) => c && typeof c === 'object')
+        .map(sanitizeContainerDetail);
 
   const manifestText: string = (manifestView === 'describe' ? inspect?.describe : inspect?.yaml) || '';
 
@@ -2153,7 +2259,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         >
           {live
             ? `updated ${(lastRefresh || frozen.at).toLocaleTimeString()}`
-            : `sampled ${frozen.at.toLocaleTimeString()}${resampleFrom !== null ? ' · waiting for new source…' : ''}`}
+            : `sampled ${frozen.at.toLocaleTimeString()}${resampleFrom !== null && resampleReason === 'source' ? ' · waiting for new source…' : ''}`}
         </span>
 
         {/* Map colour scheme */}
@@ -2755,6 +2861,16 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
               {/* Tab 1: Details */}
               {drawerTab === 'details' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {whyTarget && (
+                    <WhyPanel
+                      source={whyTarget.source}
+                      kind={whyTarget.kind}
+                      namespace={whyTarget.namespace}
+                      name={whyTarget.name}
+                      refreshKey={lastRefresh?.getTime()}
+                      onJump={jumpToRef}
+                    />
+                  )}
                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <tbody>
                       <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>

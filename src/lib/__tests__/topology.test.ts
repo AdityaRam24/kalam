@@ -3,7 +3,7 @@ import { canvasSignature, stripDuration } from '../topology';
 
 const container = (over: Partial<Record<string, string>> = {}) => ({
   id: 'abc123def456',
-  name: 'kalam-web',
+  name: 'trinetra-web',
   image: 'nginx:1.25',
   state: 'running',
   status: 'Up 7 minutes',

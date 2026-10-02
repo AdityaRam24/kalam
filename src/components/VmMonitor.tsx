@@ -31,7 +31,7 @@ export const VmMonitor: React.FC = () => {
   const [credsMsg, setCredsMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Root access. Offered right after a VM is added or its credentials change,
-  // because most of what Kalam can discover on a host (containerd via crictl,
+  // because most of what Trinetra can discover on a host (containerd via crictl,
   // service logs, /etc/kubernetes) is unreadable to an ordinary login — an
   // unprivileged session reports a nearly empty machine and looks broken.
   interface RootOptions {

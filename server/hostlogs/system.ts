@@ -58,7 +58,7 @@ export const CRITICAL_UNITS = new Set([
   'nvidia-persistenced', 'nvidia-fabricmanager', 'multipathd', 'iscsid',
 ]);
 
-// Restarting these can cut the SSH session Kalam itself is using.
+// Restarting these can cut the SSH session Trinetra itself is using.
 export const ACCESS_UNITS = new Set(['sshd', 'ssh', 'systemd-networkd', 'NetworkManager', 'networking', 'firewalld', 'iptables', 'nftables']);
 
 const UNIT_RE = /^[A-Za-z0-9@_.:\\-]{1,200}$/;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kalam — one-click start for Linux / macOS.
+# Trinetra — one-click start for Linux / macOS.
 # Kept at the repo root for convenience; the real scripts live in scripts/.
 #
 #   chmod +x start.sh scripts/*.sh   # once

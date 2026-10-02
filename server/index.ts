@@ -1,3 +1,5 @@
+// Must stay first: adopts pre-rename settings before any module reads its own.
+import { adoptLegacyEnv } from './legacy-env.js';
 import express from 'express';
 import cors from 'cors';
 import { exec, spawn } from 'child_process';
@@ -17,6 +19,7 @@ import { inspectRouter } from './k8s/inspect.js';
 import { resourcesRouter } from './k8s/resources.js';
 import { topRouter } from './k8s/top.js';
 import { gpuRouter } from './k8s/gpu.js';
+import { whyRouter } from './k8s/why.js';
 import { normalizeClusterItems, parseReplicaSetOwners } from './k8s/workloads.js';
 import { historyRouter } from './history/router.js';
 import { pollerState, startHistoryPoller } from './history/poller.js';
@@ -26,6 +29,7 @@ import { metricsPollerState, startMetricsPoller } from './metrics/poller.js';
 import { parseAllowedHosts, corsOriginCheck } from './cors.js';
 
 dotenv.config();
+adoptLegacyEnv(); // .env files written before the rename
 
 const execAsync = promisify(exec);
 const app = express();
@@ -41,6 +45,9 @@ app.use(cors({
   origin: (origin, callback) => callback(null, corsOriginCheck(origin, allowedOrigins)),
 }));
 app.use(express.json({ limit: '2mb' })); // allow pasting large logs/stack traces
+// Express 5 leaves req.body undefined for non-JSON requests; every handler
+// destructures it, so give them an empty object to reject instead of a crash.
+app.use((req, _res, next) => { if (req.body === undefined) req.body = {}; next(); });
 
 // AI switched off for this deployment: refuse model-backed routes outright,
 // so hiding them in the UI is not the only thing keeping them off.
@@ -70,6 +77,9 @@ app.use(inspectRouter);
 app.use(resourcesRouter);
 app.use(topRouter);
 app.use(gpuRouter);
+// Why things are failing: causes, evidence, fixes, and each object's
+// non-negotiable references and label/annotation contracts.
+app.use(whyRouter);
 // Cluster change history: what changed, when, and who did it.
 app.use(historyRouter);
 
@@ -117,14 +127,14 @@ async function runCmd(
 // "no pods". A small cluster answers in well under a second, so a long ceiling
 // costs nothing and only ever helps a large one.
 const K8S_KIND_BUFFER = 256 * 1024 * 1024;
-const K8S_KIND_TIMEOUT = Number(process.env.KALAM_KUBECTL_TIMEOUT_MS || 120_000);
+const K8S_KIND_TIMEOUT = Number(process.env.TRINETRA_KUBECTL_TIMEOUT_MS || 120_000);
 
 // Two layers, because they guard different failures.
 //
 // INNER (`--request-timeout`): kubectl's own bound on the API call. It defaults
 // to 0 — no timeout — so an unresponsive API server leaves kubectl waiting
 // forever. Setting it means a slow or dead API server comes back as a readable
-// kubectl error ("context deadline exceeded") that Kalam can show, instead of
+// kubectl error ("context deadline exceeded") that Trinetra can show, instead of
 // the process being killed and the failure looking like an empty cluster.
 //
 // OUTER (K8S_KIND_TIMEOUT, above): a backstop on the child process itself, for
@@ -158,12 +168,12 @@ const DOCKER_ID_REGEX = /^[a-fA-F0-9]{12,64}$|^[a-zA-Z0-9_.-]+$/;
 
 // Liveness/readiness for Kubernetes. Deliberately does no work: /api/status
 // shells out to seven CLIs, which is too heavy to run on every probe tick and
-// would fail the pod whenever the apiserver is slow rather than when Kalam is.
+// would fail the pod whenever the apiserver is slow rather than when Trinetra is.
 app.get('/healthz', (_req, res) => {
   res.json({ ok: true });
 });
 
-// The kubeconfig context kubectl is using — or "in-cluster" when Kalam runs in
+// The kubeconfig context kubectl is using — or "in-cluster" when Trinetra runs in
 // a pod and kubectl talks to the API through the ServiceAccount, where there
 // is no kubeconfig and so no context name at all.
 async function kubeContextName(): Promise<string> {
@@ -1086,21 +1096,31 @@ if (fs.existsSync(distDir)) {
   });
 }
 
+// Last resort for anything a route did not catch: unknown API paths and
+// unexpected errors answer in JSON, and never with a stack trace.
+app.use('/api', (_req: express.Request, res: express.Response) => { res.status(404).json({ error: 'Not found.' }); });
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const status = Number(err?.status || err?.statusCode) || 500;
+  if (status >= 500) console.error(`[api] ${req.method} ${req.path}:`, err?.message || err);
+  if (res.headersSent) return;
+  res.status(status).json({ error: status >= 500 ? 'Internal error.' : String(err?.message || 'Bad request.') });
+});
+
 // Bind to loopback by default: the API can run Docker/kubectl actions and SSH
 // commands, so it must not be exposed to the LAN unless explicitly requested
 // (set HOST=0.0.0.0 in .env to serve other machines).
 const HOST = process.env.HOST || '127.0.0.1';
 const server = app.listen(Number(PORT), HOST, () => {
   console.log(`✅ Trinetra Backend Server running on http://localhost:${PORT}${HOST !== '127.0.0.1' ? ` (bound to ${HOST} — reachable from the network!)` : ''}`);
-  // Opt-in: nothing polls anyone's cluster unless KALAM_HISTORY says so.
+  // Opt-in: nothing polls anyone's cluster unless TRINETRA_HISTORY says so.
   if (startHistoryPoller()) {
     const p = pollerState();
     console.log(`🕓 Change history: capturing ${p.sources.join(', ') || 'local'} every ${p.intervalSec}s`);
   }
-  // Opt-in for the same reason: KALAM_METRICS=1 before anything is sampled.
+  // Opt-in for the same reason: TRINETRA_METRICS=1 before anything is sampled.
   if (startMetricsPoller()) {
     const m = metricsPollerState();
-    console.log(`📈 Metrics: sampling every ${m.intervalSec}s (retention ${process.env.KALAM_METRICS_RETENTION_HOURS || 48}h)`);
+    console.log(`📈 Metrics: sampling every ${m.intervalSec}s (retention ${process.env.TRINETRA_METRICS_RETENTION_HOURS || 48}h)`);
   }
 });
 

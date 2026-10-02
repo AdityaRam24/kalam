@@ -5,7 +5,7 @@
 // KServe InferenceServices and runtimes, PVCs/PVs/StorageClasses, Ingresses and
 // Istio routing, Jobs/CronJobs/HPAs, ConfigMaps/Secrets (names only), quotas,
 // warning events, CRDs — is read by /api/k8s/extra and listed here with the
-// same status vocabulary as the rest of Kalam.
+// same status vocabulary as the rest of Trinetra.
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Boxes, RefreshCw, Search, Download, AlertTriangle, Filter, ChevronDown, ChevronRight } from 'lucide-react';

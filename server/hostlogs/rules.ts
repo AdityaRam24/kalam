@@ -170,7 +170,7 @@ export const LOG_RULES: LogRule[] = [
 const MAX_SAMPLES = 3;
 const SEVERITY_RANK: Record<LogSeverity, number> = { critical: 0, warning: 1, info: 2 };
 
-// Timestamps Kalam sees in /var/log: syslog ("Sep 17 10:02:03"), ISO-8601
+// Timestamps Trinetra sees in /var/log: syslog ("Sep 17 10:02:03"), ISO-8601
 // (journal short-iso, most apps) and dmesg -T ("[Wed Sep 17 10:02:03 2026]").
 const TS_RES: RegExp[] = [
   /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?/,

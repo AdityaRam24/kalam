@@ -25,7 +25,7 @@ function connectPort(): number {
   return override ? Number(override) : SSH_PORT;
 }
 
-// How a non-root login gets root rights for the commands Kalam runs.
+// How a non-root login gets root rights for the commands Trinetra runs.
 //   none — run as the login user (default)
 //   sudo — wrap each command in `sudo -S`, password fed on stdin
 //   su   — run each command through `su - root -c`, password fed on a PTY

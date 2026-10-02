@@ -23,7 +23,7 @@ import {
 export const logsRouter = Router();
 
 const MB = 1024 * 1024;
-const BUNDLE_MAX_BYTES = Math.max(1, Number(process.env.KALAM_LOG_BUNDLE_MAX_MB || 50)) * MB;
+const BUNDLE_MAX_BYTES = Math.max(1, Number(process.env.TRINETRA_LOG_BUNDLE_MAX_MB || 50)) * MB;
 const SCAN_MAX_FILES = 40;
 const SCAN_TAIL_LINES = 5000;
 const SCAN_KEEP_LINES = 2000;
@@ -58,12 +58,12 @@ async function findVm(name: unknown): Promise<VmEntry | undefined> {
 
 // Output blocks are delimited by marker lines rather than server/vms.ts's
 // `@@TAG@@` sections, because log text itself can contain "@@".
-const MARK = '===KALAM:';
+const MARK = '===TRINETRA:';
 export function splitMarked(stdout: string): Array<{ tag: string; arg: string; body: string[] }> {
   const out: Array<{ tag: string; arg: string; body: string[] }> = [];
   let cur: { tag: string; arg: string; body: string[] } | null = null;
   for (const line of stdout.replace(/\r\n/g, '\n').split('\n')) {
-    const m = line.startsWith(MARK) ? line.match(/^===KALAM:([A-Z]+)(?::(.*))?===$/) : null;
+    const m = line.startsWith(MARK) ? line.match(/^===TRINETRA:([A-Z]+)(?::(.*))?===$/) : null;
     if (m) {
       cur = { tag: m[1], arg: m[2] || '', body: [] };
       out.push(cur);
@@ -182,7 +182,7 @@ logsRouter.post('/api/logs/overview', async (req, res) => {
 // ---- service status / restart / start --------------------------------------
 // status is read-only. restart and start change the host, so they require
 // confirm:true (the UI asks first), refuse units that do not exist on the host,
-// and are logged on the Kalam server.
+// and are logged on the Trinetra server.
 
 const SERVICE_ACTIONS = new Set(['status', 'restart', 'start']);
 
@@ -367,9 +367,9 @@ logsRouter.post('/api/logs/journal/download', async (req, res) => {
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
   res.setHeader('Content-Type', json ? 'application/json' : 'text/plain; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${`${vm.name}-journal-${stamp}.${json ? 'json' : 'log'}`.replace(/[^A-Za-z0-9._-]/g, '_')}"`);
-  res.setHeader('Access-Control-Expose-Headers', 'X-Kalam-Truncated, X-Kalam-Cap-Mb, Content-Disposition');
-  res.setHeader('X-Kalam-Truncated', truncated || Buffer.byteLength(stdout) >= cap ? '1' : '0');
-  res.setHeader('X-Kalam-Cap-Mb', String(Math.round(cap / MB)));
+  res.setHeader('Access-Control-Expose-Headers', 'X-Trinetra-Truncated, X-Trinetra-Cap-Mb, Content-Disposition');
+  res.setHeader('X-Trinetra-Truncated', truncated || Buffer.byteLength(stdout) >= cap ? '1' : '0');
+  res.setHeader('X-Trinetra-Cap-Mb', String(Math.round(cap / MB)));
   res.end(stdout);
 });
 
@@ -621,8 +621,8 @@ logsRouter.post('/api/logs/download', async (req, res) => {
 
   res.setHeader('Content-Type', contentType);
   res.setHeader('Content-Disposition', `attachment; filename="${filename.replace(/[^A-Za-z0-9._-]/g, '_')}"`);
-  res.setHeader('Access-Control-Expose-Headers', 'X-Kalam-Truncated, X-Kalam-Cap-Mb, Content-Disposition');
-  res.setHeader('X-Kalam-Truncated', truncated ? '1' : '0');
-  res.setHeader('X-Kalam-Cap-Mb', String(Math.round(cap / MB)));
+  res.setHeader('Access-Control-Expose-Headers', 'X-Trinetra-Truncated, X-Trinetra-Cap-Mb, Content-Disposition');
+  res.setHeader('X-Trinetra-Truncated', truncated ? '1' : '0');
+  res.setHeader('X-Trinetra-Cap-Mb', String(Math.round(cap / MB)));
   res.end(data);
 });

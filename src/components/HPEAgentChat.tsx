@@ -81,7 +81,7 @@ export const HPEAgentChat: React.FC<HPEAgentChatProps> = ({
 
   const handleClearHistory = () => {
     if (window.confirm('Are you sure you want to clear your HPE InfoSight chat transcript?')) {
-      localStorage.removeItem('kalam_chat_history');
+      localStorage.removeItem('trinetra_chat_history');
       setChatHistory([
         {
           role: 'agent',

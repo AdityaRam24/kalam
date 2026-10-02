@@ -108,8 +108,8 @@ async function saveResponse(res: Response, fallbackName: string): Promise<string
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
-  return res.headers.get('X-Kalam-Truncated') === '1'
-    ? `Download was capped at ${res.headers.get('X-Kalam-Cap-Mb')} MB and is incomplete — select fewer files or raise KALAM_LOG_BUNDLE_MAX_MB.`
+  return res.headers.get('X-Trinetra-Truncated') === '1'
+    ? `Download was capped at ${res.headers.get('X-Trinetra-Cap-Mb')} MB and is incomplete — select fewer files or raise TRINETRA_LOG_BUNDLE_MAX_MB.`
     : null;
 }
 
@@ -168,13 +168,13 @@ export const HostLogs: React.FC = () => {
       const list: VmEntry[] = Array.isArray(d) ? d : d.vms || [];
       setVms(list);
       let saved = '';
-      try { saved = localStorage.getItem('kalam_hostlogs_vm') || ''; } catch { /* storage unavailable */ }
+      try { saved = localStorage.getItem('trinetra_hostlogs_vm') || ''; } catch { /* storage unavailable */ }
       if (list.length) setVm((cur) => cur || (list.some((v) => v.name === saved) ? saved : list[0].name));
     }).catch(() => setVms([]));
   }, []);
   useEffect(() => {
     if (!vm) return;
-    try { localStorage.setItem('kalam_hostlogs_vm', vm); } catch { /* storage unavailable */ }
+    try { localStorage.setItem('trinetra_hostlogs_vm', vm); } catch { /* storage unavailable */ }
   }, [vm]);
 
   const post = (url: string, body: object) => fetch(url, {
@@ -236,7 +236,7 @@ export const HostLogs: React.FC = () => {
     finally { setScanning(false); }
   }, [vm, hours]);
 
-  // Fuse everything Kalam knows about this host into one ranked answer.
+  // Fuse everything Trinetra knows about this host into one ranked answer.
   //
   // Findings already on screen are handed to the server rather than re-scanned:
   // a scan is a two-minute SSH read, and paying for it twice to learn what is

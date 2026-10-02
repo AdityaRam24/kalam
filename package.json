@@ -1,11 +1,10 @@
 {
-  "name": "kalam",
+  "name": "trinetra",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "bin": {
-    "trinetra": "./bin/kalam.cjs",
-    "kalam": "./bin/kalam.cjs"
+    "trinetra": "./bin/trinetra.cjs"
   },
   "scripts": {
     "client": "vite",
@@ -18,7 +17,7 @@
     "topology:check": "tsx scripts/topology-report.ts",
     "diagnose": "tsx scripts/diagnose-host.ts",
     "preview": "vite preview",
-    "cli": "node bin/kalam.cjs",
+    "cli": "node bin/trinetra.cjs",
     "cli:install": "npm link"
   },
   "dependencies": {

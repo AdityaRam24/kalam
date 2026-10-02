@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kalam — production run on Linux. One process, one port: the Express backend
+# Trinetra — production run on Linux. One process, one port: the Express backend
 # serves the built frontend from dist/, so no Vite dev server is involved
 # (and nothing ever dials :5173).
 #
@@ -77,7 +77,7 @@ ok "Port ${PORT} is free."
 DIAL="$(dial_host "$HOST")"
 URL="http://${DIAL}:${PORT}"
 
-step "[4/4] Starting Kalam on ${URL}"
+step "[4/4] Starting Trinetra on ${URL}"
 if [ "$HOST" = "0.0.0.0" ]; then
     LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
     [ -n "${LAN_IP:-}" ] && info "From other machines: ${C_YELLOW}http://${LAN_IP}:${PORT}${C_RESET}"

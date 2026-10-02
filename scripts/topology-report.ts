@@ -23,7 +23,7 @@ const execFileAsync = promisify(execFile);
 async function loadCluster() {
   const arg = process.argv[2];
 
-  // A running Kalam: checks the layout for exactly the payload the browser
+  // A running Trinetra: checks the layout for exactly the payload the browser
   // gets, including a remote source (?vm=<name>) read over SSH.
   if (arg && /^https?:\/\//.test(arg)) {
     const res = await fetch(arg);

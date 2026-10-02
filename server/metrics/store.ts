@@ -17,8 +17,8 @@ import type { Sample } from './model.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export const METRICS_DIR = process.env.KALAM_METRICS_DIR || path.join(__dirname, 'data');
-export const RETENTION_HOURS = Math.max(1, Number(process.env.KALAM_METRICS_RETENTION_HOURS || 48));
+export const METRICS_DIR = process.env.TRINETRA_METRICS_DIR || path.join(__dirname, 'data');
+export const RETENTION_HOURS = Math.max(1, Number(process.env.TRINETRA_METRICS_RETENTION_HOURS || 48));
 
 /** Host names become file names, so anything path-like has to go. */
 const safeName = (source: string) => source.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) || 'unknown';

@@ -122,7 +122,7 @@ insightRouter.post('/api/insight/host', async (req, res) => {
 });
 
 /**
- * GET /api/insight/fleet — every host Kalam has samples for, understood from
+ * GET /api/insight/fleet — every host Trinetra has samples for, understood from
  * stored data alone. No SSH at all, so the Observability page can lead with it.
  */
 insightRouter.get('/api/insight/fleet', async (_req, res) => {

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Kalam — one-time setup on a Linux machine (the equivalent of setup.bat).
+# Trinetra — one-time setup on a Linux machine (the equivalent of setup.bat).
 #
 #   ./scripts/setup.sh              install deps + build the frontend
 #   ./scripts/setup.sh --no-build   skip the frontend build (dev-only machines)
-#   ./scripts/setup.sh --link       also register the global 'kalam' CLI
+#   ./scripts/setup.sh --link       also register the global 'trinetra' CLI
 #   ./scripts/setup.sh --clean      wipe node_modules/dist and install from scratch
 set -euo pipefail
 
@@ -62,17 +62,18 @@ fi
 ok "Dependencies installed."
 
 # ------------------------------------------------------------ 4. CLI -------
-step "[4/6] Global 'kalam' CLI"
+step "[4/6] Global 'trinetra' CLI"
 if [ "$DO_LINK" -eq 1 ]; then
+    npm unlink -g kalam >/dev/null 2>&1 || true   # MIGRATION: drop the pre-rename global command
     if npm link; then
-        ok "'kalam' registered — open a new shell to use it."
+        ok "'trinetra' registered — open a new shell to use it."
     else
         warn "'npm link' failed (usually a permissions issue on the global prefix)."
         hint "Fix without sudo:  npm config set prefix ~/.npm-global"
         hint "then add          export PATH=\"\$HOME/.npm-global/bin:\$PATH\"  to ~/.bashrc"
     fi
 else
-    info "Skipped (pass --link to register the global 'kalam' command)."
+    info "Skipped (pass --link to register the global 'trinetra' command)."
 fi
 
 # ------------------------------------------------------------ 5. build -----
@@ -86,7 +87,7 @@ fi
 
 # ------------------------------------------------------ 6. optional tools --
 step "[6/6] Optional cluster tools (all optional)"
-# Kalam reads containers from whichever runtime a machine has, and a machine
+# Trinetra reads containers from whichever runtime a machine has, and a machine
 # with none still shows every VM in the SSH inventory.
 runtime_found=0
 for r in docker crictl nerdctl podman; do

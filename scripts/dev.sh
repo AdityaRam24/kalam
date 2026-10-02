@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kalam — development mode on Linux: Express API + Vite dev server (hot reload).
+# Trinetra — development mode on Linux: Express API + Vite dev server (hot reload).
 #
 #   ./scripts/dev.sh                 backend on :3001, client on :5173 (loopback)
 #   ./scripts/dev.sh --lan           bind 0.0.0.0 so other machines can reach it
