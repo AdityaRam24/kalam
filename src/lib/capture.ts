@@ -7,7 +7,6 @@
 // back blank), and cross-origin web-font CSS can make the font-embedding step
 // throw — in which case the capture is retried without embedding fonts.
 
-import { toPng } from 'html-to-image';
 import { stamp } from './health';
 
 /** Largest canvas side / area browsers reliably allocate. */
@@ -45,6 +44,9 @@ export async function captureElement(
     // Unroll a scrolling container so everything below the fold is included.
     style: opts.fullHeight ? { height: `${height}px`, maxHeight: 'none', overflow: 'visible' } : undefined,
   };
+  // Loaded on first use: nobody should download the capture library just to
+  // open the dashboard.
+  const { toPng } = await import('html-to-image');
   try {
     return await toPng(el, base);
   } catch {
@@ -62,4 +64,4 @@ export function downloadDataUrl(dataUrl: string, filename: string) {
 }
 
 export const captureName = (what: string, ext = 'png') =>
-  `kalam-${what.replace(/[^a-z0-9-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'capture'}-${stamp()}.${ext}`;
+  `trinetra-${what.replace(/[^a-z0-9-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'capture'}-${stamp()}.${ext}`;

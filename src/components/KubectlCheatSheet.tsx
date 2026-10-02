@@ -795,7 +795,7 @@ export const KubectlCheatSheet: React.FC = () => {
               <div className="panel-card" style={{ ...card, padding: 14, display: 'flex', gap: 11, alignItems: 'flex-start' }}>
                 <Check size={17} style={{ color: 'var(--hpe-green)', flexShrink: 0, marginTop: 1 }} />
                 <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.45 }}>
-                  This command is well-formed. Kalam only runs it for you when it is read-only —
+                  This command is well-formed. Trinetra only runs it for you when it is read-only —
                   anything that changes state is yours to run deliberately.
                 </span>
               </div>

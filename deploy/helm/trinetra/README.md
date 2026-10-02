@@ -1,6 +1,6 @@
-# Kalam Helm chart
+# Trinetra Helm chart
 
-Runs Kalam inside a cluster: the built UI and the API are served from one port,
+Runs Trinetra inside a cluster: the built UI and the API are served from one port,
 the pod reads its own cluster through a ServiceAccount, and — if you give it a
 key — reaches machines outside the cluster over SSH.
 
@@ -10,9 +10,9 @@ The easy path is the self-contained bundle. It holds the image, this chart,
 helm/crane binaries and an installer that does every step:
 
 ```bash
-deploy/bundle/build-bundle.sh                 # → deploy/bundle/dist/kalam-0.1.0-bundle.tgz (no Docker needed)
+deploy/bundle/build-bundle.sh                 # → deploy/bundle/dist/trinetra-0.1.0-bundle.tgz (no Docker needed)
 
-tar -xzf kalam-0.1.0-bundle.tgz && cd kalam-0.1.0
+tar -xzf trinetra-0.1.0-bundle.tgz && cd trinetra-0.1.0
 ./install.sh                                  # image → cluster, PCAI/ingress/NodePort, PVC, helm install, helm test
 ```
 
@@ -24,19 +24,19 @@ rest of this page covers using the chart directly.
 The image has to be somewhere your nodes can pull from:
 
 ```bash
-crane push kalam-0.1.0.tar <registry>/kalam:0.1.0   # the tarball from the bundle's images/
-# or: docker build -t <registry>/kalam:0.1.0 . && docker push <registry>/kalam:0.1.0
+crane push trinetra-0.1.0.tar <registry>/trinetra:0.1.0   # the tarball from the bundle's images/
+# or: docker build -t <registry>/trinetra:0.1.0 . && docker push <registry>/trinetra:0.1.0
 
-helm upgrade --install kalam deploy/helm/kalam \
-  --namespace kalam --create-namespace \
-  --set image.repository=<registry>/kalam
+helm upgrade --install trinetra deploy/helm/trinetra \
+  --namespace trinetra --create-namespace \
+  --set image.repository=<registry>/trinetra
 ```
 
 Then reach it:
 
 ```bash
-kubectl -n kalam port-forward svc/kalam 8080:80    # http://localhost:8080
-helm test kalam -n kalam
+kubectl -n trinetra port-forward svc/trinetra 8080:80    # http://localhost:8080
+helm test trinetra -n trinetra
 ```
 
 ## HPE Private Cloud AI
@@ -48,7 +48,7 @@ PCAI Import Framework contract:
 ```yaml
 ezua:
   virtualService:
-    endpoint: "kalam.${DOMAIN_NAME}"          # substituted by PCAI on import
+    endpoint: "trinetra.${DOMAIN_NAME}"          # substituted by PCAI on import
     istioGateway: "istio-system/ezaf-gateway"
   authorizationPolicy:                        # SSO via oauth2-proxy
     enabled: true
@@ -56,7 +56,7 @@ ezua:
 
 - **Import Framework (UI):** upload the chart .tgz (`install.sh --package-only`
   writes one with the image location filled in). PCAI fills in `${DOMAIN_NAME}`.
-- **helm CLI:** set the endpoint yourself: `--set ezua.virtualService.endpoint=kalam.<domain>`.
+- **helm CLI:** set the endpoint yourself: `--set ezua.virtualService.endpoint=trinetra.<domain>`.
   `install.sh` detects the domain from the gateway.
 
 The VirtualService and AuthorizationPolicy render only when the Istio APIs exist
@@ -67,7 +67,7 @@ The endpoint is added to the API's origin allowlist automatically.
 ## Other clusters: Ingress or NodePort
 
 ```bash
---set ingress.enabled=true --set ingress.className=nginx --set ingress.host=kalam.example.com
+--set ingress.enabled=true --set ingress.className=nginx --set ingress.host=trinetra.example.com
 # or
 --set service.type=NodePort --set service.nodePort=30080 --set config.allowedHosts=<node-ip>,<node-ip>
 ```
@@ -81,19 +81,19 @@ allowed automatically; for any other name (such as node IPs) set `config.allowed
 |---|---|---|
 | `rbac.allowWrite` | `false` | `false` is read-only: dashboard, topology map, inspect drawer and history all work, and the action buttons return "forbidden". `true` grants pod delete plus deployment/statefulset restart and scale. |
 | `rbac.clusterWide` | `true` | `true` reads all namespaces (ClusterRole). `false` restricts to the release namespace (Role). |
-| `ssh.secretName` | `""` | Empty means cluster-only. Point it at a Secret holding a private key and Kalam can add and map VMs. Use `~/.ssh/id_rsa` as the key path in the UI. |
+| `ssh.secretName` | `""` | Empty means cluster-only. Point it at a Secret holding a private key and Trinetra can add and map VMs. Use `~/.ssh/id_rsa` as the key path in the UI. |
 | `persistence.enabled` | `false` | Off means the SSH inventory, KB, history and metrics live in an `emptyDir` and **reset on restart**. `install.sh` turns it on when there is a default StorageClass. |
 | `ezua.authorizationPolicy.enabled` | `true` | PCAI only: platform SSO in front of the UI/API. |
 
 ### SSH to hosts outside the cluster
 
 ```bash
-kubectl -n kalam create secret generic kalam-ssh \
+kubectl -n trinetra create secret generic trinetra-ssh \
   --from-file=id_rsa=$HOME/.ssh/id_rsa \
   --from-file=known_hosts=$HOME/.ssh/known_hosts
 
-helm upgrade --install kalam deploy/helm/kalam -n kalam --reuse-values \
-  --set ssh.secretName=kalam-ssh \
+helm upgrade --install trinetra deploy/helm/trinetra -n trinetra --reuse-values \
+  --set ssh.secretName=trinetra-ssh \
   --set ssh.knownHosts=known_hosts \
   --set persistence.enabled=true
 ```
@@ -128,7 +128,7 @@ systemd service need root on the host — enable root access per VM in the UI.
 `rbac.allowWrite` does **not** govern Host Logs: it controls Kubernetes writes,
 while service start/restart goes over SSH. Those actions are confirmed in the
 UI, refused by the server without confirmation, limited to `start`/`restart`,
-and logged in the pod's output (`kubectl -n kalam logs deploy/kalam | grep hostlogs`).
+and logged in the pod's output (`kubectl -n trinetra logs deploy/trinetra | grep hostlogs`).
 
 ```bash
 --set config.history.enabled=true     # periodic cluster fingerprints for the History view
@@ -142,12 +142,12 @@ ServiceAccount, ClusterRole/ClusterRoleBinding (or Role/RoleBinding), Service,
 Deployment, a `helm test` pod, and optionally a PVC, Secret, Ingress, and on
 PCAI an Istio VirtualService and AuthorizationPolicy.
 
-Secrets are never granted in RBAC: Kalam does not read secret contents. The pod
+Secrets are never granted in RBAC: Trinetra does not read secret contents. The pod
 runs as uid 10001 with a read-only root filesystem and no capabilities.
 
 ## Validate before installing
 
 ```bash
-helm lint deploy/helm/kalam --strict
-helm template kalam deploy/helm/kalam | kubectl apply --dry-run=server -f -
+helm lint deploy/helm/trinetra --strict
+helm template trinetra deploy/helm/trinetra | kubectl apply --dry-run=server -f -
 ```

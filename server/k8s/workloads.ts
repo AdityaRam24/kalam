@@ -16,6 +16,8 @@
 // Everything here is pure so the rules above are unit-tested from fixtures
 // (server/__tests__/workloads.test.ts) rather than trusted.
 
+import { isvcModel } from './resources.js';
+
 export interface OwnerRef {
   kind: string;
   name: string;
@@ -414,6 +416,40 @@ export interface ClusterResources {
   services: any[];
   deployments: any[];
   nodes: any[];
+  /** KServe InferenceServices — empty on clusters without KServe. */
+  inferenceServices: any[];
+}
+
+/**
+ * A KServe InferenceService as the topology draws it: the model it serves, where
+ * it is reachable, and whether it is Ready. Readiness comes from the Ready
+ * condition, the same field `kubectl get isvc` prints in its READY column.
+ */
+export function normalizeInferenceService(item: any): any {
+  const metadata = item?.metadata || {};
+  const status = item?.status || {};
+  const ready = (status.conditions || []).find((c: any) => c?.type === 'Ready');
+  let st = 'Unknown';
+  let health: Health = 'unknown';
+  if (ready?.status === 'True') { st = 'Ready'; health = 'healthy'; }
+  else if (ready?.status === 'False') { st = ready.reason || 'NotReady'; health = 'failing'; }
+  else if (ready) { st = ready.reason || 'Pending'; health = 'progressing'; }
+  if (metadata.deletionTimestamp) { st = 'Terminating'; health = 'progressing'; }
+  const m = isvcModel(item);
+  const traffic = (status.components?.predictor?.traffic || [])
+    .map((t: any) => `${t.revisionName || 'latest'}:${t.percent ?? 0}%`).join(', ');
+  return {
+    name: metadata.name,
+    namespace: metadata.namespace || 'default',
+    status: st,
+    health,
+    url: status.url || status.address?.url || '',
+    modelFormat: m.format || '',
+    storageUri: m.storageUri || '',
+    runtime: m.runtime || '',
+    traffic,
+    created: metadata.creationTimestamp,
+  };
 }
 
 const WORKLOAD_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet']);
@@ -438,16 +474,18 @@ export function normalizeClusterItems(
   const services: any[] = [];
   const deployments: any[] = [];
   const nodes: any[] = [];
+  const inferenceServices: any[] = [];
 
   for (const item of all) {
     switch (item?.kind) {
       case 'Pod': pods.push(normalizePod(item, replicaSets)); break;
       case 'Service': services.push(normalizeService(item)); break;
       case 'Node': nodes.push(normalizeNode(item)); break;
+      case 'InferenceService': inferenceServices.push(normalizeInferenceService(item)); break;
       default:
         if (WORKLOAD_KINDS.has(item?.kind)) deployments.push(normalizeWorkload(item));
     }
   }
 
-  return { pods, services, deployments, nodes };
+  return { pods, services, deployments, nodes, inferenceServices };
 }

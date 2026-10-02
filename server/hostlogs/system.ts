@@ -255,7 +255,7 @@ export function buildHealth(o: Omit<SystemOverview, 'health'>): HealthCheck[] {
     add({ id: 'reboot', status: 'info', title: 'Recently rebooted', detail: `Up for ${o.uptime || `${Math.round(o.uptimeSec / 60)} minutes`}. Look for the cause in the previous boot's logs.` });
   }
   if (!o.runsAsRoot) {
-    add({ id: 'root', status: 'info', title: 'Not running as root', detail: 'Some logs, process owners and all service restarts need root. Enable root access on the Virtual Machines page.' });
+    add({ id: 'root', status: 'info', title: 'Not running as root', detail: 'Some logs, process owners and all service restarts need root. Enable root access on the K8s Nodes page.' });
   }
 
   const rank: Record<HealthStatus, number> = { critical: 0, warning: 1, info: 2, ok: 3 };

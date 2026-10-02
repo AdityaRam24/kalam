@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "kalam.fullname" . }}
-  labels: {{- include "kalam.labels" . | nindent 4 }}
+  name: {{ include "trinetra.fullname" . }}
+  labels: {{- include "trinetra.labels" . | nindent 4 }}
   {{- with .Values.service.annotations }}
   annotations: {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -17,4 +17,4 @@ spec:
       {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
       nodePort: {{ .Values.service.nodePort }}
       {{- end }}
-  selector: {{- include "kalam.selectorLabels" . | nindent 4 }}
+  selector: {{- include "trinetra.selectorLabels" . | nindent 4 }}

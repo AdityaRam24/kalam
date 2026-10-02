@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react';
 import { 
   Terminal, 
   Layers, 
@@ -38,15 +38,18 @@ import TopologyGraph from './components/TopologyGraph';
 // import HPEAgentChat from './components/HPEAgentChat';
 // import PcaiAssistant from './components/PcaiAssistant';
 // import ModelPicker from './components/ModelPicker';
-import PcaiStackView from './components/PcaiStackView';
-import VmMonitor from './components/VmMonitor';
-import ClusterHistory from './components/ClusterHistory';
-import HostLogs from './components/HostLogs';
-import Observability from './components/Observability';
-import KubectlCheatSheet from './components/KubectlCheatSheet';
+const PcaiStackView = lazy(() => import('./components/PcaiStackView'));
+const VmMonitor = lazy(() => import('./components/VmMonitor'));
+// Pages are loaded when first opened, not at startup: the dashboard is what
+// everyone sees first, and shipping the terminal emulator, charts and every
+// other page up front made the initial bundle 1.2 MB.
+const ClusterHistory = lazy(() => import('./components/ClusterHistory'));
+const HostLogs = lazy(() => import('./components/HostLogs'));
+const Observability = lazy(() => import('./components/Observability'));
+const KubectlCheatSheet = lazy(() => import('./components/KubectlCheatSheet'));
 import ClusterResources from './components/ClusterResources';
 import ClusterMetrics from './components/ClusterMetrics';
-import GpuUtilization from './components/GpuUtilization';
+const GpuUtilization = lazy(() => import('./components/GpuUtilization'));
 import CaptureButton from './components/CaptureButton';
 import { HEALTH_BADGE, podHealthOf, podStatusText, workloadHealthOf, ageOf } from './lib/health';
 
@@ -126,6 +129,8 @@ interface NodeResource {
 }
 
 interface K8sResources {
+  /** KServe InferenceServices; empty on clusters without KServe. */
+  inferenceServices?: any[];
   pods: Pod[];
   services: Service[];
   deployments: Deployment[];
@@ -590,6 +595,21 @@ export function App() {
 
 //   const chatEndRef = useRef<HTMLDivElement>(null);
   const hasDataRef = useRef<boolean>(false);
+  // The last source that read successfully, and when. A refresh that fails for
+  // the SAME source keeps that data on screen (with a banner) instead of
+  // blanking the dashboard — blanking unmounted the topology map and redrew it
+  // on the next good poll, which is what a flaky SSH link looked like: flicker.
+  const lastGoodRef = useRef<{ source: string; at: number } | null>(null);
+  // Per-host last good discovery, for the merged "All hosts" view.
+  const hostCacheRef = useRef<Map<string, { d: any; at: number }>>(new Map());
+  // Every read gets a sequence number; only the newest may write state. A
+  // discovery over SSH can outlast the 10 s poll, and without this an older
+  // response could land after a newer one (the map flipping back) — or a read
+  // for the previous source could land after the user switched sources.
+  const pollSeqRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const lastFetchAtRef = useRef(0);
+  const keptNote = (at: number) => ` Showing the last good read from ${new Date(at).toLocaleTimeString()}.`;
 
   // ── Disabled: Image Hardener handlers ──
 //   const handleScanImage = async (e: React.FormEvent) => {
@@ -657,10 +677,21 @@ export function App() {
 
   // Fetch initial cluster state
   const fetchClusterState = async () => {
+    const seq = ++pollSeqRef.current;
+    const current = () => seq === pollSeqRef.current;
+    inFlightRef.current = true;
+    lastFetchAtRef.current = Date.now();
+    try {
+      await readClusterState(current);
+    } finally {
+      if (current()) inFlightRef.current = false;
+    }
+  };
+
+  const readClusterState = async (current: () => boolean) => {
     if (!hasDataRef.current) {
       setLoading(true);
     }
-    setErrorMsg(null);
 
     // Aggregate source: the same discovery, fanned out over every host in the
     // inventory and merged. One unreachable VM degrades to a warning rather
@@ -675,20 +706,30 @@ export function App() {
             return { vm, d: await r.json() };
           }),
         );
+        if (!current()) return;
+        setErrorMsg(null);
 
-        const merged = { containers: [] as any[], pods: [] as any[], services: [] as any[], deployments: [] as any[], nodes: [] as any[] };
+        const merged = { containers: [] as any[], pods: [] as any[], services: [] as any[], deployments: [] as any[], nodes: [] as any[], inferenceServices: [] as any[] };
         const engines = new Set<string>();
         const failures: string[] = [];
 
         for (const r of results) {
           if (r.status === 'rejected') { failures.push('a host could not be reached'); continue; }
-          const { vm, d } = r.value;
-          if (d.error || d.reachable === false) { failures.push(`${vm.name}: ${d.error || 'unreachable over SSH'}`); continue; }
+          const { vm } = r.value;
+          let d = r.value.d;
+          if (d.error || d.reachable === false) {
+            const cached = hostCacheRef.current.get(vm.name);
+            failures.push(`${vm.name}: ${d.error || 'unreachable over SSH'}${cached ? ` (showing its last good read from ${new Date(cached.at).toLocaleTimeString()})` : ''}`);
+            if (!cached) continue;
+            d = cached.d;
+          } else {
+            hostCacheRef.current.set(vm.name, { d, at: Date.now() });
+          }
           for (const e of d.engines || []) engines.add(e);
           if (d.warning) failures.push(`${vm.name}: ${d.warning}`);
           // `host` is what makes a merged resource actionable and keeps two VMs
           // with identically-named namespaces from colliding downstream.
-          for (const k of ['containers', 'pods', 'services', 'deployments', 'nodes'] as const) {
+          for (const k of ['containers', 'pods', 'services', 'deployments', 'nodes', 'inferenceServices'] as const) {
             for (const item of d[k] || []) merged[k].push({ ...item, host: vm.name });
           }
         }
@@ -698,7 +739,7 @@ export function App() {
           kubernetes: { installed: engines.has('kubectl'), version: engines.has('kubectl') ? `kubectl across ${vmList.length} hosts` : 'Not found', running: merged.pods.length > 0 || merged.nodes.length > 0, context: `all hosts (${vmList.length})` },
         });
         setDockerContainers(merged.containers);
-        setK8sResources({ pods: merged.pods, services: merged.services, deployments: merged.deployments, nodes: merged.nodes });
+        setK8sResources({ pods: merged.pods, services: merged.services, deployments: merged.deployments, nodes: merged.nodes, inferenceServices: merged.inferenceServices });
         if (failures.length) setErrorMsg(`${failures.length} of ${vmList.length} hosts reported a problem — ${failures.join('; ')}`);
       } catch (e: any) {
         setErrorMsg(`Failed to read the VM inventory: ${e.message}`);
@@ -718,11 +759,16 @@ export function App() {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: source }),
         });
         const d = await res.json();
+        if (!current()) return;
+        setErrorMsg(null);
         if (d.error || d.reachable === false) {
-          setErrorMsg(`${source}: ${d.error || 'host unreachable over SSH'}. Check the host on the Virtual Machines tab.`);
-          setStatus({ docker: { installed: false, version: '', running: false }, kubernetes: { installed: false, version: '', running: false, context: source } });
-          setDockerContainers([]);
-          setK8sResources({ pods: [], services: [], deployments: [], nodes: [] });
+          const kept = lastGoodRef.current?.source === source ? lastGoodRef.current : null;
+          setErrorMsg(`${source}: ${d.error || 'host unreachable over SSH'}. Check the host on the K8s Nodes tab.${kept ? keptNote(kept.at) : ''}`);
+          if (!kept) {
+            setStatus({ docker: { installed: false, version: '', running: false }, kubernetes: { installed: false, version: '', running: false, context: source } });
+            setDockerContainers([]);
+            setK8sResources({ pods: [], services: [], deployments: [], nodes: [], inferenceServices: [] });
+          }
           return;
         }
         const engines: string[] = d.engines || [];
@@ -743,14 +789,16 @@ export function App() {
         setK8sResources({
           pods: d.pods || [], services: d.services || [],
           deployments: d.deployments || [], nodes: d.nodes || [],
+          inferenceServices: d.inferenceServices || [],
         });
+        lastGoodRef.current = { source, at: Date.now() };
         // The backend now says WHY a view is thin — cluster read cut short,
         // kubectl missing, API unreachable, no permission to list pods. Show
         // that instead of leaving the user to guess from an empty canvas.
         if (d.warning) {
           setErrorMsg(`${source}: ${d.warning}`);
         } else if (!(d.containers || []).length && !(d.pods || []).length && !engines.length) {
-          setErrorMsg(`No container runtime was visible on ${source}. If this host does run containers (Docker, containerd, podman) or Kubernetes, give Kalam root there (Virtual Machines tab → shield icon) and re-scan — crictl and the kubeconfig are root-only.`);
+          setErrorMsg(`No container runtime was visible on ${source}. If this host does run containers (Docker, containerd, podman) or Kubernetes, give Trinetra root there (K8s Nodes tab → shield icon) and re-scan — crictl and the kubeconfig are root-only.`);
         }
       } catch (e: any) {
         setErrorMsg(`Failed to read ${source} over SSH: ${e.message}`);
@@ -767,11 +815,14 @@ export function App() {
       let statusRes: Response;
       try {
         statusRes = await fetch('/api/status');
+        if (!current()) return;
       } catch {
         throw new Error('BACKEND_DOWN');
       }
       if (!statusRes.ok) throw new Error('BACKEND_DOWN');
       const statusBody = await statusRes.json();
+      if (!current()) return;
+      setErrorMsg(null);
       // Merge rather than replace: a body missing `docker` or `kubernetes`
       // would otherwise make every `status.docker.running` in the render throw
       // and take the whole app down with it.
@@ -792,28 +843,45 @@ export function App() {
       // Get container list
       if (statusData.docker.running) {
         const dockerRes = await fetch('/api/docker/containers');
+        if (!current()) return;
         const dockerData = dockerRes.ok ? await dockerRes.json() : null;
+        if (!current()) return;
         setDockerContainers(Array.isArray(dockerData) ? dockerData : []);
       } else {
         setDockerContainers([]);
       }
 
       // Get K8s list
+      const keptLocal = lastGoodRef.current?.source === 'local' ? lastGoodRef.current : null;
       if (statusData.kubernetes.running) {
         const k8sRes = await fetch('/api/k8s/resources');
+        if (!current()) return;
         const k8sData = k8sRes.ok ? await k8sRes.json() : null;
-        setK8sResources({
-          pods: Array.isArray(k8sData?.pods) ? k8sData.pods : [],
-          services: Array.isArray(k8sData?.services) ? k8sData.services : [],
-          deployments: Array.isArray(k8sData?.deployments) ? k8sData.deployments : [],
-          nodes: Array.isArray(k8sData?.nodes) ? k8sData.nodes : [],
-        });
-        // A kind that could not be read must say so. Reporting it as "no pods"
-        // is what made a full cluster look like a cluster with only containers.
-        if (k8sData?.warning) setErrorMsg(k8sData.warning);
-        else if (!k8sRes.ok) setErrorMsg('The Kubernetes query failed on this machine. Run "npm run diagnose -- --local" for the reason.');
+        if (!current()) return;
+        if (!k8sRes.ok && keptLocal) {
+          // One failed read is not an empty cluster: keep what is on screen.
+          setErrorMsg(`The Kubernetes query failed on this refresh.${keptNote(keptLocal.at)}`);
+        } else {
+          setK8sResources({
+            pods: Array.isArray(k8sData?.pods) ? k8sData.pods : [],
+            services: Array.isArray(k8sData?.services) ? k8sData.services : [],
+            deployments: Array.isArray(k8sData?.deployments) ? k8sData.deployments : [],
+            nodes: Array.isArray(k8sData?.nodes) ? k8sData.nodes : [],
+            inferenceServices: Array.isArray(k8sData?.inferenceServices) ? k8sData.inferenceServices : [],
+          });
+          if (k8sRes.ok) lastGoodRef.current = { source: 'local', at: Date.now() };
+          // A kind that could not be read must say so. Reporting it as "no pods"
+          // is what made a full cluster look like a cluster with only containers.
+          if (k8sData?.warning) setErrorMsg(k8sData.warning);
+          else if (!k8sRes.ok) setErrorMsg('The Kubernetes query failed on this machine. Run "npm run diagnose -- --local" for the reason.');
+        }
+      } else if (keptLocal) {
+        // The 8 s reachability probe timed out once; that is not proof the
+        // cluster is gone. Keep the last read and say so.
+        setStatus((s) => ({ ...s, kubernetes: { ...s.kubernetes, running: true } }));
+        setErrorMsg(`Kubernetes did not answer this refresh.${keptNote(keptLocal.at)}`);
       } else {
-        setK8sResources({ pods: [], services: [], deployments: [], nodes: [] });
+        setK8sResources({ pods: [], services: [], deployments: [], nodes: [], inferenceServices: [] });
       }
     } catch (err: any) {
       console.error(err);
@@ -823,7 +891,7 @@ export function App() {
         setErrorMsg(
           vmList.length
             ? 'Failed to read this machine’s cluster state. This machine may have no container runtime — switch the source picker above to one of your hosts, or to "All hosts".'
-            : 'Failed to read this machine’s cluster state. No container runtime or cluster answered here, and no VMs are configured yet (Virtual Machines tab).',
+            : 'Failed to read this machine’s cluster state. No container runtime or cluster answered here, and no nodes are configured yet (K8s Nodes tab).',
         );
       }
     } finally {
@@ -832,10 +900,31 @@ export function App() {
     }
   };
 
+  // Pages that draw the app-wide cluster read. The others (VMs, host logs,
+  // change history, cheat sheet, GPU) fetch what they need themselves, so
+  // re-reading the whole cluster every 10 s behind them was pure load — over
+  // SSH, a full discovery per poll.
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+  const usesClusterRead = (t: string) => ['dashboard', 'docker', 'k8s', 'pcaistack', 'metrics'].includes(t);
+
+  // Coming back to such a page with data older than one poll: refresh now.
+  useEffect(() => {
+    if (usesClusterRead(activeTab) && autoRefresh && !inFlightRef.current && Date.now() - lastFetchAtRef.current > 10000) {
+      void fetchClusterState();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
   useEffect(() => {
     fetchClusterState();
     if (!autoRefresh) return;
-    const interval = setInterval(fetchClusterState, 10000);
+    const interval = setInterval(() => {
+      // Skip, rather than stack, while a read is still running; and do not
+      // poll a page nobody is looking at.
+      if (inFlightRef.current || document.hidden || !usesClusterRead(activeTabRef.current)) return;
+      void fetchClusterState();
+    }, 10000);
     return () => clearInterval(interval);
     // Switching source re-reads immediately rather than waiting for the timer.
     // The inventory size is a dependency because it arrives asynchronously: the
@@ -1283,7 +1372,7 @@ export function App() {
           <a href="#" className="sidebar-brand" onClick={(e) => { e.preventDefault(); setActiveTab('dashboard'); }}>
             <div className="brand-logo-icon" title="Hewlett Packard Enterprise">HPE</div>
             <div className="brand-info">
-              <h1><span className="hpe-text">HPE</span> Kalam</h1>
+              <h1><span className="hpe-text">HPE</span> Trinetra</h1>
               <span className="sub-text">GreenLake Console</span>
             </div>
           </a>
@@ -1336,7 +1425,7 @@ export function App() {
               onClick={() => setActiveTab('vms')}
             >
               <span className="nav-item-icon"><HardDrive size={18} /></span>
-              <span className="nav-item-text">Virtual Machines</span>
+              <span className="nav-item-text">K8s Nodes</span>
               <span className="nav-item-badge">SSH</span>
             </button>
             <button
@@ -1471,12 +1560,12 @@ export function App() {
                 {activeTab === 'pcaistack' && 'HPE Private Cloud AI — Stack Visualizer'}
                 {activeTab === 'docker' && 'Docker Container Operations'}
                 {activeTab === 'k8s' && 'Kubernetes Cluster Management'}
-                {activeTab === 'vms' && 'Virtual Machine Monitoring & SSH'}
+                {activeTab === 'vms' && 'K8s Nodes — Monitoring & SSH'}
                 {activeTab === 'logs' && 'Host Logs — /var/log Collection & Issue Detection'}
                 {activeTab === 'metrics' && 'Observability — Host Telemetry Over Time'}
                 {activeTab === 'history' && 'Cluster Change History — What Changed, When, and Who'}
                 {activeTab === 'gpu' && 'GPU Utilization — Which Model Runs Where, and How Hard'}
-                {activeTab === 'chat' && 'Kalam Agentic DevOps Assistant'}
+                {activeTab === 'chat' && 'Trinetra Agentic DevOps Assistant'}
                 {activeTab === 'security' && 'Container Security & CVE Patching'}
                 {activeTab === 'agents' && 'Multi-Agent Swarm Visualizer'}
                 {activeTab === 'pcai' && 'HPE Private Cloud AI Assistant'}
@@ -1530,7 +1619,7 @@ export function App() {
             </div>
 
             {vmList.length === 0 && (
-              <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="Add hosts on the Virtual Machines tab to view their Docker and Kubernetes here">
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="Add hosts on the K8s Nodes tab to view their Docker and Kubernetes here">
                 local only
               </span>
             )}
@@ -1618,6 +1707,11 @@ export function App() {
 
         {/* Viewport Content */}
         <div className={`app-viewport ${activeTab === 'chat' || activeTab === 'pcai' ? 'full-bleed' : ''}`}>
+        <Suspense fallback={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 32, color: 'var(--text-secondary)' }}>
+            <div className="loader"></div> Loading…
+          </div>
+        }>
           {errorMsg && (
             <div className="panel-card" style={{ borderLeft: '4px solid var(--status-error)' }}>
               <div style={{ display: 'flex', gap: 12, alignItems: 'center', color: 'var(--status-error)' }}>
@@ -1818,10 +1912,10 @@ export function App() {
                 {/* Disabled: "Launch AI Console" card
                 {aiEnabled && <div className="panel-card">
                   <div className="panel-card-title">
-                    <h2><Cpu size={18} /> Kalam AI Assistant</h2>
+                    <h2><Cpu size={18} /> Trinetra AI Assistant</h2>
                   </div>
                   <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.4' }}>
-                    Ask Kalam to inspect logs, troubleshoot CrashLoopBackOff pods, scale deployments, or harden Docker images.
+                    Ask Trinetra to inspect logs, troubleshoot CrashLoopBackOff pods, scale deployments, or harden Docker images.
                   </p>
                   <button 
                     className="btn primary" 
@@ -2567,6 +2661,7 @@ export function App() {
         {activeTab === 'cheatsheet' && (
           <KubectlCheatSheet />
         )}
+        </Suspense>
       </div>
     </div>
 
@@ -2689,7 +2784,7 @@ export function App() {
                       />
                       <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                         OpenAI-compatible base URL. For an HPE <strong>MLIS</strong> deployment use its serving URL ending in <code>/v1</code>.
-                        Kalam's backend makes the call, so <em>this machine</em> must be on the network that hosts it (VPN / PCAI network) — use <strong>Test connection</strong> below to confirm.
+                        Trinetra's backend makes the call, so <em>this machine</em> must be on the network that hosts it (VPN / PCAI network) — use <strong>Test connection</strong> below to confirm.
                       </span>
                     </div>
                     <div className="form-group">

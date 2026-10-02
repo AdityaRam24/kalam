@@ -2,8 +2,8 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "kalam.fullname" . }}
-  labels: {{- include "kalam.labels" . | nindent 4 }}
+  name: {{ include "trinetra.fullname" . }}
+  labels: {{- include "trinetra.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations: {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -26,7 +26,7 @@ spec:
             pathType: {{ .Values.ingress.pathType }}
             backend:
               service:
-                name: {{ include "kalam.fullname" . }}
+                name: {{ include "trinetra.fullname" . }}
                 port:
                   number: {{ .Values.service.port }}
 {{- end }}

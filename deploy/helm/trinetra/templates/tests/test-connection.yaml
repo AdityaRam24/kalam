@@ -1,10 +1,10 @@
-# `helm test <release>`: proves the Service routes to a live Kalam. Uses the
-# Kalam image itself, so it needs nothing the install didn't already pull.
+# `helm test <release>`: proves the Service routes to a live Trinetra. Uses the
+# Trinetra image itself, so it needs nothing the install didn't already pull.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: {{ include "kalam.fullname" . }}-test
-  labels: {{- include "kalam.labels" . | nindent 4 }}
+  name: {{ include "trinetra.fullname" . }}-test
+  labels: {{- include "trinetra.labels" . | nindent 4 }}
   annotations:
     helm.sh/hook: test
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
@@ -17,13 +17,13 @@ spec:
   {{- end }}
   containers:
     - name: check
-      image: {{ include "kalam.image" . | quote }}
+      image: {{ include "trinetra.image" . | quote }}
       imagePullPolicy: {{ .Values.image.pullPolicy }}
       securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
       command: ["node", "-e"]
       args:
         - |
-          const base = 'http://{{ include "kalam.fullname" . }}:{{ .Values.service.port }}';
+          const base = 'http://{{ include "trinetra.fullname" . }}:{{ .Values.service.port }}';
           (async () => {
             for (const p of ['/healthz', '/api/llm/defaults', '/']) {
               const r = await fetch(base + p);

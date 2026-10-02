@@ -78,7 +78,7 @@ export function blastRadius(graph: InfraGraph, id: string, adj: Adjacency = inde
     .join(', ');
 
   const summary = impacted.length === 0
-    ? `Nothing depends on ${origin.name}: stopping it affects nothing Kalam can see.`
+    ? `Nothing depends on ${origin.name}: stopping it affects nothing Trinetra can see.`
     : `${origin.name} is depended on by ${impacted.length} thing(s) — ${kinds}. ` +
       `${alreadyBroken.length} of them are already unhealthy; ${atRisk.length} are healthy and would be at risk.`;
 

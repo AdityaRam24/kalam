@@ -25,9 +25,9 @@
 //   * Pods are ordered by the workload that owns them, so the "manages" edges
 //     leave a workload as one bundle instead of crossing the whole canvas.
 
-import { podId, svcId, deployId, k8sNodeId, containerId } from './relations';
+import { podId, svcId, deployId, k8sNodeId, containerId, isvcId } from './relations';
 
-export type CardKind = 'container' | 'port' | 'service' | 'workload' | 'pod' | 'node';
+export type CardKind = 'container' | 'port' | 'isvc' | 'service' | 'workload' | 'pod' | 'node';
 
 export interface LayoutCard {
   id: string;
@@ -62,6 +62,8 @@ export interface LayoutInput {
   services: any[];
   deployments: any[];
   nodes: any[];
+  /** KServe InferenceServices: drawn as the first stage, ahead of Services. */
+  inferenceServices?: any[];
 }
 
 // ── Geometry ────────────────────────────────────────────────────────────────
@@ -150,6 +152,7 @@ export function layoutCluster(input: LayoutInput): LayoutResult {
   const services = [...(input.services || [])].sort(byName);
   const workloads = [...(input.deployments || [])].sort(byName);
   const nodes = [...(input.nodes || [])].sort(byName);
+  const isvcs = [...(input.inferenceServices || [])].sort(byName);
 
   const cards = new Map<string, LayoutCard>();
   const groups: LayoutGroup[] = [];
@@ -157,7 +160,7 @@ export function layoutCluster(input: LayoutInput): LayoutResult {
 
   // Namespaces in a stable order, and only those that actually hold something.
   const namespaces = Array.from(
-    new Set([...pods, ...services, ...workloads].map((o: any) => o?.namespace).filter(Boolean)),
+    new Set([...isvcs, ...pods, ...services, ...workloads].map((o: any) => o?.namespace).filter(Boolean)),
   ).sort();
 
   const inNs = <T,>(arr: T[], ns: string) => arr.filter((o: any) => o?.namespace === ns);
@@ -169,6 +172,7 @@ export function layoutCluster(input: LayoutInput): LayoutResult {
   const widthOf = (pick: (ns: string) => number) =>
     Math.max(0, ...namespaces.map((ns) => Math.max(0, stageCols(pick(ns)) - 1) * COL_W), 0);
 
+  const isvcW = widthOf((ns) => inNs(isvcs, ns).length);
   const svcW = widthOf((ns) => inNs(services, ns).length);
   const depW = widthOf((ns) => inNs(workloads, ns).length);
   const podW = widthOf((ns) => inNs(pods, ns).length);
@@ -179,7 +183,10 @@ export function layoutCluster(input: LayoutInput): LayoutResult {
     : 0;
   const k8sX = CONTAINERS_X + (containers.length > 0 ? containersW + K8S_X_GAP : 0);
 
-  const xSvc = k8sX + BAND_PAD;
+  // The InferenceService stage only takes space when the cluster has any, so a
+  // cluster without KServe lays out exactly as before.
+  const xIsvc = k8sX + BAND_PAD;
+  const xSvc = isvcs.length > 0 ? xIsvc + CARD_W + isvcW + STAGE_GAP : xIsvc;
   const xDep = xSvc + CARD_W + svcW + STAGE_GAP;
   const xPod = xDep + CARD_W + depW + STAGE_GAP;
   const xNode = xPod + CARD_W + podW + STAGE_GAP;
@@ -191,6 +198,7 @@ export function layoutCluster(input: LayoutInput): LayoutResult {
   let cursorY = 0;
   for (const ns of namespaces) {
     const rows = Math.max(
+      stageRows(inNs(isvcs, ns).length),
       stageRows(inNs(services, ns).length),
       stageRows(inNs(workloads, ns).length),
       stageRows(inNs(pods, ns).length),
@@ -256,19 +264,21 @@ export function layoutCluster(input: LayoutInput): LayoutResult {
 
   for (const ns of namespaces) {
     const bandTop = k8sTop + (bandTops.get(ns) ?? 0);
+    const nsIsvcs = inNs(isvcs, ns);
     const nsSvcs = inNs(services, ns);
     const nsDeps = inNs(workloads, ns);
     const nsPods = orderPods(inNs(pods, ns));
-    const bandRows = Math.max(stageRows(nsSvcs.length), stageRows(nsDeps.length), stageRows(nsPods.length), 1);
+    const bandRows = Math.max(stageRows(nsIsvcs.length), stageRows(nsSvcs.length), stageRows(nsDeps.length), stageRows(nsPods.length), 1);
 
+    placeStage(nsIsvcs, ns, xIsvc, bandTop, bandRows, 'isvc', (o) => isvcId(ns, o.name));
     placeStage(nsSvcs, ns, xSvc, bandTop, bandRows, 'service', (o) => svcId(ns, o.name));
     placeStage(nsDeps, ns, xDep, bandTop, bandRows, 'workload', (o) => deployId(ns, o.name));
     placeStage(nsPods, ns, xPod, bandTop, bandRows, 'pod', (o) => podId(ns, o.name));
 
     groups.push({
       id: `ns-group-${ns}`, kind: 'namespace', label: `ns: ${ns}`,
-      x: xSvc - BAND_PAD, y: bandTop,
-      w: xPod + CARD_W + podW + BAND_PAD - (xSvc - BAND_PAD),
+      x: xIsvc - BAND_PAD, y: bandTop,
+      w: xPod + CARD_W + podW + BAND_PAD - (xIsvc - BAND_PAD),
       h: bandHeights.get(ns) ?? CARD_H,
     });
   }

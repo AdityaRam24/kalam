@@ -91,8 +91,8 @@ function catCmd(file: string): string {
 function permissionHint(vm: VmEntry, uid: string): string | undefined {
   if (uid === '0') return undefined;
   return vm.elevate && vm.elevate !== 'none'
-    ? `Root elevation (${vm.elevate}) is configured but commands are not running as root — check the elevation password on the Virtual Machines page.`
-    : `Logged in as "${vm.user}" without root: most of /var/log is root-only. Enable root access for this VM on the Virtual Machines page to see everything.`;
+    ? `Root elevation (${vm.elevate}) is configured but commands are not running as root — check the elevation password on the K8s Nodes page.`
+    : `Logged in as "${vm.user}" without root: most of /var/log is root-only. Enable root access for this VM on the K8s Nodes page to see everything.`;
 }
 
 async function unreachable(vm: VmEntry): Promise<string | null> {
@@ -249,7 +249,7 @@ logsRouter.post('/api/logs/service', async (req, res) => {
     actionOutput: actionText,
     error: action !== 'status' && exitCode !== 0
       ? (needsRoot
-        ? `Not permitted to ${action} ${unit} as "${vm.user}" — service control needs root. Enable root access (sudo/su) for this VM on the Virtual Machines page.\n${actionText}`
+        ? `Not permitted to ${action} ${unit} as "${vm.user}" — service control needs root. Enable root access (sudo/su) for this VM on the K8s Nodes page.\n${actionText}`
         : actionText || `systemctl ${action} failed.`)
       : undefined,
     state: {

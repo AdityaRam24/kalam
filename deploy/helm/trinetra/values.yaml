@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Kalam — default values.
+# Trinetra — default values.
 #
 # Out of the box this installs a read-only console: it can SEE the cluster it
 # runs in and nothing else. Two things are deliberately opt-in because they
@@ -15,7 +15,7 @@
 image:
   # install.sh sets this to wherever it pushed the bundled image
   # (your registry, or the per-node cache at 127.0.0.1:5959).
-  repository: kalam
+  repository: trinetra
   tag: ""                 # defaults to .Chart.AppVersion
   digest: ""              # optional sha256:...; pins the image when set
   pullPolicy: IfNotPresent
@@ -46,9 +46,9 @@ ezua:
   enabled: true
   domainName: "${DOMAIN_NAME}"
   virtualService:
-    endpoint: "kalam.${DOMAIN_NAME}"
+    endpoint: "trinetra.${DOMAIN_NAME}"
     istioGateway: "istio-system/ezaf-gateway"
-  # SSO in front of Kalam. Strongly recommended: the API can run kubectl and
+  # SSO in front of Trinetra. Strongly recommended: the API can run kubectl and
   # SSH actions, so it should never be reachable without a login.
   authorizationPolicy:
     enabled: true
@@ -64,14 +64,14 @@ ingress:
   annotations: {}
   # The hostname the browser uses. It is also added to the app's own allowlist
   # (see config.allowedHosts) — without that the API refuses the origin.
-  host: kalam.example.com
+  host: trinetra.example.com
   path: /
   pathType: Prefix
   tls:
     enabled: false
     secretName: ""
 
-# ── What Kalam may do to the cluster it runs in ─────────────────────────────
+# ── What Trinetra may do to the cluster it runs in ─────────────────────────────
 rbac:
   create: true
   # false → read-only (get/list/watch). The dashboard, topology map, inspect
@@ -81,7 +81,7 @@ rbac:
   allowWrite: false
   # GPU Utilization page: runs `nvidia-smi` inside GPU pods (kubectl exec).
   # That needs create on pods/exec, which in principle allows running any
-  # command in any pod — set false to keep Kalam strictly read-only (the page
+  # command in any pod — set false to keep Trinetra strictly read-only (the page
   # then shows GPU requests and allocation, without live nvidia-smi readings).
   allowGpuExec: true
   # Cluster-wide read (all namespaces) vs a Role limited to this namespace.
@@ -93,7 +93,7 @@ serviceAccount:
   annotations: {}
 
 # ── AI engine ───────────────────────────────────────────────────────────────
-# Kalam's backend makes the call, so THIS POD must be able to reach the
+# Trinetra's backend makes the call, so THIS POD must be able to reach the
 # endpoint. For an in-cluster MLIS/vLLM/Ollama service that is a Service DNS
 # name; for Gemini it needs egress to the internet. These are the defaults a
 # fresh browser starts with — anyone can still change them under Settings.
@@ -130,7 +130,7 @@ config:
   extraEnv: []
 
 # ── SSH to machines outside the cluster ─────────────────────────────────────
-# Mounting a key is what turns Kalam from "this cluster" into "the estate".
+# Mounting a key is what turns Trinetra from "this cluster" into "the estate".
 # Leave empty to run cluster-only. The key appears in the pod as
 # ~/.ssh/id_rsa — use that as the key path when adding a VM in the UI.
 ssh:
@@ -157,7 +157,7 @@ resources:
     memory: 1Gi
 
 # Probes hit /healthz, which does no work — so a slow apiserver or an absent
-# container runtime is never mistaken for a broken Kalam.
+# container runtime is never mistaken for a broken Trinetra.
 probes:
   enabled: true
   initialDelaySeconds: 5

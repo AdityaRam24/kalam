@@ -1,5 +1,5 @@
 apiVersion: v2
-name: kalam
+name: trinetra
 description: Agentic DevOps dashboard, cluster topology map and PCAI assistant
 type: application
 version: 0.1.0

@@ -39,6 +39,8 @@ const KINDS: Record<string, { kubectl: string; namespaced: boolean }> = {
   pvc: { kubectl: 'pvc', namespaced: true },
   configmap: { kubectl: 'configmap', namespaced: true },
   node: { kubectl: 'node', namespaced: false },
+  isvc: { kubectl: 'inferenceservices.serving.kserve.io', namespaced: true },
+  inferenceservice: { kubectl: 'inferenceservices.serving.kserve.io', namespaced: true },
   // The topology names its node cards "k8s-node" — accept that spelling too.
   'k8s-node': { kubectl: 'node', namespaced: false },
 };

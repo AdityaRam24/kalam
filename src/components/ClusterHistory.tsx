@@ -363,10 +363,10 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
     const header = ['Observed', 'Happened', 'Source', 'Severity', 'Change', 'Kind', 'Namespace', 'Name', 'Summary', 'Changed by', 'Operation', 'Revision', 'Change cause', 'Fields'];
     const body = visible.map((c) => [c.at, c.actualAt, c.source, c.severity, c.kind, c.objectKind, c.namespace, c.name, c.summary, c.actor, c.actorOp, c.revision, c.cause,
       c.fields.map((f) => `${f.path}: ${f.from ?? '—'} -> ${f.to ?? '—'}`).join('; ')]);
-    downloadText(toCsv([header, ...body]), `kalam-history-${source}-${stamp()}.csv`, 'text/csv');
+    downloadText(toCsv([header, ...body]), `trinetra-history-${source}-${stamp()}.csv`, 'text/csv');
   };
   const exportJson = () => downloadText(JSON.stringify({ source, since: since || 'all', exportedAt: new Date().toISOString(), changes: visible }, null, 2),
-    `kalam-history-${source}-${stamp()}.json`, 'application/json');
+    `trinetra-history-${source}-${stamp()}.json`, 'application/json');
 
   const toggle = (id: string) => setExpanded((cur) => {
     const n = new Set(cur);

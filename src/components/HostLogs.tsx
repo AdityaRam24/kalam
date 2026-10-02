@@ -377,7 +377,7 @@ export const HostLogs: React.FC = () => {
     const header = ['Severity', 'Title', 'Category', 'Count', 'First seen', 'Last seen', 'Units', 'Sources', 'Message', 'Explanation', 'Checks'];
     const body = visibleFindings.map((f) => [f.severity, f.title, f.category, f.count, f.firstSeen, f.lastSeen, (f.units || []).join('; '),
       f.files.join('; '), f.message, f.explain, f.checks.join(' | ')]);
-    downloadText(toCsv([header, ...body]), `kalam-${vm}-log-findings-${stamp()}.csv`, 'text/csv');
+    downloadText(toCsv([header, ...body]), `trinetra-${vm}-log-findings-${stamp()}.csv`, 'text/csv');
   };
 
   const totalSize = files.reduce((n, f) => n + f.size, 0);
@@ -399,7 +399,7 @@ export const HostLogs: React.FC = () => {
       <div className="panel-card">
         <div className="panel-card-title"><h2><ScrollText size={17} /> Host Logs</h2></div>
         <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0 }}>
-          No VMs in the SSH inventory yet. Add one on the <strong>Virtual Machines</strong> page, then come back to scan its <code className="code-tag">/var/log</code>.
+          No VMs in the SSH inventory yet. Add one on the <strong>K8s Nodes</strong> page, then come back to scan its <code className="code-tag">/var/log</code>.
         </p>
       </div>
     );
@@ -710,7 +710,7 @@ export const HostLogs: React.FC = () => {
                       {f.explain}
                     </div>
                     <div>
-                      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Checks to run (read-only — not executed by Kalam)</div>
+                      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Checks to run (read-only — not executed by Trinetra)</div>
                       {f.checks.map((c) => (
                         <div key={c} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 3 }}>
                           <code className="code-tag" style={{ ...mono, flex: 1, overflowX: 'auto', whiteSpace: 'nowrap' }}>{c}</code>

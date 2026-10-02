@@ -135,7 +135,7 @@ describe('correlate', () => {
 
 describe('verdict', () => {
   it('says so plainly when nothing is wrong', () => {
-    expect(verdict([])).toEqual({ severity: 'ok', summary: 'Nothing is wrong that Kalam can see.' });
+    expect(verdict([])).toEqual({ severity: 'ok', summary: 'Nothing is wrong that Trinetra can see.' });
   });
 
   it('leads with the worst issue and counts the rest', () => {

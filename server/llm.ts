@@ -312,7 +312,7 @@ export function describeConnectError(base: string, err: any): { error: string; h
   if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY|DEPTH_ZERO|certificate/i.test(code + ' ' + raw)) {
     return {
       error: `TLS certificate for ${host} was rejected (${code || 'certificate error'}).`,
-      hint: 'The endpoint uses a certificate this machine does not trust - common for internal MLIS deployments. Point NODE_EXTRA_CA_CERTS at your CA bundle when starting Kalam, or (lab only) set NODE_TLS_REJECT_UNAUTHORIZED=0.',
+      hint: 'The endpoint uses a certificate this machine does not trust - common for internal MLIS deployments. Point NODE_EXTRA_CA_CERTS at your CA bundle when starting Trinetra, or (lab only) set NODE_TLS_REJECT_UNAUTHORIZED=0.',
     };
   }
   if (/wrong version number|ssl|tls/i.test(raw) && !https) {

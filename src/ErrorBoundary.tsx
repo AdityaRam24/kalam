@@ -16,7 +16,7 @@ export default class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error('Kalam crashed while rendering:', error, info.componentStack);
+    console.error('Trinetra crashed while rendering:', error, info.componentStack);
   }
 
   render() {
@@ -33,7 +33,7 @@ export default class ErrorBoundary extends Component<
           minHeight: '100vh',
         }}
       >
-        <h1 style={{ fontSize: 20, marginBottom: 8 }}>Kalam hit a rendering error</h1>
+        <h1 style={{ fontSize: 20, marginBottom: 8 }}>Trinetra hit a rendering error</h1>
         <p style={{ color: '#94a3b8', marginBottom: 16, maxWidth: 640 }}>
           The interface stopped instead of going blank. The details below are also in the
           browser console.

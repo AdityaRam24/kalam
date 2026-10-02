@@ -5,8 +5,8 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: {{ $kind }}
 metadata:
-  name: {{ include "kalam.fullname" . }}
-  labels: {{- include "kalam.labels" . | nindent 4 }}
+  name: {{ include "trinetra.fullname" . }}
+  labels: {{- include "trinetra.labels" . | nindent 4 }}
   {{- if not .Values.rbac.clusterWide }}
   namespace: {{ .Release.Namespace }}
   {{- end }}
@@ -80,7 +80,7 @@ rules:
   {{- end }}
   {{- if $write }}
   # Opt-in (rbac.allowWrite): the verbs behind the UI's action buttons.
-  # Secrets are never granted — Kalam does not read secret contents.
+  # Secrets are never granted — Trinetra does not read secret contents.
   - apiGroups: [""]
     resources: [pods]
     verbs: [delete]
@@ -95,17 +95,17 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: {{ $bindKind }}
 metadata:
-  name: {{ include "kalam.fullname" . }}
-  labels: {{- include "kalam.labels" . | nindent 4 }}
+  name: {{ include "trinetra.fullname" . }}
+  labels: {{- include "trinetra.labels" . | nindent 4 }}
   {{- if not .Values.rbac.clusterWide }}
   namespace: {{ .Release.Namespace }}
   {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: {{ $kind }}
-  name: {{ include "kalam.fullname" . }}
+  name: {{ include "trinetra.fullname" . }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "kalam.serviceAccountName" . }}
+    name: {{ include "trinetra.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

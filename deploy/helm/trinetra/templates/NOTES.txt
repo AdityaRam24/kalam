@@ -1,7 +1,7 @@
-Kalam {{ .Chart.AppVersion }} is installed as {{ include "kalam.fullname" . }} in namespace {{ .Release.Namespace }}.
+Trinetra {{ .Chart.AppVersion }} is installed as {{ include "trinetra.fullname" . }} in namespace {{ .Release.Namespace }}.
 
 Open it:
-{{- if include "kalam.pcaiEnabled" . }}
+{{- if include "trinetra.pcaiEnabled" . }}
   https://{{ .Values.ezua.virtualService.endpoint }}   (PCAI gateway{{ if .Values.ezua.authorizationPolicy.enabled }}, behind platform SSO{{ end }})
 {{- end }}
 {{- if .Values.ingress.enabled }}
@@ -10,7 +10,7 @@ Open it:
 {{- if eq .Values.service.type "NodePort" }}
   http://<any-node-ip>:{{ .Values.service.nodePort | default "<see: kubectl -n NS get svc>" }}
 {{- end }}
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kalam.fullname" . }} 8080:{{ .Values.service.port }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "trinetra.fullname" . }} 8080:{{ .Values.service.port }}
   then http://localhost:8080   (always works, no DNS needed)
 
 Check it:
@@ -25,7 +25,7 @@ What this install can do:
 The AI call is made by this pod, not by your browser: the endpoint above has to
 be reachable from inside the cluster. Confirm it in the UI under
 Settings -> Test connection, which names exactly what failed.
-{{- if and .Values.ezua.enabled (not (include "kalam.pcaiEnabled" .)) (not .Values.ingress.enabled) }}
+{{- if and .Values.ezua.enabled (not (include "trinetra.pcaiEnabled" .)) (not .Values.ingress.enabled) }}
 
 No PCAI gateway route was created ({{ if contains "${" .Values.ezua.virtualService.endpoint }}ezua.virtualService.endpoint still holds a ${...} placeholder{{ else }}Istio is not installed in this cluster{{ end }}).
 Use the port-forward above, or set ezua.virtualService.endpoint / ingress.host.
