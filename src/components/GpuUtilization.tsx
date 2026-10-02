@@ -194,7 +194,7 @@ export const GpuUtilization: React.FC<Props> = ({ source, vmNames }) => {
           g.processes.map((p) => `${p.name}(${p.pid}) ${p.usedMiB ?? '?'}MiB`).join('; ')]);
       }
     }
-    downloadText(toCsv([header, ...body]), `kalam-gpu-${source}-${stamp()}.csv`, 'text/csv');
+    downloadText(toCsv([header, ...body]), `trinetra-gpu-${source}-${stamp()}.csv`, 'text/csv');
   };
 
   return (

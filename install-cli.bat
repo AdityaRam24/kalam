@@ -1,9 +1,9 @@
 @echo off
-title Kalam - Install Global CLI
+title Trinetra - Install Global CLI
 color 0B
 
 echo ===================================================
-echo        INSTALLING THE 'kalam' GLOBAL COMMAND
+echo        INSTALLING THE 'trinetra' GLOBAL COMMAND
 echo ===================================================
 echo.
 
@@ -16,7 +16,7 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [1/2] Registering 'kalam' globally via npm link...
+echo [1/2] Registering 'trinetra' globally via npm link...
 call npm link
 if %errorlevel% neq 0 (
     echo.
@@ -27,22 +27,22 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [2/2] Verifying the command is available...
-where kalam >nul 2>nul
+where trinetra >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [WARNING] 'kalam' is linked but not on PATH yet.
-    echo   Close this terminal and open a NEW one, then run: kalam help
+    echo [WARNING] 'trinetra' is linked but not on PATH yet.
+    echo   Close this terminal and open a NEW one, then run: trinetra help
 ) else (
-    echo [SUCCESS] 'kalam' is ready!
+    echo [SUCCESS] 'trinetra' is ready!
 )
 
 echo.
 echo ===================================================
 echo   Done. Open a NEW terminal and try:
 echo.
-echo     kalam help
-echo     kalam solve "MLIS deployment failed, pod OOMKilled"
-echo     kalam ask "what is HPE Private Cloud AI?"
-echo     kalam train
+echo     trinetra help
+echo     trinetra solve "MLIS deployment failed, pod OOMKilled"
+echo     trinetra ask "what is HPE Private Cloud AI?"
+echo     trinetra train
 echo ===================================================
 echo.
 echo Note: commands that need AI will auto-start the backend for you.

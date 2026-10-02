@@ -76,7 +76,7 @@ const RootNode = ({ data }: NodeProps) => (
   }}>
     <Laptop size={18} style={{ color: 'var(--hpe-green)' }} />
     <div>
-      <div style={{ fontSize: 13, fontWeight: 700 }}>Kalam</div>
+      <div style={{ fontSize: 13, fontWeight: 700 }}>Trinetra</div>
       <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{data.count} host(s) over SSH</div>
     </div>
     <Handle type="source" position={Position.Right} style={{ background: 'var(--hpe-green)', width: 7, height: 7 }} />

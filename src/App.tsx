@@ -763,7 +763,7 @@ export function App() {
         setErrorMsg(null);
         if (d.error || d.reachable === false) {
           const kept = lastGoodRef.current?.source === source ? lastGoodRef.current : null;
-          setErrorMsg(`${source}: ${d.error || 'host unreachable over SSH'}. Check the host on the Virtual Machines tab.${kept ? keptNote(kept.at) : ''}`);
+          setErrorMsg(`${source}: ${d.error || 'host unreachable over SSH'}. Check the host on the K8s Nodes tab.${kept ? keptNote(kept.at) : ''}`);
           if (!kept) {
             setStatus({ docker: { installed: false, version: '', running: false }, kubernetes: { installed: false, version: '', running: false, context: source } });
             setDockerContainers([]);
@@ -798,7 +798,7 @@ export function App() {
         if (d.warning) {
           setErrorMsg(`${source}: ${d.warning}`);
         } else if (!(d.containers || []).length && !(d.pods || []).length && !engines.length) {
-          setErrorMsg(`No container runtime was visible on ${source}. If this host does run containers (Docker, containerd, podman) or Kubernetes, give Kalam root there (Virtual Machines tab → shield icon) and re-scan — crictl and the kubeconfig are root-only.`);
+          setErrorMsg(`No container runtime was visible on ${source}. If this host does run containers (Docker, containerd, podman) or Kubernetes, give Trinetra root there (K8s Nodes tab → shield icon) and re-scan — crictl and the kubeconfig are root-only.`);
         }
       } catch (e: any) {
         setErrorMsg(`Failed to read ${source} over SSH: ${e.message}`);
@@ -891,7 +891,7 @@ export function App() {
         setErrorMsg(
           vmList.length
             ? 'Failed to read this machine’s cluster state. This machine may have no container runtime — switch the source picker above to one of your hosts, or to "All hosts".'
-            : 'Failed to read this machine’s cluster state. No container runtime or cluster answered here, and no VMs are configured yet (Virtual Machines tab).',
+            : 'Failed to read this machine’s cluster state. No container runtime or cluster answered here, and no nodes are configured yet (K8s Nodes tab).',
         );
       }
     } finally {
@@ -1372,7 +1372,7 @@ export function App() {
           <a href="#" className="sidebar-brand" onClick={(e) => { e.preventDefault(); setActiveTab('dashboard'); }}>
             <div className="brand-logo-icon" title="Hewlett Packard Enterprise">HPE</div>
             <div className="brand-info">
-              <h1><span className="hpe-text">HPE</span> Kalam</h1>
+              <h1><span className="hpe-text">HPE</span> Trinetra</h1>
               <span className="sub-text">GreenLake Console</span>
             </div>
           </a>
@@ -1425,7 +1425,7 @@ export function App() {
               onClick={() => setActiveTab('vms')}
             >
               <span className="nav-item-icon"><HardDrive size={18} /></span>
-              <span className="nav-item-text">Virtual Machines</span>
+              <span className="nav-item-text">K8s Nodes</span>
               <span className="nav-item-badge">SSH</span>
             </button>
             <button
@@ -1560,12 +1560,12 @@ export function App() {
                 {activeTab === 'pcaistack' && 'HPE Private Cloud AI — Stack Visualizer'}
                 {activeTab === 'docker' && 'Docker Container Operations'}
                 {activeTab === 'k8s' && 'Kubernetes Cluster Management'}
-                {activeTab === 'vms' && 'Virtual Machine Monitoring & SSH'}
+                {activeTab === 'vms' && 'K8s Nodes — Monitoring & SSH'}
                 {activeTab === 'logs' && 'Host Logs — /var/log Collection & Issue Detection'}
                 {activeTab === 'metrics' && 'Observability — Host Telemetry Over Time'}
                 {activeTab === 'history' && 'Cluster Change History — What Changed, When, and Who'}
                 {activeTab === 'gpu' && 'GPU Utilization — Which Model Runs Where, and How Hard'}
-                {activeTab === 'chat' && 'Kalam Agentic DevOps Assistant'}
+                {activeTab === 'chat' && 'Trinetra Agentic DevOps Assistant'}
                 {activeTab === 'security' && 'Container Security & CVE Patching'}
                 {activeTab === 'agents' && 'Multi-Agent Swarm Visualizer'}
                 {activeTab === 'pcai' && 'HPE Private Cloud AI Assistant'}
@@ -1619,7 +1619,7 @@ export function App() {
             </div>
 
             {vmList.length === 0 && (
-              <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="Add hosts on the Virtual Machines tab to view their Docker and Kubernetes here">
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="Add hosts on the K8s Nodes tab to view their Docker and Kubernetes here">
                 local only
               </span>
             )}
@@ -1912,10 +1912,10 @@ export function App() {
                 {/* Disabled: "Launch AI Console" card
                 {aiEnabled && <div className="panel-card">
                   <div className="panel-card-title">
-                    <h2><Cpu size={18} /> Kalam AI Assistant</h2>
+                    <h2><Cpu size={18} /> Trinetra AI Assistant</h2>
                   </div>
                   <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.4' }}>
-                    Ask Kalam to inspect logs, troubleshoot CrashLoopBackOff pods, scale deployments, or harden Docker images.
+                    Ask Trinetra to inspect logs, troubleshoot CrashLoopBackOff pods, scale deployments, or harden Docker images.
                   </p>
                   <button 
                     className="btn primary" 
@@ -2784,7 +2784,7 @@ export function App() {
                       />
                       <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                         OpenAI-compatible base URL. For an HPE <strong>MLIS</strong> deployment use its serving URL ending in <code>/v1</code>.
-                        Kalam's backend makes the call, so <em>this machine</em> must be on the network that hosts it (VPN / PCAI network) — use <strong>Test connection</strong> below to confirm.
+                        Trinetra's backend makes the call, so <em>this machine</em> must be on the network that hosts it (VPN / PCAI network) — use <strong>Test connection</strong> below to confirm.
                       </span>
                     </div>
                     <div className="form-group">

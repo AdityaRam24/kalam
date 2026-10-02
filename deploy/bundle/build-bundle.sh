@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build the self-contained Kalam bundle: image + chart + tools + installer in
+# Build the self-contained Trinetra bundle: image + chart + tools + installer in
 # one .tgz. Needs node/npm, python3, curl and tar — NOT Docker: the image is
 # assembled with crane on top of a pinned node:22-alpine.
 #
-#   deploy/bundle/build-bundle.sh            → deploy/bundle/dist/kalam-<ver>-bundle.tgz
+#   deploy/bundle/build-bundle.sh            → deploy/bundle/dist/trinetra-<ver>-bundle.tgz
 #
 # Env overrides: BASE_IMAGE, KUBECTL_VERSION, HELM_VERSION, CRANE_VERSION, SKIP_TESTS=1
 set -euo pipefail
@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HERE="$ROOT/deploy/bundle"
 CACHE="$HERE/.cache"
 DIST="$HERE/dist"
-CHART_DIR="$ROOT/deploy/helm/kalam"
+CHART_DIR="$ROOT/deploy/helm/trinetra"
 VERSION="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$CHART_DIR/Chart.yaml")"
 
 BASE_IMAGE="${BASE_IMAGE:-node:22-alpine@sha256:2c752226d477b4a886378baa95b9af252be59301b725fdb0b7e15208131505a8}"
@@ -80,12 +80,12 @@ cp package.json package-lock.json tsconfig.json tsconfig.server.json "$APP/"
 "$PY" "$HERE/prune-deps.py" "$APP"
 
 # ── image ────────────────────────────────────────────────────────────────────
-say "Image kalam:$VERSION on $BASE_IMAGE"
+say "Image trinetra:$VERSION on $BASE_IMAGE"
 mkdir -p "$WORK/etc"
 "$CRANE" export --platform linux/amd64 "$BASE_IMAGE" - | tar -xf - -C "$WORK" etc/passwd etc/group
 "$PY" "$HERE/make-layer.py" "$APP" "$CACHE/kubectl-linux-amd64" "$CACHE/tini-static-amd64" "$WORK/etc" "$WORK/layer.tar"
 
-B="$WORK/bundle/kalam-$VERSION"
+B="$WORK/bundle/trinetra-$VERSION"
 mkdir -p "$B"/{images,chart,manifests,bin}
 # Git Bash rewrites any argument that looks like a POSIX path ("/app",
 # "HOME=/home/kalam") into a Windows one before crane.exe sees it — which
@@ -99,13 +99,13 @@ MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
   -e NODE_ENV=production -e HOST=0.0.0.0 -e PORT=3001 -e HOME=/home/kalam \
   -e KALAM_VMS_PATH=/data/inventory/vms.json -e KALAM_LEARNED_PATH=/data/inventory/learned.json \
   -e KALAM_KB_PATH=/data/pcai/kb.json -e KALAM_HISTORY_DIR=/data/history -e KALAM_METRICS_DIR=/data/metrics \
-  -l org.opencontainers.image.title=kalam -l "org.opencontainers.image.version=$VERSION" \
+  -l org.opencontainers.image.title=trinetra -l "org.opencontainers.image.version=$VERSION" \
   -l "org.opencontainers.image.revision=$(git rev-parse --short HEAD)" \
   -l "org.opencontainers.image.base.name=$BASE_IMAGE" \
-  -t "kalam:$VERSION" -o "$(native "$B/images/kalam-$VERSION.tar")" >/dev/null
+  -t "trinetra:$VERSION" -o "$(native "$B/images/trinetra-$VERSION.tar")" >/dev/null
 
 # Refuse to ship an image whose config is not exactly what the chart expects.
-"$PY" - "$B/images/kalam-$VERSION.tar" <<'EOF'
+"$PY" - "$B/images/trinetra-$VERSION.tar" <<'EOF'
 import json, sys, tarfile
 t = tarfile.open(sys.argv[1])
 c = json.load(t.extractfile(json.load(t.extractfile('manifest.json'))[0]['Config']))['config']
@@ -138,10 +138,10 @@ chmod +x "$B/install.sh" "$B/uninstall.sh" "$B"/bin/*/*
 (cd "$B" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum >SHA256SUMS)
 
 mkdir -p "$DIST"
-OUTFILE="$DIST/kalam-$VERSION-bundle.tgz"
+OUTFILE="$DIST/trinetra-$VERSION-bundle.tgz"
 # Packed with explicit modes: a Windows build machine has no exec bits to
 # carry, and the scripts and bin/ tools must arrive executable.
-"$PY" - "$WORK/bundle" "kalam-$VERSION" "$OUTFILE" <<'EOF'
+"$PY" - "$WORK/bundle" "trinetra-$VERSION" "$OUTFILE" <<'EOF'
 import os, sys, tarfile
 base, top, out = sys.argv[1:4]
 def fix(ti):
@@ -153,6 +153,6 @@ def fix(ti):
 with tarfile.open(out, 'w:gz', compresslevel=6) as t:
     t.add(os.path.join(base, top), arcname=top, filter=fix)
 EOF
-cp "$B/chart/kalam-$VERSION.tgz" "$DIST/"
+cp "$B/chart/trinetra-$VERSION.tgz" "$DIST/"
 say "Done"
 ls -la "$DIST"

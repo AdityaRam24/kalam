@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Kalam installer — one command from this bundle to a running Kalam.
+# Trinetra installer — one command from this bundle to a running Trinetra.
 #
 #   ./install.sh                       # everything auto-detected
 #   ./install.sh --registry harbor.example.com/tools   # push to your registry
@@ -16,13 +16,13 @@
 #        anything else .......... a per-node loopback image cache
 #                                 (see image-cache.yaml) — no registry needed
 #   3. works out how the UI should be reached:
-#        PCAI (Istio ezaf-gateway) → https://kalam.<pcai-domain> behind SSO
+#        PCAI (Istio ezaf-gateway) → https://trinetra.<pcai-domain> behind SSO
 #        --host NAME             → an Ingress for NAME
 #        otherwise               → a NodePort on every node
 #   4. turns on persistence if the cluster has a default StorageClass
 #   5. helm upgrade --install, waits for the rollout, runs `helm test`
 #   6. prints the URL, and writes a PCAI-importable chart with the image baked
-#      in (out/kalam-<ver>-pcai-import.tgz) for the Import Framework UI.
+#      in (out/trinetra-<ver>-pcai-import.tgz) for the Import Framework UI.
 #
 # Re-running is safe: it is an upgrade with the same answers.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -40,12 +40,13 @@ else
   np() { printf '%s' "$1"; }
 fi
 HERE="$(np "$HERE")"
-CHART="$HERE/chart/kalam-$VERSION.tgz"
-IMAGE_TAR="$HERE/images/kalam-$VERSION.tar"
+CHART="$HERE/chart/trinetra-$VERSION.tgz"
+IMAGE_TAR="$HERE/images/trinetra-$VERSION.tar"
 OUT="$HERE/out"
 
-NAMESPACE=kalam
-RELEASE=kalam
+NAMESPACE=trinetra
+RELEASE=trinetra
+NS_SET=false; RELEASE_SET=false
 CONTEXT=""
 REGISTRY=""
 REGISTRY_USER="${REGISTRY_USER:-}"
@@ -76,17 +77,17 @@ SKIP_TEST=false
 
 usage() {
   cat <<EOF
-Kalam $VERSION installer
+Trinetra $VERSION installer
 
 Usage: ./install.sh [options]
 
 Where it goes
-  -n, --namespace NS        namespace (default: kalam)
-  -r, --release NAME        helm release name (default: kalam)
+  -n, --namespace NS        namespace (default: trinetra)
+  -r, --release NAME        helm release name (default: trinetra)
       --context CTX         kubeconfig context (default: current)
 
 Image (default: auto)
-      --registry REPO       push the image to REPO/kalam:$VERSION, e.g.
+      --registry REPO       push the image to REPO/trinetra:$VERSION, e.g.
                             harbor.example.com/tools or 10.0.0.5:5000
       --registry-user U     credentials for --registry (or env REGISTRY_USER);
       --registry-password P also creates an imagePullSecret (env REGISTRY_PASSWORD)
@@ -95,7 +96,7 @@ Image (default: auto)
       --cache-image IMG     registry image for the node cache (default registry:2)
 
 How it is reached (default: auto)
-      --domain DOMAIN       PCAI domain; UI at https://kalam.DOMAIN
+      --domain DOMAIN       PCAI domain; UI at https://trinetra.DOMAIN
       --host NAME           plain Ingress for NAME (non-PCAI clusters)
       --ingress-class C     ingress class (default: the cluster default)
       --tls-secret S        TLS secret for --host
@@ -137,8 +138,8 @@ die()  { printf '\n%sERROR:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 # ── args ─────────────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
   case "$1" in
-    -n|--namespace) NAMESPACE="$2"; shift 2 ;;
-    -r|--release) RELEASE="$2"; shift 2 ;;
+    -n|--namespace) NAMESPACE="$2"; NS_SET=true; shift 2 ;;
+    -r|--release) RELEASE="$2"; RELEASE_SET=true; shift 2 ;;
     --context) CONTEXT="$2"; shift 2 ;;
     --registry) REGISTRY="${2%/}"; shift 2 ;;
     --registry-user) REGISTRY_USER="$2"; shift 2 ;;
@@ -214,6 +215,20 @@ kc get --raw /readyz >/dev/null 2>&1 || kc get ns >/dev/null 2>&1 \
   || die "cannot reach the cluster of context '$CTX'. Check: $KUBECTL cluster-info"
 SERVER="$(kc config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
 ok "context $CTX ($SERVER)"
+# ── An install from before the rename (Kalam) ────────────────────────────────
+# Trinetra used to install as release "kalam" in namespace "kalam", and every
+# resource it created — the Deployment and its (immutable) label selector, the
+# Service, the PVC holding the node inventory, KB and change history — is named
+# after that release and chart. Installing "trinetra" next to it would start
+# from an empty PVC and leave both running. So, unless -n/-r say otherwise, the
+# existing release is upgraded IN PLACE: nameOverride=kalam keeps its resource
+# names and selector, so the data volume is reused as-is.
+LEGACY=false
+if ! $NS_SET && ! $RELEASE_SET && hc status kalam -n kalam >/dev/null 2>&1; then
+  NAMESPACE=kalam; RELEASE=kalam; LEGACY=true
+  ok "found the existing Kalam install (release kalam, namespace kalam): upgrading it in place to Trinetra — its data is kept"
+  info "(for a separate fresh install instead: ./install.sh -n trinetra -r trinetra)"
+fi
 ok "release '$RELEASE' in namespace '$NAMESPACE'"
 kc auth can-i create clusterrolebinding >/dev/null 2>&1 \
   || warn "you may lack rights to create a ClusterRole; if the install fails, add --set rbac.clusterWide=false"
@@ -242,7 +257,7 @@ push_to() {  # $1 = full target ref; prints digest
 
 case "$IMAGE_MODE" in
   registry)
-    info "pushing to $REGISTRY/kalam:$VERSION"
+    info "pushing to $REGISTRY/trinetra:$VERSION"
     REG_HOST="${REGISTRY%%/*}"
     if [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ] && ! $DRY_RUN; then
       printf '%s' "$REGISTRY_PASSWORD" | "$CRANE" auth login "$REG_HOST" -u "$REGISTRY_USER" --password-stdin >/dev/null \
@@ -250,11 +265,11 @@ case "$IMAGE_MODE" in
       ok "logged in to $REG_HOST as $REGISTRY_USER"
     fi
     if ! $DRY_RUN; then
-      IMG_DIGEST="$(push_to "$REGISTRY/kalam:$VERSION")" || die "push to $REGISTRY failed (see above). Wrong path, credentials, or add --insecure-registry for HTTP."
-      ok "pushed $REGISTRY/kalam:$VERSION@$IMG_DIGEST"
+      IMG_DIGEST="$(push_to "$REGISTRY/trinetra:$VERSION")" || die "push to $REGISTRY failed (see above). Wrong path, credentials, or add --insecure-registry for HTTP."
+      ok "pushed $REGISTRY/trinetra:$VERSION@$IMG_DIGEST"
     fi
-    IMG_REPO="$REGISTRY/kalam"
-    if [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then PULL_SECRET="kalam-registry"; fi
+    IMG_REPO="$REGISTRY/trinetra"
+    if [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then PULL_SECRET="trinetra-registry"; fi
     ;;
   local)
     $DRY_RUN || case "$CTX" in
@@ -263,29 +278,39 @@ case "$IMAGE_MODE" in
       k3d-*)     k3d image import "$IMAGE_TAR" -c "${CTX#k3d-}" ;;
       *)         docker load -i "$IMAGE_TAR" >/dev/null ;;
     esac
-    IMG_REPO="kalam"
-    ok "loaded kalam:$VERSION into the local cluster ($CTX)"
+    IMG_REPO="trinetra"
+    ok "loaded trinetra:$VERSION into the local cluster ($CTX)"
     ;;
   cache)
     info "no registry given — using a per-node loopback image cache (127.0.0.1:5959)"
     info "(to use your own registry instead: ./install.sh --registry REPO)"
-    IMG_REPO="127.0.0.1:5959/kalam"
+    IMG_REPO="127.0.0.1:5959/trinetra"
     if ! $DRY_RUN; then
+      if kc get ns kalam-image-cache >/dev/null 2>&1; then
+        # From before the rename: it listens on host port 5959 on every node, so
+        # the new cache could not start beside it. Empty it, then remove it.
+        info "removing the pre-rename image cache (kalam-image-cache), which holds port 5959 on each node"
+        for pod in $(kc -n kalam-image-cache get pods -o name 2>/dev/null); do
+          kc -n kalam-image-cache exec "$pod" -- sh -c 'rm -rf /var/lib/registry/*' >/dev/null 2>&1 || true
+        done
+        kc delete ns kalam-image-cache --wait=true --timeout=180s >/dev/null 2>&1 \
+          || die "could not remove the old kalam-image-cache namespace (it blocks port 5959). Delete it, then re-run."
+      fi
       sed "s#__CACHE_IMAGE__#$CACHE_IMAGE#" "$HERE/manifests/image-cache.yaml" | kc apply -f - >/dev/null
-      if ! kc -n kalam-image-cache rollout status ds/kalam-image-cache --timeout=180s >/dev/null 2>&1; then
-        kc -n kalam-image-cache get pods -o wide >&2 || true
+      if ! kc -n trinetra-image-cache rollout status ds/trinetra-image-cache --timeout=180s >/dev/null 2>&1; then
+        kc -n trinetra-image-cache get pods -o wide >&2 || true
         die "the image cache did not start on every node (above). If the cluster cannot pull '$CACHE_IMAGE', pass --cache-image <mirror>/registry:2, or use --registry."
       fi
-      PODS="$(kc -n kalam-image-cache get pods -l app.kubernetes.io/name=kalam-image-cache -o jsonpath='{range .items[*]}{.metadata.name}={.spec.nodeName}{"\n"}{end}')"
+      PODS="$(kc -n trinetra-image-cache get pods -l app.kubernetes.io/name=trinetra-image-cache -o jsonpath='{range .items[*]}{.metadata.name}={.spec.nodeName}{"\n"}{end}')"
       port=15959
       while IFS='=' read -r pod node; do
         [ -n "$pod" ] || continue
         port=$((port + 1))
-        kc -n kalam-image-cache port-forward "pod/$pod" "$port:5959" >"$WORK/pf-$pod.log" 2>&1 &
+        kc -n trinetra-image-cache port-forward "pod/$pod" "$port:5959" >"$WORK/pf-$pod.log" 2>&1 &
         PF_PID=$!
         for _ in $(seq 1 30); do grep -q Forwarding "$WORK/pf-$pod.log" 2>/dev/null && break; sleep 0.5; done
         INSECURE_REGISTRY=true
-        d="$(push_to "127.0.0.1:$port/kalam:$VERSION")" || die "could not push into the cache on node $node (see above)"
+        d="$(push_to "127.0.0.1:$port/trinetra:$VERSION")" || die "could not push into the cache on node $node (see above)"
         IMG_DIGEST="$d"
         kill "$PF_PID" 2>/dev/null || true; PF_PID=""
         ok "node $node"
@@ -329,7 +354,7 @@ if [ "$EXPOSE" = nodeport ]; then
 fi
 
 case "$EXPOSE" in
-  pcai)      ok "PCAI gateway: https://kalam.$DOMAIN$($NO_SSO && echo ' (NO SSO)' || echo ', behind platform SSO')" ;;
+  pcai)      ok "PCAI gateway: https://trinetra.$DOMAIN$($NO_SSO && echo ' (NO SSO)' || echo ', behind platform SSO')" ;;
   ingress)   ok "Ingress: http$([ -n "$TLS_SECRET" ] && echo s)://$HOST (class: ${INGRESS_CLASS:-cluster default})" ;;
   nodeport)  ok "NodePort on every node (${NODE_IPS:-no node IPs found})" ;;
   clusterip) ok "ClusterIP only — reach it with kubectl port-forward" ;;
@@ -341,7 +366,7 @@ if [ "$PERSISTENCE" = auto ]; then
   if [ -n "$STORAGE_CLASS" ] || [ -n "$DEFAULT_SC" ]; then PERSISTENCE=on; else PERSISTENCE=off; fi
 fi
 if [ "$PERSISTENCE" = on ]; then ok "state on a 2Gi PVC (${STORAGE_CLASS:-${DEFAULT_SC:-default StorageClass}})"
-else warn "no default StorageClass: state (VM inventory, KB, history) resets on pod restart. Use --storage-class SC to keep it."; fi
+else warn "no default StorageClass: state (node inventory, KB, history) resets on pod restart. Use --storage-class SC to keep it."; fi
 
 # ── 4. values ────────────────────────────────────────────────────────────────
 VALUES="$WORK/values.yaml"
@@ -359,7 +384,7 @@ VALUES="$WORK/values.yaml"
     echo "  enabled: true"
     echo "  domainName: \"$DOMAIN\""
     echo "  virtualService:"
-    echo "    endpoint: \"kalam.$DOMAIN\""
+    echo "    endpoint: \"trinetra.$DOMAIN\""
     echo "  authorizationPolicy:"
     echo "    enabled: $($NO_SSO && echo false || echo true)"
   else
@@ -383,6 +408,13 @@ VALUES="$WORK/values.yaml"
     # The API checks the browser's Origin; node IPs have to be on the list.
     printf 'config:\n  allowedHosts: "%s"\n' "$NODE_IPS"
   fi
+  if $LEGACY; then
+    echo "nameOverride: kalam    # upgrade of a pre-rename install: keep its resource names and data"
+    if [ -z "$SSH_KEY" ] && kc -n "$NAMESPACE" get secret kalam-ssh >/dev/null 2>&1; then
+      printf 'ssh:\n  secretName: kalam-ssh\n  keyFile: id_rsa\n'
+      kc -n "$NAMESPACE" get secret kalam-ssh -o jsonpath='{.data.known_hosts}' 2>/dev/null | grep -q . && echo "  knownHosts: known_hosts"
+    fi
+  fi
   echo "persistence:"
   echo "  enabled: $([ "$PERSISTENCE" = on ] && echo true || echo false)"
   [ -n "$STORAGE_CLASS" ] && echo "  storageClass: \"$STORAGE_CLASS\""
@@ -394,16 +426,16 @@ VALUES="$WORK/values.yaml"
     echo "llm:"
     if [ -n "$GEMINI_KEY" ] && [ -z "$LLM_URL" ]; then
       echo "  provider: gemini"
-      echo "  existingSecret: kalam-llm"
+      echo "  existingSecret: trinetra-llm"
     else
       echo "  provider: local"
     fi
     [ -n "$LLM_URL" ] && echo "  localUrl: \"$LLM_URL\""
     [ -n "$LLM_MODEL" ] && echo "  localModel: \"$LLM_MODEL\""
-    [ -n "$GEMINI_KEY" ] && [ -n "$LLM_URL" ] && echo "  existingSecret: kalam-llm"
+    [ -n "$GEMINI_KEY" ] && [ -n "$LLM_URL" ] && echo "  existingSecret: trinetra-llm"
   fi
   if [ -n "$SSH_KEY" ]; then
-    printf 'ssh:\n  secretName: kalam-ssh\n  keyFile: id_rsa\n'
+    printf 'ssh:\n  secretName: trinetra-ssh\n  keyFile: id_rsa\n'
     [ -n "$KNOWN_HOSTS" ] && echo "  knownHosts: known_hosts"
   fi
 } >"$VALUES"
@@ -429,11 +461,11 @@ awk -v repo="$IMG_REPO" -v dig="$IMG_DIGEST" -v ps="$PULL_SECRET" -v nollm="$NO_
   inimg && /^  repository:/ { print "  repository: " repo "   # set by install.sh"; next }
   inimg && /^  digest:/ { print "  digest: \"" dig "\""; next }
   ps != "" && /^imagePullSecrets: \[\]/ { print "imagePullSecrets:"; print "  - name: " ps; next }
-  { print }' "$WORK/pkg/kalam/values.yaml" >"$WORK/pkg/values.new"
-mv "$WORK/pkg/values.new" "$WORK/pkg/kalam/values.yaml"
-hc package "$WORK/pkg/kalam" -d "$WORK" >/dev/null
-mv "$WORK/kalam-$VERSION.tgz" "$OUT/kalam-$VERSION-pcai-import.tgz"
-ok "$OUT/kalam-$VERSION-pcai-import.tgz"
+  { print }' "$WORK/pkg/trinetra/values.yaml" >"$WORK/pkg/values.new"
+mv "$WORK/pkg/values.new" "$WORK/pkg/trinetra/values.yaml"
+hc package "$WORK/pkg/trinetra" -d "$WORK" >/dev/null
+mv "$WORK/trinetra-$VERSION.tgz" "$OUT/trinetra-$VERSION-pcai-import.tgz"
+ok "$OUT/trinetra-$VERSION-pcai-import.tgz"
 if [ "$IMAGE_MODE" = cache ]; then
   info "(it pulls from the node cache this run filled; for a cluster this script has not"
   info " run against, re-run with --registry so the image is somewhere every node can reach)"
@@ -441,7 +473,7 @@ fi
 
 if $PACKAGE_ONLY; then
   step "Done (--package-only)"
-  info "PCAI → Tools & Frameworks → Import Framework → upload $OUT/kalam-$VERSION-pcai-import.tgz"
+  info "PCAI → Tools & Frameworks → Import Framework → upload $OUT/trinetra-$VERSION-pcai-import.tgz"
   [ -n "$PULL_SECRET" ] && info "create the pull secret '$PULL_SECRET' in the target namespace first (see README)"
   exit 0
 fi
@@ -470,12 +502,12 @@ if [ -n "$SSH_KEY" ]; then
     [ -f "$KNOWN_HOSTS" ] || die "--known-hosts $KNOWN_HOSTS: no such file"
     args+=(--from-file=known_hosts="$KNOWN_HOSTS")
   fi
-  apply_secret generic kalam-ssh "${args[@]}"
-  ok "ssh key secret kalam-ssh"
+  apply_secret generic trinetra-ssh "${args[@]}"
+  ok "ssh key secret trinetra-ssh"
 fi
 if [ -n "$GEMINI_KEY" ]; then
-  apply_secret generic kalam-llm --from-literal=GEMINI_API_KEY="$GEMINI_KEY"
-  ok "gemini key secret kalam-llm"
+  apply_secret generic trinetra-llm --from-literal=GEMINI_API_KEY="$GEMINI_KEY"
+  ok "gemini key secret trinetra-llm"
 fi
 
 if ! hc upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$VALUES" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} --wait --timeout 6m >"$WORK/helm.log" 2>&1; then
@@ -502,10 +534,10 @@ if ! $SKIP_TEST; then
 fi
 
 # ── 7. where ─────────────────────────────────────────────────────────────────
-step "Kalam is running"
+step "Trinetra is running"
 FULL="$(kc -n "$NAMESPACE" get svc -l app.kubernetes.io/instance="$RELEASE" -o jsonpath='{.items[0].metadata.name}')"
 case "$EXPOSE" in
-  pcai)    info "${B}https://kalam.$DOMAIN${N}" ;;
+  pcai)    info "${B}https://trinetra.$DOMAIN${N}" ;;
   ingress) info "${B}http$([ -n "$TLS_SECRET" ] && echo s)://$HOST${N}   (DNS for $HOST must point at your ingress)" ;;
   nodeport)
     NP="$(kc -n "$NAMESPACE" get svc "$FULL" -o jsonpath='{.spec.ports[0].nodePort}')"

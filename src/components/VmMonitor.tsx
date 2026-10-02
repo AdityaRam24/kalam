@@ -316,7 +316,7 @@ export const VmMonitor: React.FC = () => {
         body: JSON.stringify({ ...form, password: form.password || undefined, keyPath: form.keyPath || undefined, via: form.via || undefined }),
       });
       const data = await res.json();
-      if (!res.ok) { setFormErr(data.error || 'Failed to add VM'); return; }
+      if (!res.ok) { setFormErr(data.error || 'Failed to add node'); return; }
       // Saved either way — but if the login did not go through, keep the form
       // open with the reason so the password can be corrected immediately.
       if (data.warning) {
@@ -376,7 +376,7 @@ export const VmMonitor: React.FC = () => {
   };
 
   const removeVm = async (name: string) => {
-    if (!confirm(`Remove VM "${name}" from the inventory?`)) return;
+    if (!confirm(`Remove node "${name}" from the inventory?`)) return;
     await fetch(`/api/vms/${encodeURIComponent(name)}`, { method: 'DELETE' });
     loadVms();
   };
@@ -418,13 +418,13 @@ export const VmMonitor: React.FC = () => {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div className="panel-card">
         <div className="panel-card-title">
-          <h2><Server size={18} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> Virtual Machines</h2>
+          <h2><Server size={18} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> K8s Nodes</h2>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn secondary" onClick={loadVms} style={{ padding: '6px 12px' }}>
               <RefreshCw size={14} className={loading ? 'loader' : ''} /> Refresh
             </button>
             <button className="btn primary" onClick={() => setShowAdd((s) => !s)} style={{ padding: '6px 12px' }}>
-              <Plus size={14} /> Add VM
+              <Plus size={14} /> Add Node
             </button>
           </div>
         </div>
@@ -476,7 +476,7 @@ export const VmMonitor: React.FC = () => {
             <tbody>
               {vms.length === 0 ? (
                 <tr><td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-secondary)', fontStyle: 'italic', padding: 32 }}>
-                  {loading ? 'Loading inventory…' : 'No VMs yet. Click “Add VM” to register a host for SSH monitoring.'}
+                  {loading ? 'Loading inventory…' : 'No nodes yet. Click “Add Node” to register a host for SSH monitoring.'}
                 </td></tr>
               ) : vms.map((v) => {
                 const m = metrics[v.name];
@@ -606,7 +606,7 @@ export const VmMonitor: React.FC = () => {
 
               <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 10px' }}>
                 Discovery reads containerd (<code>crictl</code>), kubelet config, service logs and package history — all of
-                which an ordinary login cannot see, so an unelevated host looks almost empty. Pick how Kalam should become
+                which an ordinary login cannot see, so an unelevated host looks almost empty. Pick how Trinetra should become
                 root; the choice is verified against the host before it is saved.
               </p>
 
@@ -631,7 +631,7 @@ export const VmMonitor: React.FC = () => {
                   {already ? (
                     <p style={{ fontSize: 12.5, color: 'var(--hpe-green)', margin: '0 0 10px' }}>
                       <Check size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
-                      This login is already root — nothing to change. Everything Kalam runs here is fully privileged.
+                      This login is already root — nothing to change. Everything Trinetra runs here is fully privileged.
                     </p>
                   ) : (
                     <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
@@ -693,7 +693,7 @@ export const VmMonitor: React.FC = () => {
       {/* Topology: inventory + SSH paths, expandable into analyzed components */}
       <div className="panel-card">
         <div className="panel-card-title">
-          <h2><Share2 size={18} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> VM Topology</h2>
+          <h2><Share2 size={18} style={{ color: 'var(--hpe-green)', marginRight: 6 }} /> Node Topology</h2>
           <button className="btn secondary" onClick={() => setShowTopology((s) => !s)} style={{ padding: '6px 12px' }}>
             {showTopology ? 'Hide' : 'Show'}
           </button>

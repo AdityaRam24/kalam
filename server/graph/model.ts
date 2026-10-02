@@ -18,7 +18,7 @@
 import type { ComponentInfo } from '../pcai/components.js';
 
 export type NodeKind =
-  | 'vm'         // an inventory VM Kalam can SSH into
+  | 'vm'         // an inventory VM Trinetra can SSH into
   | 'k8sNode'    // a Kubernetes node object
   | 'pod'
   | 'workload'   // Deployment / DaemonSet / StatefulSet / Job (pod owner)

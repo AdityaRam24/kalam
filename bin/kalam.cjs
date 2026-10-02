@@ -382,7 +382,7 @@ async function ask(text, history) {
     if (printedHeader) return;
     printedHeader = true;
     stopSpinner(spin);
-    const tag = intent === 'devops' ? 'Kalam · DevOps' : intent === 'diagnose' ? 'Kalam · Diagnosis' : 'Kalam · PCAI';
+    const tag = intent === 'devops' ? 'Trinetra · DevOps' : intent === 'diagnose' ? 'Trinetra · Diagnosis' : 'Trinetra · PCAI';
     console.log(`${colors.green}${colors.bold}⏺ ${tag}${colors.reset}`);
   };
 
@@ -481,9 +481,9 @@ async function runAction(action) {
 // ---------------------------------------------------------------------------
 function printBanner(kb) {
   console.log(`
-${colors.green}${colors.bold}╦╔═╔═╗╦  ╔═╗╔╦╗${colors.reset}   ${colors.gray}v${VERSION}${colors.reset}
-${colors.green}${colors.bold}╠╩╗╠═╣║  ╠═╣║║║${colors.reset}   ${colors.gray}HPE Private Cloud AI · Agentic DevOps${colors.reset}
-${colors.green}${colors.bold}╩ ╩╩ ╩╩═╝╩ ╩╩ ╩${colors.reset}
+${colors.green}${colors.bold}╔╦╗╦═╗╦╔╗╔╔═╗╔╦╗╦═╗╔═╗${colors.reset}   ${colors.gray}v${VERSION}${colors.reset}
+${colors.green}${colors.bold} ║ ╠╦╝║║║║║╣  ║ ╠╦╝╠═╣${colors.reset}   ${colors.gray}HPE Private Cloud AI · Agentic DevOps${colors.reset}
+${colors.green}${colors.bold} ╩ ╩╚═╩╝╚╝╚═╝ ╩ ╩╚═╩ ╩${colors.reset}
 ${colors.gray}  Engine ${colors.reset}${engineLabel()}   ${colors.gray}Mode ${colors.reset}${colors.bold}${session.mode}${colors.reset}   ${colors.gray}KB ${colors.reset}${kb && kb.ready ? `${colors.green}${kb.chunks} chunks · ${kb.embedProvider !== 'none' ? 'vector' : 'lexical'}${colors.reset}` : `${colors.yellow}not trained${colors.reset}`}
 ${colors.gray}  Just type to ask. ${colors.reset}${colors.bold}/help${colors.reset}${colors.gray} for commands · ${colors.reset}${colors.bold}/model${colors.reset}${colors.gray} to switch model · ${colors.reset}${colors.bold}/exit${colors.reset}${colors.gray} to quit.${colors.reset}
 `);
@@ -530,7 +530,7 @@ async function startRepl(initialMode) {
   let lastActions = [];     // suggested actions from the last reply
   let pendingModels = null; // when awaiting a /model numeric selection
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: `${colors.green}${colors.bold}kalam ›${colors.reset} ` });
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: `${colors.green}${colors.bold}trinetra ›${colors.reset} ` });
   const reprompt = () => { console.log(); rl.prompt(); };
 
   // Local shell escape: lines starting with "!" run on THIS machine with live
@@ -658,7 +658,7 @@ async function startRepl(initialMode) {
           else if (sub === 'health') await vmHealth(vmName);
           else if (sub === 'logs' || sub === 'scan') await vmLogs(vmName, subRest);
           else if (sub === 'journal' || sub === 'journalctl') {
-            if (subRest.includes('-f') || subRest.includes('--follow')) console.log(`${colors.yellow}Follow mode needs its own terminal — run: ${colors.bold}kalam vm journal ${vmName || '<name>'} ${subRest.join(' ')}${colors.reset}`);
+            if (subRest.includes('-f') || subRest.includes('--follow')) console.log(`${colors.yellow}Follow mode needs its own terminal — run: ${colors.bold}trinetra vm journal ${vmName || '<name>'} ${subRest.join(' ')}${colors.reset}`);
             else await vmJournal(vmName, subRest);
           }
           else if (sub === 'service' || sub === 'svc') {
@@ -666,7 +666,7 @@ async function startRepl(initialMode) {
             // The REPL owns stdin, so a y/N prompt can't be asked here — require --yes instead.
             await vmService(vmName, extra[0], (extra[1] || 'status').toLowerCase(), { yes: subRest.includes('--yes') || subRest.includes('-y'), interactive: false });
           }
-          else if (sub === 'ssh') console.log(`${colors.yellow}Interactive SSH doesn't fit inside the REPL — run: ${colors.bold}kalam vm ssh ${vmName || '<name>'}${colors.reset}${colors.yellow} in its own terminal.${colors.reset}`);
+          else if (sub === 'ssh') console.log(`${colors.yellow}Interactive SSH doesn't fit inside the REPL — run: ${colors.bold}trinetra vm ssh ${vmName || '<name>'}${colors.reset}${colors.yellow} in its own terminal.${colors.reset}`);
           else await listVmsCli();
           return reprompt();
         }
@@ -779,7 +779,7 @@ async function showStatus() {
 
 async function listResources(type) {
   if (!type || (type !== 'docker' && type !== 'k8s')) {
-    console.log(`\n${colors.red}❌ Use 'kalam list docker' or 'kalam list k8s'.${colors.reset}\n`); return;
+    console.log(`\n${colors.red}❌ Use 'trinetra list docker' or 'trinetra list k8s'.${colors.reset}\n`); return;
   }
   if (!(await ensureServer())) return;
   console.log(`\n${colors.bold}Fetching ${type === 'docker' ? 'Docker Containers' : 'Kubernetes Pods'}...${colors.reset}\n`);
@@ -807,7 +807,7 @@ async function listResources(type) {
 }
 
 async function scanContainer(target) {
-  if (!target) { console.log(`\n${colors.red}❌ Usage: kalam scan <container-id>${colors.reset}\n`); return; }
+  if (!target) { console.log(`\n${colors.red}❌ Usage: trinetra scan <container-id>${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   try {
     const containers = await getJSON('/api/docker/containers');
@@ -823,7 +823,7 @@ async function scanContainer(target) {
     });
     if (scan.fixAction) {
       console.log(`\n${colors.green}${colors.bold}⚡ Fix:${colors.reset} ${scan.recommendation}`);
-      console.log(`  Run ${colors.bold}kalam fix ${container.name}${colors.reset} to auto-patch.\n`);
+      console.log(`  Run ${colors.bold}trinetra fix ${container.name}${colors.reset} to auto-patch.\n`);
     } else {
       console.log(`\n${colors.green}✅ No fix needed.${colors.reset}\n`);
     }
@@ -833,7 +833,7 @@ async function scanContainer(target) {
 }
 
 async function fixContainer(target) {
-  if (!target) { console.log(`\n${colors.red}❌ Usage: kalam fix <container-id>${colors.reset}\n`); return; }
+  if (!target) { console.log(`\n${colors.red}❌ Usage: trinetra fix <container-id>${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   try {
     const containers = await getJSON('/api/docker/containers');
@@ -880,7 +880,7 @@ async function learnFiles(files) {
     if (piped) docs.push({ title: `pasted-${new Date().toISOString().slice(0, 10)}`, text: piped });
   }
   if (!docs.length) {
-    console.log(`\n${colors.yellow}Usage: kalam learn <file...>   (or pipe text: cat runbook.md | kalam learn)${colors.reset}\n`);
+    console.log(`\n${colors.yellow}Usage: trinetra learn <file...>   (or pipe text: cat runbook.md | trinetra learn)${colors.reset}\n`);
     return;
   }
   for (const d of docs) {
@@ -894,7 +894,7 @@ async function learnFiles(files) {
       console.log(`${colors.red}❌ ${d.title}: ${e.message}${colors.reset}`);
     }
   }
-  console.log(`${colors.gray}The assistant will use this knowledge in every future answer. See 'kalam learned' for the list.${colors.reset}`);
+  console.log(`${colors.gray}The assistant will use this knowledge in every future answer. See 'trinetra learned' for the list.${colors.reset}`);
 }
 
 async function showLearned() {
@@ -905,7 +905,7 @@ async function showLearned() {
     (res.docs || []).slice(0, 30).forEach((d) => {
       console.log(`  ${colors.cyan}${d.kind.padEnd(8)}${colors.reset} ${d.title.slice(0, 60).padEnd(62)} ${colors.gray}${(d.addedAt || '').slice(0, 10)}${colors.reset}`);
     });
-    if (!res.count) console.log(`  ${colors.gray}Nothing yet — try: kalam learn my-runbook.md${colors.reset}`);
+    if (!res.count) console.log(`  ${colors.gray}Nothing yet — try: trinetra learn my-runbook.md${colors.reset}`);
   } catch (e) {
     console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
   }
@@ -932,11 +932,11 @@ async function listVmsCli() {
     const info = m.error ? `${colors.red}${m.error}${colors.reset}` : `${colors.gray}load ${m.load || '—'} · mem ${m.mem || '—'} · up ${m.up || '—'}${colors.reset}`;
     console.log(`  ${dot} ${colors.bold}${v.name.padEnd(16)}${colors.reset} ${colors.cyan}${v.user}@${v.host}:${v.port}${colors.reset}${via}  ${info}`);
   });
-  console.log(`\n${colors.gray}Commands: kalam vm ssh <name> · kalam vm diagnose <name> · kalam vm discover <name> · kalam vm peers <name>${colors.reset}\n`);
+  console.log(`\n${colors.gray}Commands: trinetra vm ssh <name> · trinetra vm diagnose <name> · trinetra vm discover <name> · trinetra vm peers <name>${colors.reset}\n`);
 }
 
 async function vmSsh(name) {
-  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm ssh <name>${colors.reset}\n`); return; }
+  if (!name) { console.log(`\n${colors.yellow}Usage: trinetra vm ssh <name>${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   try {
     const { command } = await getJSON(`/api/vms/ssh-command/${encodeURIComponent(name)}`);
@@ -949,7 +949,7 @@ async function vmSsh(name) {
 }
 
 async function vmDiagnose(name) {
-  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm diagnose <name>${colors.reset}\n`); return; }
+  if (!name) { console.log(`\n${colors.yellow}Usage: trinetra vm diagnose <name>${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   const spin = startSpinner(`Inspecting nodes, pods, logs and events on ${name} (read-only)…`);
   try {
@@ -992,7 +992,7 @@ async function vmDiagnose(name) {
 }
 
 async function vmDiscover(name) {
-  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm discover <name>${colors.reset}\n`); return; }
+  if (!name) { console.log(`\n${colors.yellow}Usage: trinetra vm discover <name>${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   const spin = startSpinner(`Enumerating workloads and services on ${name}…`);
   try {
@@ -1016,7 +1016,7 @@ async function vmDiscover(name) {
 // Build the dependency graph for a host and show what it found — including the
 // ranked root causes, which is the whole point of having a graph.
 async function vmGraph(name) {
-  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm graph <name>${colors.reset}\n`); return; }
+  if (!name) { console.log(`\n${colors.yellow}Usage: trinetra vm graph <name>${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   const spin = startSpinner(`Building the dependency graph for ${name} (read-only)…`);
   try {
@@ -1042,7 +1042,7 @@ async function vmGraph(name) {
       console.log(`    ${c.explanation}`);
       console.log(`    ${colors.gray}id: ${c.id}${colors.reset}`);
     });
-    console.log(`\n${colors.gray}Next: kalam vm impact ${name} <id>  — what breaks if that stops.${colors.reset}\n`);
+    console.log(`\n${colors.gray}Next: trinetra vm impact ${name} <id>  — what breaks if that stops.${colors.reset}\n`);
   } catch (e) {
     stopSpinner(spin);
     console.log(`${colors.red}❌ ${e.message}${colors.reset}`);
@@ -1073,12 +1073,12 @@ async function historyCli(args) {
 ${colors.bold}🕓 Change history · ${source}${colors.reset}  ${colors.gray}last ${since}${colors.reset}`);
     console.log(`   ${colors.gray}${d.trackedObjects || 0} objects tracked${d.capturedAt ? ` · last capture ${new Date(d.capturedAt).toLocaleString()}` : ''}${colors.reset}`);
     if (d.poller && !d.poller.enabled) {
-      console.log(`   ${colors.gray}Background capture is off. Set KALAM_HISTORY=1 before starting the server, or run: kalam history capture${colors.reset}`);
+      console.log(`   ${colors.gray}Background capture is off. Set KALAM_HISTORY=1 before starting the server, or run: trinetra history capture${colors.reset}`);
     }
 
     if (!changes.length) {
       console.log(`
-   ${d.capturedAt ? colors.green + 'Nothing changed in this window.' : colors.yellow + 'No baseline captured yet — run: kalam history capture'}${colors.reset}
+   ${d.capturedAt ? colors.green + 'Nothing changed in this window.' : colors.yellow + 'No baseline captured yet — run: trinetra history capture'}${colors.reset}
 `);
       return;
     }
@@ -1093,7 +1093,7 @@ ${colors.bold}🕓 Change history · ${source}${colors.reset}  ${colors.gray}las
       console.log(`   ${colors.gray}${when}${c.cause ? ` · cause: ${c.cause}` : ''}${colors.reset}`);
     }
     console.log(`
-${colors.gray}Filter with --since 7d --source <vm>. Capture now: kalam history capture${colors.reset}
+${colors.gray}Filter with --since 7d --source <vm>. Capture now: trinetra history capture${colors.reset}
 `);
   } catch (e) {
     stopSpinner(spin);
@@ -1115,7 +1115,7 @@ ${colors.bold}📸 Captured ${source}${colors.reset} ${colors.gray}${d.objects} 
     for (const n of d.notes || []) console.log(`   ${colors.gray}${n}${colors.reset}`);
     console.log(`   ${d.changes ? colors.green + d.changes + ' change(s) recorded' : colors.gray + 'no changes'}${colors.reset}`);
     console.log(`
-${colors.gray}See them with: kalam history --source ${source}${colors.reset}
+${colors.gray}See them with: trinetra history --source ${source}${colors.reset}
 `);
   } catch (e) {
     stopSpinner(spin);
@@ -1131,7 +1131,7 @@ function argValue(args, flag) {
 
 // "What breaks if I restart this?" — the blast radius of one graph node.
 async function vmImpact(name, id) {
-  if (!name || !id) { console.log(`\n${colors.yellow}Usage: kalam vm impact <name> <node-id>${colors.reset}\n${colors.gray}Get ids from: kalam vm graph <name>${colors.reset}\n`); return; }
+  if (!name || !id) { console.log(`\n${colors.yellow}Usage: trinetra vm impact <name> <node-id>${colors.reset}\n${colors.gray}Get ids from: trinetra vm graph <name>${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   const spin = startSpinner(`Tracing what depends on ${id}…`);
   try {
@@ -1161,7 +1161,7 @@ async function vmImpact(name, id) {
 }
 
 async function vmPeers(name) {
-  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm peers <name>${colors.reset}\n`); return; }
+  if (!name) { console.log(`\n${colors.yellow}Usage: trinetra vm peers <name>${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   const spin = startSpinner(`Scanning for peer VMs visible from ${name}…`);
   try {
@@ -1187,7 +1187,7 @@ async function vmPeers(name) {
 const SEV_COLOR = { critical: colors.red, warning: colors.yellow, info: colors.cyan, ok: colors.green };
 
 async function vmHealth(name) {
-  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm health <name>${colors.reset}\n`); return; }
+  if (!name) { console.log(`\n${colors.yellow}Usage: trinetra vm health <name>${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   const spin = startSpinner(`Collecting system facts from ${name}…`);
   try {
@@ -1205,7 +1205,7 @@ async function vmHealth(name) {
     console.log(`\n${colors.bold}Health checks${colors.reset}`);
     (d.health || []).forEach((h) => {
       console.log(`   ${SEV_COLOR[h.status] || ''}${h.status.toUpperCase().padEnd(8)}${colors.reset} ${colors.bold}${h.title}${colors.reset} ${colors.gray}— ${h.detail}${colors.reset}`);
-      if (h.unit) console.log(`            ${colors.green}→${colors.reset} kalam vm service ${name} ${h.unit} status|restart`);
+      if (h.unit) console.log(`            ${colors.green}→${colors.reset} trinetra vm service ${name} ${h.unit} status|restart`);
     });
     const bad = (d.services || []).filter((s) => s.active === 'failed' || s.sub === 'auto-restart');
     if (bad.length) {
@@ -1220,7 +1220,7 @@ async function vmHealth(name) {
 }
 
 async function vmLogs(name, args = []) {
-  if (!name) { console.log(`\n${colors.yellow}Usage: kalam vm logs <name> [--hours 1|6|24|72|168|720] [--all]${colors.reset}\n`); return; }
+  if (!name) { console.log(`\n${colors.yellow}Usage: trinetra vm logs <name> [--hours 1|6|24|72|168|720] [--all]${colors.reset}\n`); return; }
   if (!(await ensureServer())) return;
   const hi = args.indexOf('--hours');
   const hours = hi >= 0 ? Number(args[hi + 1]) : 24;
@@ -1242,7 +1242,7 @@ async function vmLogs(name, args = []) {
       console.log(`    ${colors.cyan}${(f.samples[f.samples.length - 1] || f.message).slice(0, 200)}${colors.reset}`);
       console.log(`    ${colors.gray}${f.explain}${colors.reset}`);
       (f.checks || []).slice(0, 3).forEach((ch) => console.log(`    ${colors.green}check →${colors.reset} ${ch}`));
-      (f.units || []).forEach((u) => console.log(`    ${colors.green}service →${colors.reset} kalam vm service ${name} ${u} status|restart`));
+      (f.units || []).forEach((u) => console.log(`    ${colors.green}service →${colors.reset} trinetra vm service ${name} ${u} status|restart`));
     });
     const hidden = (d.findings || []).length - list.length;
     if (hidden > 0) console.log(`\n${colors.gray}${hidden} more finding(s) — use --all to list them.${colors.reset}`);
@@ -1302,7 +1302,7 @@ function parseJournalArgs(args) {
 
 async function vmJournal(name, args = []) {
   if (!name) {
-    console.log(`\n${colors.yellow}Usage: kalam vm journal <name> [-u unit] [-t ident] [-k] [-p err|err..warning] [-b [-1|id]]
+    console.log(`\n${colors.yellow}Usage: trinetra vm journal <name> [-u unit] [-t ident] [-k] [-p err|err..warning] [-b [-1|id]]
        [-S since] [-U until] [-g regex | --text str] [--case-sensitive] [FIELD=value]
        [-o short-iso|verbose|json|cat|...] [--output-fields A,B] [-n lines] [-r] [-x] [--utc] [--no-hostname] [-f]${colors.reset}\n`);
     return;
@@ -1361,7 +1361,7 @@ function confirmPrompt(question) {
 }
 
 async function vmService(name, unit, action = 'status', { yes = false, interactive = true } = {}) {
-  if (!name || !unit) { console.log(`\n${colors.yellow}Usage: kalam vm service <name> <unit> [status|start|restart] [--yes]${colors.reset}\n`); return; }
+  if (!name || !unit) { console.log(`\n${colors.yellow}Usage: trinetra vm service <name> <unit> [status|start|restart] [--yes]${colors.reset}\n`); return; }
   if (!['status', 'start', 'restart'].includes(action)) {
     console.log(`${colors.red}❌ action must be status, start or restart (stop is deliberately not offered).${colors.reset}`);
     return;
@@ -1408,13 +1408,13 @@ function readStdin() {
 
 function showHelp() {
   console.log(`
-${colors.green}${colors.bold}╦╔═╔═╗╦  ╔═╗╔╦╗
-╠╩╗╠═╣║  ╠═╣║║║
-╩ ╩╩ ╩╩═╝╩ ╩╩ ╩${colors.reset}
-${colors.gray}Kalam — HPE PCAI Assistant + Agentic DevOps CLI  ·  v${VERSION}${colors.reset}
+${colors.green}${colors.bold}╔╦╗╦═╗╦╔╗╔╔═╗╔╦╗╦═╗╔═╗
+ ║ ╠╦╝║║║║║╣  ║ ╠╦╝╠═╣
+ ╩ ╩╚═╩╝╚╝╚═╝ ╩ ╩╚═╩ ╩${colors.reset}
+${colors.gray}Trinetra — HPE PCAI Assistant + Agentic DevOps CLI  ·  v${VERSION}${colors.reset}
 
 ${colors.bold}JUST RUN IT:${colors.reset}
-  ${colors.green}kalam${colors.reset}                 Launch the interactive assistant (streaming, like Claude Code).
+  ${colors.green}trinetra${colors.reset}                 Launch the interactive assistant (streaming, like Claude Code).
 
 ${colors.bold}ONE-SHOT:${colors.reset}
   ${colors.green}ask <question>${colors.reset}       Ask anything about HPE Private Cloud AI (streamed).
@@ -1460,12 +1460,12 @@ ${colors.bold}LOCAL DEVOPS:${colors.reset}
   ${colors.green}fix <container-id>${colors.reset}   Upgrade a container to a secure base image.
 
 ${colors.bold}EXAMPLES:${colors.reset}
-  ${colors.gray}kalam${colors.reset}
-  ${colors.gray}kalam ask "how do I connect an external S3 bucket to the lakehouse?"${colors.reset}
-  ${colors.gray}kubectl logs mypod | kalam solve${colors.reset}
-  ${colors.gray}kalam vm journal node1 -b -1 -p err -n 200${colors.reset}
-  ${colors.gray}kalam vm service node1 kubelet restart${colors.reset}
-  ${colors.gray}kalam model${colors.reset}
+  ${colors.gray}trinetra${colors.reset}
+  ${colors.gray}trinetra ask "how do I connect an external S3 bucket to the lakehouse?"${colors.reset}
+  ${colors.gray}kubectl logs mypod | trinetra solve${colors.reset}
+  ${colors.gray}trinetra vm journal node1 -b -1 -p err -n 200${colors.reset}
+  ${colors.gray}trinetra vm service node1 kubelet restart${colors.reset}
+  ${colors.gray}trinetra model${colors.reset}
 
 ${colors.gray}Local by default (Ollama). Add GEMINI_API_KEY to .env or run '/key' for Gemini.${colors.reset}
 `);
@@ -1545,7 +1545,7 @@ async function main() {
         await vmService(vmName, extra[0], (extra[1] || 'status').toLowerCase(), { yes: rest.includes('--yes') || rest.includes('-y') });
       }
       else if (sub === 'list' || sub === '') await listVmsCli();
-      else console.log(`\n${colors.yellow}Usage: kalam vm <list|ssh|diagnose|discover|peers|graph|impact|health|logs|journal|service> [name]${colors.reset}\n`);
+      else console.log(`\n${colors.yellow}Usage: trinetra vm <list|ssh|diagnose|discover|peers|graph|impact|health|logs|journal|service> [name]${colors.reset}\n`);
       break;
     }
     case 'history': case 'changes': await historyCli(rest); break;

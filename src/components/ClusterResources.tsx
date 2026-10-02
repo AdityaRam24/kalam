@@ -125,7 +125,7 @@ export const ClusterResources: React.FC<Props> = ({ source, vmNames, globalSearc
     const header = ['Host', 'Kind', 'Namespace', 'Name', 'Status', 'Health', 'Age', 'Details'];
     const body = visible.map((r) => [r.host || source, r.kind, r.namespace || '', r.name, r.status, r.health, ageOf(r.created),
       r.info.map(([k, v]) => `${k}: ${v}`).join('; ')]);
-    downloadText(toCsv([header, ...body]), `kalam-resources-${source}-${stamp()}.csv`, 'text/csv');
+    downloadText(toCsv([header, ...body]), `trinetra-resources-${source}-${stamp()}.csv`, 'text/csv');
   };
 
   const problemTotal = rows.filter((r) => r.health === 'failing').length;

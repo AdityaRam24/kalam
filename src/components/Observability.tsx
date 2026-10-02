@@ -482,7 +482,7 @@ const Observability: React.FC<ObservabilityProps> = ({ k8sResources, source = 'l
       setUpdatedAt(new Date());
       setError('');
     } catch (e: any) {
-      setError(e?.message || 'Could not reach the Kalam backend.');
+      setError(e?.message || 'Could not reach the Trinetra backend.');
     } finally {
       setLoading(false);
     }
@@ -570,7 +570,7 @@ const Observability: React.FC<ObservabilityProps> = ({ k8sResources, source = 'l
       return [h, x.level, x.reachable ? 'yes' : 'no', x.at || '', x.cpus ?? '', x.gpus, fmtUptime(x.uptimeSec),
         x.fullest ? `${x.fullest.mount} ${x.fullest.usePct.toFixed(0)}%` : '', ...ids.map((id) => x.values?.[id]?.v ?? '')];
     });
-    downloadText(toCsv([header, ...body]), `kalam-observability-${stamp()}.csv`, 'text/csv');
+    downloadText(toCsv([header, ...body]), `trinetra-observability-${stamp()}.csv`, 'text/csv');
   };
 
   const pollerOn = !!status?.enabled;
@@ -669,7 +669,7 @@ const Observability: React.FC<ObservabilityProps> = ({ k8sResources, source = 'l
             <CheckCircle2 size={14} style={{ color: 'var(--status-success)' }} />
             {hosts.length === 0
               ? 'No hosts sampled yet.'
-              : 'Nothing is wrong that Kalam can see from stored data. Run a deep scan on Host Logs to include /var/log.'}
+              : 'Nothing is wrong that Trinetra can see from stored data. Run a deep scan on Host Logs to include /var/log.'}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -727,8 +727,8 @@ const Observability: React.FC<ObservabilityProps> = ({ k8sResources, source = 'l
         }}>
           <Gauge size={22} style={{ opacity: 0.5, marginBottom: 8 }} />
           <div style={{ color: 'var(--text-heading)', fontWeight: 600, marginBottom: 4 }}>No samples yet</div>
-          Add hosts on the <strong>Virtual Machines</strong> tab, then press <strong>Sample now</strong> above.<br />
-          To record continuously, start Kalam with <code>KALAM_METRICS=1</code>.
+          Add hosts on the <strong>K8s Nodes</strong> tab, then press <strong>Sample now</strong> above.<br />
+          To record continuously, start Trinetra with <code>KALAM_METRICS=1</code>.
         </div>
       ) : (
         <>

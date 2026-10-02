@@ -1,6 +1,6 @@
-# Kalam: Agentic DevOps & Cluster Console
+# Trinetra: Agentic DevOps & Cluster Console
 
-Kalam is an **Agentic DevOps Dashboard & Chatbot** that captures containers and Kubernetes clusters — on this machine or on any host reachable over SSH — auto-generates visual topology graphs (using Mermaid), and integrates a conversational AI agent to analyze cluster states and run approved maintenance operations. It has no dependency on Docker: containers are read from whichever runtime a host actually has (Docker, containerd, nerdctl, podman).
+Trinetra is an **Agentic DevOps Dashboard & Chatbot** that captures containers and Kubernetes clusters — on this machine or on any host reachable over SSH — auto-generates visual topology graphs (using Mermaid), and integrates a conversational AI agent to analyze cluster states and run approved maintenance operations. It has no dependency on Docker: containers are read from whichever runtime a host actually has (Docker, containerd, nerdctl, podman).
 
 ---
 
@@ -15,16 +15,16 @@ Kalam is an **Agentic DevOps Dashboard & Chatbot** that captures containers and 
 * **🕸️ Dependency Graph & Root-Cause Analysis**: Builds a typed graph of what depends on what (VMs → nodes → pods → services/PVCs, plus platform dependencies like SPIRE, CNI and CSI drivers) from one read-only SSH pass. Turns fourteen red pods into one cause with thirteen casualties, and answers "what breaks if I stop this?" before you stop it.
 * **🧬 PCAI Stack Visualizer — down to how each service runs**: Classifies live workloads into the AI Essentials layers (MLIS, MLDM, MLDE, lakehouse, Keycloak, GPU operator, ingress) and lets you expand any layer to see how it is actually running: its **endpoints** (service type, cluster IP, ports), its workloads and pods with status/readiness/restarts/node, the **images** it runs, the **PersistentVolumeClaims** it mounts, the nodes it spreads across, and what it has **requested** — CPU, memory and GPUs. The GPU tile reads `requested/capacity` rather than capacity alone, because capacity never told you whether any was left. Each recognised component is explained from an offline catalog (what it is, what stops working if it goes down) — no LLM required, so it works air-gapped.
 * **📈 Observability — telemetry over time**: A dedicated page that samples every host over SSH (CPU, load, memory, swap, every filesystem, GPU utilisation/memory/temperature/power, failed units) and charts it. One card per host with sparklines, plus one metric overlaid across hosts. CPU is a true rate derived from `/proc/stat` counters, so a reboot leaves a gap instead of a spike, and an unreachable host **breaks the line** rather than drawing through the outage. Off by default — `KALAM_METRICS=1` to record continuously, or press **Sample now**.
-* **🧠 One understanding, not four lists**: Kalam sees a host four ways — the health checklist, the `/var/log` rule findings, the metric thresholds, and the dependency graph. Those are rarely four problems; they are usually one problem seen four ways. The insight engine maps every signal onto a shared vocabulary and merges them, so `/var` at 97% + "No space left on device" ×412 + a failing disk check becomes **one** issue marked *corroborated by 3 sources*, ranked above anything only a single source noticed.
-* **🕓 Cluster Change History**: Answers "what changed, when, and who did it" — the question Kubernetes itself cannot, since its events expire after about an hour. Kalam fingerprints the cluster (workloads, pods, nodes, networking, storage, config and RBAC), diffs each capture against the last, and keeps a durable changelog with field-level before→after values, the writer named from `managedFields`, and Deployment rollout revisions. Read-only, opt-in, and it never stores secret contents.
+* **🧠 One understanding, not four lists**: Trinetra sees a host four ways — the health checklist, the `/var/log` rule findings, the metric thresholds, and the dependency graph. Those are rarely four problems; they are usually one problem seen four ways. The insight engine maps every signal onto a shared vocabulary and merges them, so `/var` at 97% + "No space left on device" ×412 + a failing disk check becomes **one** issue marked *corroborated by 3 sources*, ranked above anything only a single source noticed.
+* **🕓 Cluster Change History**: Answers "what changed, when, and who did it" — the question Kubernetes itself cannot, since its events expire after about an hour. Trinetra fingerprints the cluster (workloads, pods, nodes, networking, storage, config and RBAC), diffs each capture against the last, and keeps a durable changelog with field-level before→after values, the writer named from `managedFields`, and Deployment rollout revisions. Read-only, opt-in, and it never stores secret contents.
 * **📜 Host Logs — the whole machine, not just the cluster**: Pick any VM from the SSH inventory and get one page that answers "what is wrong with this host?":
   * **System overview** — OS, kernel, uptime, CPU load, memory/swap, every filesystem (space and inodes), top processes, listening ports, recent reboots, and a health checklist that flags full disks, low memory, overload, failed or restarting systemd services and clock drift.
   * **Scan for issues** — a deterministic rule engine (no LLM needed) reads recent `/var/log` files, the systemd journal and `dmesg`, and groups what it finds: OOM kills, disk full, filesystem/I/O/hardware errors, NVIDIA Xid, kernel lockups, crashes, failed services, kubelet/containerd errors, certificate and clock problems, SSH brute force. Each finding has an **Explain** panel with the likely cause and read-only commands to run next.
   * **Fix a service in place** — **Status**, **Start** and **Restart** buttons on every systemd service, on failed-service health checks, and on log findings linked to the unit that logged them (e.g. *Restart kubelet.service* next to a PLEG error). Restarts are confirmed, validated and logged; there is deliberately no *stop*.
   * **Journal explorer** — every read-only `journalctl` option as a form: units, identifiers, priority ranges, boots (including the previous one), since/until, regex or text search, `FIELD=value` matches, 12 output modes, `-x`, follow mode, `--verify`, and one-click presets. The exact command is shown for copying.
   * **Browse and download** — the `/var/log` tree with a tail/grep viewer (compressed rotations too), and downloads of a single file, a selection, or all of `/var/log` as `.tar.gz`.
-* **🖥️ View any connected host, not just this machine**: A source picker in the header switches every cluster view — dashboard, topology map, Containers and Kubernetes tabs — between this machine, any VM or cluster node in the SSH inventory, or **All hosts** merged into one view. Containers, pods, services, nodes and deployments are read over one SSH round trip, and logs, restarts, scaling and pod deletion act on the host each object came from. When this machine has no runtime and no cluster of its own, Kalam points itself at the VMs automatically.
-* **🛡️ Root access for connected hosts**: After a host is added or its credentials change, Kalam offers to elevate it — `sudo`, `su - root`, or a direct root login — probing first for what that host actually allows and verifying the choice (`id -un` must answer `root`) before saving it. This matters because containerd (`crictl`), kubelet config and service logs are root-only: an unprivileged login makes a busy machine look empty.
+* **🖥️ View any connected host, not just this machine**: A source picker in the header switches every cluster view — dashboard, topology map, Containers and Kubernetes tabs — between this machine, any VM or cluster node in the SSH inventory, or **All hosts** merged into one view. Containers, pods, services, nodes and deployments are read over one SSH round trip, and logs, restarts, scaling and pod deletion act on the host each object came from. When this machine has no runtime and no cluster of its own, Trinetra points itself at the VMs automatically.
+* **🛡️ Root access for connected hosts**: After a host is added or its credentials change, Trinetra offers to elevate it — `sudo`, `su - root`, or a direct root login — probing first for what that host actually allows and verifying the choice (`id -un` must answer `root`) before saving it. This matters because containerd (`crictl`), kubelet config and service logs are root-only: an unprivileged login makes a busy machine look empty.
 * **⌨️ Real remote terminal, and a root terminal**: A persistent login shell on a PTY per session, so `cd`, exported variables, `sudo` prompts, Ctrl+C, tab completion and full-screen tools all behave as they do in MobaXterm — instead of each command starting from scratch in a non-interactive shell. Every host has a **Root terminal** button beside the normal one, which elevates with `sudo -i` / `su -` whether or not elevation is configured for that host. A stored password is only ever sent in reply to a prompt that is actually waiting for one, so a passwordless-sudo host never has it typed into the root shell.
 * **💬 Agentic Chat Console**: Injects active cluster details into the prompt context of Google Gemini (`gemini-3-flash-preview`), Local LLMs (Ollama, LM Studio) or any OpenAI-compatible endpoint (vLLM, HPE MLIS, OpenAI…), draws customized mermaid charts dynamically, and recommends action triggers that execute upon user approval. **Test connection** in Settings runs a real completion against the configured engine and says exactly what is wrong when it fails — off the VPN, wrong port, token rejected, untrusted certificate, model not served.
 
@@ -43,11 +43,11 @@ Please refer to the [REQUIREMENTS.md](file:///c:/Users/Steve/Desktop/kalam/REQUI
 
 ## 🚀 How to Setup & Run
 
-### In a Kubernetes cluster — use the Helm chart in [`deploy/helm/kalam`](deploy/helm/kalam/README.md)
+### In a Kubernetes cluster — use the Helm chart in [`deploy/helm/trinetra`](deploy/helm/trinetra/README.md)
 
 ```bash
-docker build -t <registry>/kalam:0.1.0 .   &&   docker push <registry>/kalam:0.1.0
-helm upgrade --install kalam deploy/helm/kalam -n kalam --create-namespace   --set image.repository=<registry>/kalam --set image.tag=0.1.0
+docker build -t <registry>/trinetra:0.1.0 .   &&   docker push <registry>/trinetra:0.1.0
+helm upgrade --install trinetra deploy/helm/trinetra -n trinetra --create-namespace   --set image.repository=<registry>/trinetra --set image.tag=0.1.0
 ```
 
 Read-only by default (`rbac.allowWrite=false`) and cluster-only until you give
@@ -111,7 +111,7 @@ Open your browser and navigate to **[http://localhost:5173](http://localhost:517
 
 ## 🧠 HPE Private Cloud AI (PCAI) Assistant
 
-Kalam includes a dedicated **PCAI Assistant** panel — a retrieval-grounded chatbot that knows HPE Private Cloud AI end to end (AI Essentials / MLDE / MLDM / MLIS, the data lakehouse, NVIDIA AI Enterprise & NIM, HPE GreenLake management, and the Kubernetes platform PCAI runs on).
+Trinetra includes a dedicated **PCAI Assistant** panel — a retrieval-grounded chatbot that knows HPE Private Cloud AI end to end (AI Essentials / MLDE / MLDM / MLIS, the data lakehouse, NVIDIA AI Enterprise & NIM, HPE GreenLake management, and the Kubernetes platform PCAI runs on).
 
 It is a **RAG (Retrieval-Augmented Generation)** system, not a memorized model: it ingests real HPE documentation into a local knowledge base, retrieves the most relevant docs for every question, and answers **grounded in those sources with inline `[[n]]` citations** — so it doesn't hallucinate HPE-specific details.
 
@@ -128,11 +128,13 @@ It is a **RAG (Retrieval-Augmented Generation)** system, not a memorized model: 
 
 ## 🛠️ Command Line Interface (CLI)
 
-Kalam ships a global `kalam` command — a streaming, Claude-Code-style terminal assistant for HPE Private Cloud AI plus agentic Docker/Kubernetes ops.
+Trinetra ships a global `trinetra` command — a streaming, Claude-Code-style terminal assistant for HPE Private Cloud AI plus agentic Docker/Kubernetes ops.
 
-### Install the `kalam` command
+### Install the `trinetra` command
 
-Install it once so you can type `kalam` from anywhere:
+> The command was previously called `kalam`; that name still works as an alias.
+
+Install it once so you can type `trinetra` from anywhere:
 
 ```bash
 npm run cli:install     # runs `npm link`
@@ -145,26 +147,26 @@ Platform shortcuts:
 Then open a **new** terminal so the updated `PATH` is picked up, and run:
 
 ```bash
-kalam help
+trinetra help
 ```
 
 > Not ready to install globally? Every command works via `node bin/kalam.cjs <command>` or `npm run cli -- <command>` from the project root.
 
 ### No setup required
 
-Commands that need AI **auto-start the backend server for you** — you don't have to run `npm run dev` first. On first use, Kalam also builds an offline PCAI knowledge base automatically.
+Commands that need AI **auto-start the backend server for you** — you don't have to run `npm run dev` first. On first use, Trinetra also builds an offline PCAI knowledge base automatically.
 
 For fully composed (LLM-written) answers, either put a `GEMINI_API_KEY` in `.env`, or run a local LLM (Ollama / LM Studio). With **neither** configured it still works via lexical search and returns the exact retrieved HPE docs.
 
 ### Interactive assistant (recommended)
 
-Just run `kalam` with no arguments to launch the streaming REPL:
+Just run `trinetra` with no arguments to launch the streaming REPL:
 
 ```bash
-kalam
+trinetra
 ```
 
-Type naturally — Kalam auto-routes each message to the right engine (PCAI answer, error diagnosis, or the DevOps agent). Inside the REPL you have these **slash commands**:
+Type naturally — Trinetra auto-routes each message to the right engine (PCAI answer, error diagnosis, or the DevOps agent). Inside the REPL you have these **slash commands**:
 
 | Command | What it does |
 | --- | --- |
@@ -188,61 +190,61 @@ Type naturally — Kalam auto-routes each message to the right engine (PCAI answ
 Run a single task without entering the REPL:
 
 **HPE PCAI brain**
-* `kalam ask "<question>"` — ask anything about HPE Private Cloud AI (streamed, with citations).
-* `kalam solve "<error/log>"` — diagnose a PCAI error and get an ordered fix. Also reads piped input:
+* `trinetra ask "<question>"` — ask anything about HPE Private Cloud AI (streamed, with citations).
+* `trinetra solve "<error/log>"` — diagnose a PCAI error and get an ordered fix. Also reads piped input:
   ```bash
-  kubectl logs mypod | kalam solve
+  kubectl logs mypod | trinetra solve
   ```
-* `kalam pcai` — open the interactive PCAI assistant shell.
-* `kalam train [--offline]` — build/refresh the knowledge base (crawls live HPE docs unless `--offline`).
-* `kalam kb` — show knowledge-base status.
+* `trinetra pcai` — open the interactive PCAI assistant shell.
+* `trinetra train [--offline]` — build/refresh the knowledge base (crawls live HPE docs unless `--offline`).
+* `trinetra kb` — show knowledge-base status.
 
 **Models**
-* `kalam models` — list installed Ollama / local models.
-* `kalam model` — pick the default local model interactively.
+* `trinetra models` — list installed Ollama / local models.
+* `trinetra model` — pick the default local model interactively.
 
 **Remote VMs (SSH, read-only)**
-* `kalam vms` — inventory with live status.
-* `kalam vm ssh <name>` — interactive session (hops through a jump host if configured).
-* `kalam vm diagnose <name>` — read-only kubectl diagnosis; findings are ordered causes-first, with collateral marked as "downstream of …".
-* `kalam vm discover <name>` — containers, pods, K8s + system services, listening ports.
-* `kalam vm graph <name>` — build the dependency graph and rank the root causes.
-* `kalam vm impact <name> <id>` — blast radius: what is already broken downstream of a resource, and what is healthy but at risk.
-* `kalam vm peers <name>` — find other VMs visible from this host.
+* `trinetra vms` — inventory with live status.
+* `trinetra vm ssh <name>` — interactive session (hops through a jump host if configured).
+* `trinetra vm diagnose <name>` — read-only kubectl diagnosis; findings are ordered causes-first, with collateral marked as "downstream of …".
+* `trinetra vm discover <name>` — containers, pods, K8s + system services, listening ports.
+* `trinetra vm graph <name>` — build the dependency graph and rank the root causes.
+* `trinetra vm impact <name> <id>` — blast radius: what is already broken downstream of a resource, and what is healthy but at risk.
+* `trinetra vm peers <name>` — find other VMs visible from this host.
 
 **Host logs, health & services (on a VM)**
-* `kalam vm health <name>` — health checks (disks, inodes, memory, load, failed/restarting services, clock) plus failed services.
-* `kalam vm logs <name> [--hours 24] [--all]` — scan `/var/log`, the journal and `dmesg`; grouped findings with explanations, checks to run, and the service to restart when one is linked.
-* `kalam vm journal <name> [options]` — `journalctl` on the host with the same flags: `-u -t -k -p err..warning -b -1 -S -U -g` (regex) / `--text`, `FIELD=value`, `-o -n -r -x --utc --no-hostname`, and `-f` to follow.
-* `kalam vm service <name> <unit> [status|start|restart] [--yes]` — service state, `systemctl status` and its journal; start/restart ask for confirmation (or take `--yes`). There is no `stop`.
+* `trinetra vm health <name>` — health checks (disks, inodes, memory, load, failed/restarting services, clock) plus failed services.
+* `trinetra vm logs <name> [--hours 24] [--all]` — scan `/var/log`, the journal and `dmesg`; grouped findings with explanations, checks to run, and the service to restart when one is linked.
+* `trinetra vm journal <name> [options]` — `journalctl` on the host with the same flags: `-u -t -k -p err..warning -b -1 -S -U -g` (regex) / `--text`, `FIELD=value`, `-o -n -r -x --utc --no-hostname`, and `-f` to follow.
+* `trinetra vm service <name> <unit> [status|start|restart] [--yes]` — service state, `systemctl status` and its journal; start/restart ask for confirmation (or take `--yes`). There is no `stop`.
 
 **Change history (read-only)**
-* `kalam history [--source <local|vm>] [--since 24h]` — the cluster changelog: what changed, when, and who did it.
-* `kalam history capture [--source <name>]` — take a capture now; the one after it can show changes.
-* `kalam vm history <name>` — the same timeline for a VM's cluster.
+* `trinetra history [--source <local|vm>] [--since 24h]` — the cluster changelog: what changed, when, and who did it.
+* `trinetra history capture [--source <name>]` — take a capture now; the one after it can show changes.
+* `trinetra vm history <name>` — the same timeline for a VM's cluster.
 
 **Local DevOps**
-* `kalam status` — check which container runtimes and Kubernetes are available on this machine.
-* `kalam list <docker|k8s>` — print active containers or Kubernetes pods (`kalam ps` also works).
-* `kalam scan <container-id>` — scan a container image for CVEs.
-* `kalam fix <container-id>` — rebuild the container on a secure base image (asks for confirmation).
-* `kalam chat [message]` — cluster-aware DevOps agent; pass a message for one-shot, or omit it for a prompt loop.
+* `trinetra status` — check which container runtimes and Kubernetes are available on this machine.
+* `trinetra list <docker|k8s>` — print active containers or Kubernetes pods (`trinetra ps` also works).
+* `trinetra scan <container-id>` — scan a container image for CVEs.
+* `trinetra fix <container-id>` — rebuild the container on a secure base image (asks for confirmation).
+* `trinetra chat [message]` — cluster-aware DevOps agent; pass a message for one-shot, or omit it for a prompt loop.
 
-> Anything unrecognized is treated as a question, e.g. `kalam what is MLIS?`.
+> Anything unrecognized is treated as a question, e.g. `trinetra what is MLIS?`.
 
 Your chosen provider, model, mode, and Gemini key persist across sessions in `~/.kalam.json`.
 
 ### Examples
 
 ```bash
-kalam                                                    # launch the interactive assistant
-kalam ask "how do I connect an external S3 bucket to the lakehouse?"
-kubectl logs mypod | kalam solve                         # diagnose from a live log
-kalam scan my-nginx                                       # CVE scan a container
-kalam list k8s                                            # list Kubernetes pods
-kalam model                                               # switch local model
-kalam vm logs node1 --hours 24                            # what went wrong on this host today
-kalam vm journal node1 -b -1 -p err -n 200                # errors from the previous boot
-kalam vm journal node1 -u kubelet -f                      # follow kubelet's journal
-kalam vm service node1 kubelet restart                    # confirm, restart, show state + journal
+trinetra                                                    # launch the interactive assistant
+trinetra ask "how do I connect an external S3 bucket to the lakehouse?"
+kubectl logs mypod | trinetra solve                         # diagnose from a live log
+trinetra scan my-nginx                                       # CVE scan a container
+trinetra list k8s                                            # list Kubernetes pods
+trinetra model                                               # switch local model
+trinetra vm logs node1 --hours 24                            # what went wrong on this host today
+trinetra vm journal node1 -b -1 -p err -n 200                # errors from the previous boot
+trinetra vm journal node1 -u kubelet -f                      # follow kubelet's journal
+trinetra vm service node1 kubelet restart                    # confirm, restart, show state + journal
 ```

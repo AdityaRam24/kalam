@@ -757,8 +757,8 @@ ServiceAccount token) and an **SSH client** (hosts outside the cluster); no
 container runtime is installed, because in a cluster the interesting data comes
 from kubectl and SSH. It runs as non-root UID 10001 under `tini`.
 
-`deploy/helm/kalam` installs it. Four values decide what the install can do —
-see `deploy/helm/kalam/README.md`:
+`deploy/helm/trinetra` installs it. Four values decide what the install can do —
+see `deploy/helm/trinetra/README.md`:
 
 | Value | Default | Effect |
 |---|---|---|
@@ -786,8 +786,8 @@ and, for most of `/var/log` and any service restart, root access on the host.
 Validate before installing:
 
 ```bash
-helm lint deploy/helm/kalam
-helm template kalam deploy/helm/kalam | kubectl apply --dry-run=server -f -
+helm lint deploy/helm/trinetra
+helm template kalam deploy/helm/trinetra | kubectl apply --dry-run=server -f -
 ```
 
 ### 4b. On a machine — scripts

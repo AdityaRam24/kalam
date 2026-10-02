@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "bin": {
+    "trinetra": "./bin/kalam.cjs",
     "kalam": "./bin/kalam.cjs"
   },
   "scripts": {

@@ -2391,7 +2391,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           </button>
           <button
             onClick={() => setHeatmapMode('changed')}
-            title="Highlight what Kalam recorded changing in the last 24 hours"
+            title="Highlight what Trinetra recorded changing in the last 24 hours"
             style={{
               background: heatmapMode === 'changed' ? 'rgba(245, 158, 11, 0.15)' : 'transparent',
               color: heatmapMode === 'changed' ? '#f59e0b' : 'var(--tp-muted, #94a3b8)',

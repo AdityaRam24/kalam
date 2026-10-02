@@ -64,4 +64,4 @@ export function downloadDataUrl(dataUrl: string, filename: string) {
 }
 
 export const captureName = (what: string, ext = 'png') =>
-  `kalam-${what.replace(/[^a-z0-9-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'capture'}-${stamp()}.${ext}`;
+  `trinetra-${what.replace(/[^a-z0-9-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'capture'}-${stamp()}.${ext}`;

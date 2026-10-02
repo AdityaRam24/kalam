@@ -2,8 +2,8 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "kalam.fullname" . }}-data
-  labels: {{- include "kalam.labels" . | nindent 4 }}
+  name: {{ include "trinetra.fullname" . }}-data
+  labels: {{- include "trinetra.labels" . | nindent 4 }}
   annotations:
     # The VM inventory, KB and history outlive `helm uninstall`; a reinstall
     # under the same release picks the volume back up. uninstall.sh --purge

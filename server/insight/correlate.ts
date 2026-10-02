@@ -267,7 +267,7 @@ export function correlate(input: CorrelateInput): Issue[] {
 
 /** One line summarising a host's state, for a fleet roll-up. */
 export function verdict(issues: Issue[]): { severity: Severity | 'ok'; summary: string } {
-  if (!issues.length) return { severity: 'ok', summary: 'Nothing is wrong that Kalam can see.' };
+  if (!issues.length) return { severity: 'ok', summary: 'Nothing is wrong that Trinetra can see.' };
   const top = issues[0];
   const others = issues.length - 1;
   return {

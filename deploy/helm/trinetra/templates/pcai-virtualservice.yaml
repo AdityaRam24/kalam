@@ -1,12 +1,12 @@
-{{- if include "kalam.pcaiEnabled" . }}
+{{- if include "trinetra.pcaiEnabled" . }}
 {{- $ez := .Values.ezua }}
-# HPE Private Cloud AI: publish Kalam on the platform's Istio gateway, the same
+# HPE Private Cloud AI: publish Trinetra on the platform's Istio gateway, the same
 # way PCAI's own applications are exposed (https://<endpoint>).
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
-  name: {{ include "kalam.fullname" . }}
-  labels: {{- include "kalam.labels" . | nindent 4 }}
+  name: {{ include "trinetra.fullname" . }}
+  labels: {{- include "trinetra.labels" . | nindent 4 }}
 spec:
   gateways:
     - {{ $ez.virtualService.istioGateway }}
@@ -20,7 +20,7 @@ spec:
         uri: /
       route:
         - destination:
-            host: {{ printf "%s.%s.svc.cluster.local" (include "kalam.fullname" .) .Release.Namespace }}
+            host: {{ printf "%s.%s.svc.cluster.local" (include "trinetra.fullname" .) .Release.Namespace }}
             port:
               number: {{ .Values.service.port }}
       # No route timeout on purpose: the chat and log endpoints stream, and
@@ -28,13 +28,13 @@ spec:
 {{- if $ez.authorizationPolicy.enabled }}
 ---
 # Platform SSO: every request to the endpoint must carry a PCAI (Keycloak)
-# session, enforced at the gateway by oauth2-proxy before it reaches Kalam.
+# session, enforced at the gateway by oauth2-proxy before it reaches Trinetra.
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
-  name: {{ printf "%s-%s-auth" .Release.Namespace (include "kalam.fullname" .) | trunc 63 | trimSuffix "-" }}
+  name: {{ printf "%s-%s-auth" .Release.Namespace (include "trinetra.fullname" .) | trunc 63 | trimSuffix "-" }}
   namespace: {{ $ez.authorizationPolicy.namespace }}
-  labels: {{- include "kalam.labels" . | nindent 4 }}
+  labels: {{- include "trinetra.labels" . | nindent 4 }}
 spec:
   action: CUSTOM
   provider:

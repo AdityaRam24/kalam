@@ -667,7 +667,7 @@ function buildAgentSystemInstruction(s: {
   dockerStateStr: string;
   k8sStateStr: string;
 }): string {
-  return `You are Kalam, a DevOps AI Agent. You run locally on the user's machine and help them visualize, analyze, and manage their local Docker and Kubernetes environments.
+  return `You are Trinetra, a DevOps AI Agent. You run locally on the user's machine and help them visualize, analyze, and manage their local Docker and Kubernetes environments.
 You are talking to the user. You have direct read and write access (via local execution) to Docker and Kubernetes.
 
 Here is the current live cluster environment state:
@@ -784,7 +784,7 @@ app.post('/api/agent/chat', async (req, res) => {
     const lPrompt = prompt.toLowerCase();
     
     if (lPrompt.includes('status') || lPrompt.includes('list') || lPrompt.includes('show')) {
-      const responseText = `Hi! I am the Kalam DevOps Agent. I notice you don't have a Gemini API key configured. 
+      const responseText = `Hi! I am the Trinetra DevOps Agent. I notice you don't have a Gemini API key configured. 
 However, I can still show you the status!
 
 **Docker Status:**
@@ -812,9 +812,9 @@ In the meantime, you can explore the visual collections in the tabs above, view 
     const geminiPrompt = `${systemInstruction}
 
 Let's look at the chat history:
-${chatHistory.map((h: any) => `${h.role === 'user' ? 'User' : 'Kalam'}: ${h.content}`).join('\n')}
+${chatHistory.map((h: any) => `${h.role === 'user' ? 'User' : 'Trinetra'}: ${h.content}`).join('\n')}
 User: ${prompt}
-Kalam:`;
+Trinetra:`;
 
     const ai = new GoogleGenAI({ apiKey: finalKey });
     const response = await ai.models.generateContent({
@@ -881,9 +881,9 @@ app.post('/api/agent/chat/stream', async (req, res) => {
     const geminiPrompt = `${systemInstruction}
 
 Let's look at the chat history:
-${chatHistory.map((h: any) => `${h.role === 'user' ? 'User' : 'Kalam'}: ${h.content}`).join('\n')}
+${chatHistory.map((h: any) => `${h.role === 'user' ? 'User' : 'Trinetra'}: ${h.content}`).join('\n')}
 User: ${prompt}
-Kalam:`;
+Trinetra:`;
     const result = await streamGemini({
       apiKey: finalKey,
       contents: geminiPrompt,
@@ -1091,7 +1091,7 @@ if (fs.existsSync(distDir)) {
 // (set HOST=0.0.0.0 in .env to serve other machines).
 const HOST = process.env.HOST || '127.0.0.1';
 const server = app.listen(Number(PORT), HOST, () => {
-  console.log(`✅ Kalam Backend Server running on http://localhost:${PORT}${HOST !== '127.0.0.1' ? ` (bound to ${HOST} — reachable from the network!)` : ''}`);
+  console.log(`✅ Trinetra Backend Server running on http://localhost:${PORT}${HOST !== '127.0.0.1' ? ` (bound to ${HOST} — reachable from the network!)` : ''}`);
   // Opt-in: nothing polls anyone's cluster unless KALAM_HISTORY says so.
   if (startHistoryPoller()) {
     const p = pollerState();
@@ -1108,7 +1108,7 @@ const server = app.listen(Number(PORT), HOST, () => {
 // leftover backend (e.g. a previous `npm run dev` or a CLI auto-start).
 server.on('error', (err: any) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`\n❌ Port ${PORT} is already in use — another Kalam backend is probably still running.`);
+    console.error(`\n❌ Port ${PORT} is already in use — another Trinetra backend is probably still running.`);
     console.error(`   Stop it, then restart. On Windows (PowerShell):`);
     console.error(`   Get-NetTCPConnection -LocalPort ${PORT} | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }`);
     console.error(`   Or set a different PORT in your .env file.\n`);

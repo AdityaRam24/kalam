@@ -1,4 +1,4 @@
-# Kalam — What Does What
+# Trinetra — What Does What
 
 A map of every page, button and backend endpoint, and which file implements it.
 Everything that reads a cluster works against **this machine** (`local`), **one VM**
@@ -41,7 +41,7 @@ from the SSH inventory, or **All hosts** — chosen with the source picker in th
 
 Flow order on the map: **InferenceService → Service → Workload → Pod → Node** (and Port → Container for plain containers).
 
-Performance notes (measured on 150 cards / 240 edges): idle 60 fps; no card is unmounted/re-mounted while panning, zooming or refreshing; a live refresh only touches the cards that changed. The flicker was React Flow hiding every re-passed card until re-measured — Kalam now keeps the measured sizes.
+Performance notes (measured on 150 cards / 240 edges): idle 60 fps; no card is unmounted/re-mounted while panning, zooming or refreshing; a live refresh only touches the cards that changed. The flicker was React Flow hiding every re-passed card until re-measured — Trinetra now keeps the measured sizes.
 
 Code: `src/components/TopologyGraph.tsx`, signature in `src/lib/topology.ts`.
 
@@ -56,7 +56,7 @@ Docker/containerd/podman containers with start/stop/restart/logs/remove. `src/Ap
 
 Code: `src/App.tsx`, `src/components/ClusterResources.tsx`, status logic in `server/k8s/workloads.ts`.
 
-### Virtual Machines
+### K8s Nodes (formerly "Virtual Machines")
 SSH inventory, metrics, discovery, node "brain", diagnose, root access.
 - **Terminal** is now a real terminal emulator (xterm.js): every key goes to the host as typed, so `kubectl edit`, `vim`, `less`, `top`, `htop` work. Ctrl+C interrupts (or copies when text is selected), Ctrl+Shift+C / Ctrl+Shift+V copy/paste, Maximize button, the remote PTY follows the panel size.
 - `root`, `sudo`, `su` badges are lowercase.
@@ -75,8 +75,8 @@ Host telemetry over time. New: **Kubernetes resource panel** (same as the dashbo
 Code: `src/components/Observability.tsx`.
 
 ### Change History
-What changed, when, and who did it (from Kalam's periodic captures).
-- **Namespace dropdown** — every namespace Kalam tracks, with change and object counts, plus *Cluster-scoped objects*.
+What changed, when, and who did it (from Trinetra's periodic captures).
+- **Namespace dropdown** — every namespace Trinetra tracks, with change and object counts, plus *Cluster-scoped objects*.
 - **Kind** and **changed-by** (writer, e.g. `helm`, `kubectl-edit`) dropdowns; severity; time window (1 h – 30 d, or everything); change-type chips; search.
 - **Overview**: totals, needs-attention count, objects and namespaces affected, most active writer, latest change.
 - **Activity histogram** (hourly or daily, red = needs attention) — click a bar to zoom the timeline to that slice.
@@ -105,7 +105,7 @@ Code: `src/components/GpuUtilization.tsx`, `server/k8s/gpu.ts`.
 ## App-wide behaviour
 - **Refresh loop** — the cluster is re-read every 10 s only while a page that shows it is open (Dashboard, Containers, Kubernetes, PCAI Stack, Observability), never while the browser tab is hidden, and never twice at once. A response that arrives after a newer read (or after you switched source) is discarded.
 - **Last good read** — if one refresh fails (SSH hiccup, slow `kubectl`), the screen keeps the previous data with a banner "Showing the last good read from HH:MM" instead of going blank. In "All hosts", each host falls back to its own last good read.
-- **Lazy pages** — VMs (terminal), Host Logs, Observability, Change History, Cheat Sheet, PCAI Stack and GPU load on first open; the startup bundle is ~550 KB instead of ~1.2 MB. The screenshot library loads on first capture.
+- **Lazy pages** — K8s Nodes (terminal), Host Logs, Observability, Change History, Cheat Sheet, PCAI Stack and GPU load on first open; the startup bundle is ~550 KB instead of ~1.2 MB. The screenshot library loads on first capture.
 
 ## Disabled (commented out, not deleted)
 Agent Chat, Agent Teamwork, PCAI Assistant, Image Hardener, the agent/model **settings button**, the "HPE AI: model" pill, the dashboard "Launch AI Console" card and the settings modal (incl. the model picker). They are wrapped in `Disabled:` comments in `src/App.tsx` — un-comment those blocks to restore them.
@@ -125,7 +125,7 @@ Agent Chat, Agent Teamwork, PCAI Assistant, Image Hardener, the agent/model **se
 
 Changed data: pods now carry `displayStatus`, `health`, `lastReason`; workloads carry `status`, `health`; nodes carry `allocatable`, `capacity`, `pressure`, `schedulable`, `gpuProduct` (`server/k8s/workloads.ts`). kubectl errors shown to users are the readable line, not klog noise (`server/k8s/kubectl.ts`).
 
-**In-cluster (Helm):** `templates/rbac.yaml` now grants read access to the new kinds (batch, autoscaling, policy, storage, PVs, quotas, CRDs, cert-manager, KServe, Istio, Kubeflow, Ray — Secrets are still not granted, so they show as n/a in-cluster). `rbac.allowGpuExec` (default `true`) grants `pods/exec` for the GPU page; set it `false` to keep Kalam strictly read-only.
+**In-cluster (Helm):** `templates/rbac.yaml` now grants read access to the new kinds (batch, autoscaling, policy, storage, PVs, quotas, CRDs, cert-manager, KServe, Istio, Kubeflow, Ray — Secrets are still not granted, so they show as n/a in-cluster). `rbac.allowGpuExec` (default `true`) grants `pods/exec` for the GPU page; set it `false` to keep Trinetra strictly read-only.
 
 All of the above is **read-only** toward the cluster except the pre-existing actions (restart, scale, delete pod, container start/stop) and the terminal.
 

@@ -1,13 +1,13 @@
-# Per-node image cache — how install.sh delivers the Kalam image when you have
+# Per-node image cache — how install.sh delivers the Trinetra image when you have
 # not given it a registry.
 #
 # One tiny registry per node, listening on 127.0.0.1:5959 only (host network,
 # loopback: nothing outside the node can reach it). install.sh pushes the
-# bundled image into each one through `kubectl port-forward`, and the Kalam pod
-# pulls 127.0.0.1:5959/kalam — containerd talks plain HTTP to loopback
+# bundled image into each one through `kubectl port-forward`, and the Trinetra pod
+# pulls 127.0.0.1:5959/trinetra — containerd talks plain HTTP to loopback
 # registries by default, so no node or registry configuration is needed.
 #
-# The images live on the node's disk (/var/lib/kalam-image-cache), so they
+# The images live on the node's disk (/var/lib/trinetra-image-cache), so they
 # survive a restart of this pod. `uninstall.sh --purge` removes all of it.
 #
 # __CACHE_IMAGE__ is replaced by install.sh (default: registry:2; override with
@@ -15,9 +15,9 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: kalam-image-cache
+  name: trinetra-image-cache
   labels:
-    app.kubernetes.io/part-of: kalam
+    app.kubernetes.io/part-of: trinetra
     # hostNetwork + hostPath are outside the baseline Pod Security profile.
     pod-security.kubernetes.io/enforce: privileged
     istio-injection: disabled
@@ -25,27 +25,27 @@ metadata:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: kalam-image-cache
-  namespace: kalam-image-cache
+  name: trinetra-image-cache
+  namespace: trinetra-image-cache
   labels:
-    app.kubernetes.io/name: kalam-image-cache
-    app.kubernetes.io/part-of: kalam
+    app.kubernetes.io/name: trinetra-image-cache
+    app.kubernetes.io/part-of: trinetra
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: kalam-image-cache
+      app.kubernetes.io/name: trinetra-image-cache
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: kalam-image-cache
-        app.kubernetes.io/part-of: kalam
+        app.kubernetes.io/name: trinetra-image-cache
+        app.kubernetes.io/part-of: trinetra
       annotations:
         sidecar.istio.io/inject: "false"
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       automountServiceAccountToken: false
-      # Every node, including tainted GPU / control-plane nodes: Kalam may be
+      # Every node, including tainted GPU / control-plane nodes: Trinetra may be
       # scheduled anywhere, and the image has to be local wherever it lands.
       tolerations:
         - operator: Exists
@@ -76,5 +76,5 @@ spec:
       volumes:
         - name: store
           hostPath:
-            path: /var/lib/kalam-image-cache
+            path: /var/lib/trinetra-image-cache
             type: DirectoryOrCreate
