@@ -43,14 +43,15 @@ import {
   History,
   Sun,
   Moon,
-  Camera
+  Camera,
+  Sparkles
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { canvasSignature } from '../lib/topology';
 import {
   buildRelations, cleanId as relCleanId,
   podId as relPodId, svcId as relSvcId, deployId as relDeployId,
-  k8sNodeId as relK8sNodeId, containerId as relContainerId,
+  k8sNodeId as relK8sNodeId, containerId as relContainerId, isvcId as relIsvcId,
   type Relation,
 } from '../lib/relations';
 import { layoutCluster, orderPods, CARD_H } from '../lib/layout';
@@ -74,6 +75,8 @@ interface K8sResources {
   services: any[];
   deployments: any[];
   nodes: any[];
+  /** KServe InferenceServices — optional, absent on clusters without KServe. */
+  inferenceServices?: any[];
 }
 
 interface TopologyGraphProps {
@@ -135,7 +138,27 @@ const EDGE_STYLES: Record<Relation['kind'], {
   'runs-on': { label: 'runs on', color: '#64748b', labelColor: '#94a3b8', width: 1.5, dash: '6,4', animated: false, opacity: 0.5 },
   backs:   { label: 'backs',    color: '#38bdf8', labelColor: '#38bdf8', width: 1.2, dash: '4,4', animated: false, opacity: 0.35, bezier: true },
   hosts:   { label: 'hosts',    color: '#38bdf8', labelColor: '#38bdf8', width: 1.2, dash: '4,4', animated: false, opacity: 0.3,  bezier: true },
+  serves:  { label: 'serves',   color: '#f472b6', labelColor: '#f472b6', width: 2,   animated: true,  opacity: 0.75 },
+  deploys: { label: 'deploys',  color: '#f472b6', labelColor: '#f472b6', width: 1.6, dash: '6,4', animated: true, opacity: 0.55 },
 };
+
+/**
+ * Hand back the previous object for every item whose content is unchanged.
+ * `cache` is updated in place to the current build.
+ */
+function stabilize<T extends { id: string }>(items: T[], cache: Map<string, { sig: string; item: any }>): T[] {
+  const next = new Map<string, { sig: string; item: any }>();
+  const out = items.map((it) => {
+    const sig = JSON.stringify(it);
+    const prev = cache.get(it.id);
+    const keep = prev && prev.sig === sig ? (prev.item as T) : it;
+    next.set(it.id, { sig, item: keep });
+    return keep;
+  });
+  cache.clear();
+  next.forEach((v, k) => cache.set(k, v));
+  return out;
+}
 
 function relationToEdge(r: Relation): Edge {
   const st = EDGE_STYLES[r.kind];
@@ -244,6 +267,7 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
     'deployment': { icon: Rocket, color: '#a78bfa', label: 'DEPLOYMENT' },
     'pod':        { icon: Box, color: '#34d399', label: 'POD' },
     'k8s-node':   { icon: Server, color: '#94a3b8', label: 'NODE' },
+    'isvc':       { icon: Sparkles, color: '#f472b6', label: 'INFERENCE SERVICE' },
   };
 
   const theme = themes[type] || themes['docker'];
@@ -459,6 +483,14 @@ const DevOpsNode = memo(({ id, data }: NodeProps) => {
                 {showMeta && <MetaRow narrow={isPortType} label="IP" value={ip || 'N/A'} mono />}
               </>
             )}
+            {type === 'isvc' && (
+              <>
+                <MetaRow narrow={isPortType} label="Model" value={data.modelFormat || '—'} />
+                {showMeta && <MetaRow narrow={isPortType} label="Status" value={status || 'Unknown'} />}
+                {showMeta && data.storageUri && <MetaRow narrow={isPortType} label="Storage" value={data.storageUri} mono />}
+                {showMeta && data.url && <MetaRow narrow={isPortType} label="URL" value={data.url} mono />}
+              </>
+            )}
             {type === 'k8s-node' && (
               <>
                 <MetaRow narrow={isPortType} label="Role" value={role} />
@@ -526,10 +558,12 @@ const LedStyles = () => (
       .kalam-flow-dot, .kalam-flow-dash { animation: none; }
     }
 
-    .led-halo-glow { animation: led-glow-halo 2.2s ease-in-out infinite; }
+    /* Healthy = steady light. Animating every healthy LED was ~40% of the
+       canvas's idle frame cost; the blink is kept for the states that matter. */
+    .led-halo-glow { animation: none; opacity: 0.3; }
     .led-halo-blink-fast { animation: led-blink-fast 0.6s steps(1) infinite; }
     .led-halo-blink-slow { animation: led-blink-slow 1.6s steps(1) infinite; }
-    .led-core-glow { animation: led-glow-core 2.2s ease-in-out infinite; }
+    .led-core-glow { animation: none; }
     .led-core-blink-fast { animation: led-blink-fast 0.6s steps(1) infinite; }
     .led-core-blink-slow { animation: led-blink-slow 1.6s steps(1) infinite; }
     @media (prefers-reduced-motion: reduce) {
@@ -711,7 +745,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
 
   // Navigation & Search State
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedNamespace, setSelectedNamespace] = useState('All');
+  // The default namespace is applied on the very first render when the data
+  // already contains it — otherwise the map draws every namespace, then jumps.
+  const [selectedNamespace, setSelectedNamespace] = useState(() => {
+    if (!defaultNamespace) return 'All';
+    const k = k8sResources || { pods: [], services: [], deployments: [] };
+    const has = [...(k.pods || []), ...(k.services || []), ...(k.deployments || []), ...(k.inferenceServices || [])]
+      .some((o: any) => o?.namespace === defaultNamespace);
+    return has ? defaultNamespace : 'All';
+  });
   const [selectedType, setSelectedType] = useState('All');
   const [heatmapMode, setHeatmapMode] = useState<'none' | 'restarts' | 'age' | 'changed'>('none');
   // key -> last recorded change, for the "recently changed" overlay.
@@ -760,10 +802,20 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   const [problemsOnly, setProblemsOnly] = useState(false);
   const [layoutMode, setLayoutMode] = useState<'columns' | 'auto'>('columns');
 
-  // The flow animation is CSS-driven and costs effectively nothing per edge, so
-  // it stays on by default at any cluster size. The toggle is here for anyone
-  // who simply does not want movement on screen.
-  const [motion, setMotion] = useState<'on' | 'off'>('on');
+  // Flow animation. Measured: dots on every edge were the single largest idle
+  // cost of the canvas (~half the frame budget at 200 edges), and made the map
+  // shimmer. 'focus' (default) animates the full upstream→downstream chain of
+  // the card under the pointer or selected — the request path, e.g.
+  // InferenceService → Service → workload → pods → node — and nothing else.
+  const [flowMode, setFlowMode] = useState<'focus' | 'all' | 'off'>(() => {
+    try {
+      const v = localStorage.getItem('kalam_topology_flow');
+      return v === 'all' || v === 'off' ? v : 'focus';
+    } catch { return 'focus'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('kalam_topology_flow', flowMode); } catch { /* storage unavailable */ }
+  }, [flowMode]);
   const prefersReducedMotion = useRef(
     typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   ).current;
@@ -773,7 +825,31 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   // straight back to its computed spot on the next render.
   const [draggedPositions, setDraggedPositions] = useState<Record<string, { x: number; y: number }>>({});
 
+  // Measured card sizes, as React Flow reports them.
+  //
+  // This is the flicker fix. React Flow 11 rebuilds every node from the object
+  // it is handed and does NOT carry over the size it measured, so in a
+  // controlled graph a node passed without width/height is "uninitialised" and
+  // rendered `visibility: hidden` until it is measured again. Every refresh,
+  // hover or selection hands it new node objects — so every card blinked.
+  // Recording the 'dimensions' changes and passing them back keeps each card
+  // initialised across updates.
+  const [measured, setMeasured] = useState<Record<string, { width: number; height: number }>>({});
+
   const onNodesChange = useCallback((changes: NodeChange[]) => {
+    const dims = changes.filter((c: any) => c.type === 'dimensions' && c.dimensions) as any[];
+    if (dims.length) {
+      setMeasured(prev => {
+        let changed = false;
+        const next = { ...prev };
+        for (const c of dims) {
+          const { width, height } = c.dimensions;
+          const p = prev[c.id];
+          if (!p || p.width !== width || p.height !== height) { next[c.id] = { width, height }; changed = true; }
+        }
+        return changed ? next : prev;
+      });
+    }
     const moves = changes.filter(
       (c): c is NodeChange & { type: 'position'; id: string; position: { x: number; y: number } } =>
         c.type === 'position' && !!(c as any).position
@@ -979,7 +1055,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     return Array.from(new Set([
       ...k8s.pods.map(p => p.namespace),
       ...k8s.services.map(s => s.namespace),
-      ...k8s.deployments.map(d => d.namespace)
+      ...k8s.deployments.map(d => d.namespace),
+      ...(k8s.inferenceServices || []).map((i: any) => i.namespace)
     ])).sort();
   }, [effK8s]);
 
@@ -991,6 +1068,15 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       nsDefaulted.current = true;
     }
   }, [namespaces, defaultNamespace]);
+
+  // A refresh in which one pod restarted must touch one card, not the whole
+  // canvas. Layout produces brand-new objects every time, so anything whose
+  // content is unchanged is swapped back for the object from the previous
+  // build; React Flow and the decoration cache below then skip it entirely.
+  // Measured: ~2,600 DOM attribute writes per live refresh before, for a
+  // change to a single pod.
+  const nodeStable = useRef(new Map<string, { sig: string; item: any }>());
+  const edgeStable = useRef(new Map<string, { sig: string; item: any }>());
 
   // Construct raw nodes and edges based on filters (Namespace and Type only)
   const { nodes: rawNodes, edges: rawEdges } = useMemo(() => {
@@ -1011,6 +1097,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     const filteredSvcs = showK8s ? k8s.services.filter(s => activeNamespaces.includes(s.namespace) && (selectedType === 'All' || selectedType === 'Service')) : [];
     const filteredDeps = showK8s ? k8s.deployments.filter(d => activeNamespaces.includes(d.namespace) && (selectedType === 'All' || selectedType === 'Deployment')) : [];
     const filteredNodes = showK8s && (selectedType === 'All' || selectedType === 'Node') ? k8s.nodes : [];
+    const filteredIsvcs = showK8s ? (k8s.inferenceServices || []).filter((i: any) => activeNamespaces.includes(i.namespace) && (selectedType === 'All' || selectedType === 'InferenceService')) : [];
 
     // ─── 1. Where everything sits ─────────────────────────────────────────
     // Computed by a pure, checked module (src/lib/layout.ts) rather than here:
@@ -1023,6 +1110,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       services: filteredSvcs,
       deployments: filteredDeps,
       nodes: filteredNodes,
+      inferenceServices: filteredIsvcs,
     });
     const at = (id: string) => {
       const c = layout.cards.get(id);
@@ -1147,6 +1235,26 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     }
 
     activeNamespaces.forEach(ns => {
+      filteredIsvcs.filter((i: any) => i.namespace === ns).forEach((i: any) => {
+        const id = relIsvcId(ns, i.name);
+        nsNodes.push({
+          id,
+          type: 'devopsNode',
+          position: at(id),
+          data: {
+            type: 'isvc',
+            name: i.name,
+            namespace: ns,
+            status: i.status,
+            health: i.health,
+            modelFormat: i.modelFormat,
+            storageUri: i.storageUri,
+            url: i.url,
+            created: i.created,
+          }
+        });
+      });
+
       const nsSvcs = filteredSvcs.filter(s => s.namespace === ns);
       const nsDeps = filteredDeps.filter(d => d.namespace === ns);
       // Same ordering the layout used, so a card's data matches its slot.
@@ -1230,6 +1338,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       services: filteredSvcs,
       deployments: filteredDeps,
       nodes: filteredNodes,
+      inferenceServices: filteredIsvcs,
     }).forEach((r) => nsEdges.push(relationToEdge(r)));
 
     // Drop edges pointing at a card that the active filters removed (a pod's
@@ -1240,9 +1349,10 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
 
     return {
       nodes: nsNodes,
-      edges: connectedEdges
+      edges: stabilize(connectedEdges, edgeStable.current)
     };
-  }, [effContainers, effK8s, selectedNamespace, selectedType]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effContainers, effK8s, selectedNamespace, selectedType, namespaces]);
 
   // ── Auto layout: a left-to-right flow computed from the real edges.
   //
@@ -1253,7 +1363,10 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
   // to dagre as clusters and come back as bands (src/lib/autoflow.ts), which
   // keeps the flow AND the context. The geometry is asserted in
   // src/lib/__tests__/autoflow.test.ts rather than eyeballed.
-  const layoutedNodes = useMemo(() => {
+  const layoutedNodes = useMemo(() => stabilize(autoOrColumns(), nodeStable.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [layoutMode, rawNodes, rawEdges]);
+  function autoOrColumns(): Node[] {
     if (layoutMode !== 'auto') return rawNodes;
     const resource = rawNodes.filter(n => n.type === 'devopsNode');
     const isPort = (n: Node) => (n.data as any)?.type === 'port';
@@ -1296,7 +1409,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         return pos ? { ...n, position: { x: pos.x, y: pos.y } } : n;
       }),
     ];
-  }, [layoutMode, rawNodes, rawEdges]);
+  }
 
   // ── Problems-only focus: unhealthy resources plus everything they touch ──
   const isProblemNode = useCallback((n: Node) => {
@@ -1305,6 +1418,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     if (d.type === 'docker') return d.state && d.state !== 'running';
     if (d.type === 'k8s-node') return d.health !== 'healthy';
     if (d.type === 'deployment') return d.health === 'failing' || d.health === 'progressing';
+    if (d.type === 'isvc') return d.health === 'failing' || d.health === 'progressing';
     return false;
   }, []);
 
@@ -1324,21 +1438,44 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     [rawNodes, isProblemNode]
   );
 
-  // Find neighbors of the hovered node
-  const neighboringNodeIds = useMemo(() => {
-    if (!hoveredNodeId) return new Set<string>();
-    const neighbors = new Set<string>([hoveredNodeId]);
-    
-    rawEdges.forEach(e => {
-      if (e.source === hoveredNodeId) {
-        neighbors.add(e.target);
-      } else if (e.target === hoveredNodeId) {
-        neighbors.add(e.source);
+  // The flow through a card: everything downstream of it (following edges
+  // forward) and everything upstream (following them backward), never mixing
+  // directions — so hovering a Service lights ISVC → Service → pods → node,
+  // not every other Service those pods happen to share a node with.
+  const adjacency = useMemo(() => {
+    const out = new Map<string, Edge[]>();
+    const inn = new Map<string, Edge[]>();
+    for (const e of rawEdges) {
+      (out.get(e.source) || out.set(e.source, []).get(e.source)!).push(e);
+      (inn.get(e.target) || inn.set(e.target, []).get(e.target)!).push(e);
+    }
+    return { out, inn };
+  }, [rawEdges]);
+  const chainOf = useCallback((start: string | null) => {
+    if (!start) return null;
+    const nodes = new Set<string>([start]);
+    const edges = new Set<string>();
+    const walk = (adj: Map<string, Edge[]>, next: 'target' | 'source') => {
+      const queue = [start];
+      const seen = new Set<string>([start]);
+      while (queue.length) {
+        const id = queue.shift()!;
+        for (const e of adj.get(id) || []) {
+          edges.add(e.id);
+          const m = e[next];
+          nodes.add(m);
+          if (!seen.has(m)) { seen.add(m); queue.push(m); }
+        }
       }
-    });
-    
-    return neighbors;
-  }, [hoveredNodeId, rawEdges]);
+    };
+    walk(adjacency.out, 'target');
+    walk(adjacency.inn, 'source');
+    return { nodes, edges };
+  }, [adjacency]);
+  const hoverChain = useMemo(() => chainOf(hoveredNodeId), [chainOf, hoveredNodeId]);
+  const neighboringNodeIds = useMemo(() => hoverChain?.nodes || new Set<string>(), [hoverChain]);
+  // What the flow dots follow in 'focus' mode: the hovered card, else the selected one.
+  const flowChain = useMemo(() => hoverChain || chainOf(selectedNodeId), [hoverChain, chainOf, selectedNodeId]);
 
   // Determine if a node matches the active search term
   const matchesSearch = useCallback((node: Node) => {
@@ -1429,7 +1566,16 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
 
     const out = base.map(node => {
       seen.add(node.id);
-      if (node.type === 'groupNode') return node;
+      const size = measured[node.id];
+      if (node.type === 'groupNode') {
+        if (!size) return node;
+        const gsig = `g|${size.width}x${size.height}`;
+        const gcached = cache.get(node.id);
+        if (gcached && gcached.base === node && gcached.sig === gsig) return gcached.out;
+        const gbuilt: Node = { ...node, width: size.width, height: size.height };
+        cache.set(node.id, { base: node, sig: gsig, out: gbuilt });
+        return gbuilt;
+      }
 
       const isHovered = hoveredNodeId === node.id;
       const isFocused = neighboringNodeIds.has(node.id);
@@ -1450,7 +1596,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       const sig = [
         isHovered, isFocused, isSearchHighlighted, isDimmed, heatmapMode,
         changeInfo ? `${changeInfo.count}@${changeInfo.lastAt}` : '',
-        dragged ? `${dragged.x},${dragged.y}` : ''
+        dragged ? `${dragged.x},${dragged.y}` : '',
+        size ? `${size.width}x${size.height}` : ''
       ].join('|');
 
       const cached = cache.get(node.id);
@@ -1458,6 +1605,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
 
       const built: Node = {
         ...node,
+        ...(size ? { width: size.width, height: size.height } : {}),
         position: dragged || node.position,
         data: {
           ...node.data,
@@ -1485,7 +1633,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     if (prev.length === out.length && prev.every((n, i) => n === out[i])) return prev;
     prevFlowNodes.current = out;
     return out;
-  }, [layoutedNodes, problemVisibleIds, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode, changeIndex, draggedPositions]);
+  }, [layoutedNodes, problemVisibleIds, hoveredNodeId, neighboringNodeIds, matchesSearch, searchTerm, heatmapMode, changeIndex, draggedPositions, measured]);
 
   // Map raw edges & inject states (hover paths)
   const edgeCache = useRef(new Map<string, { base: Edge; sig: string; out: Edge }>());
@@ -1499,11 +1647,13 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     const cache = edgeCache.current;
     const seen = new Set<string>();
 
-    const dotsOn = !prefersReducedMotion && motion === 'on';
+    const flowAll = !prefersReducedMotion && flowMode === 'all';
+    const flowFocus = !prefersReducedMotion && flowMode === 'focus';
 
     const out = base.map(edge => {
       seen.add(edge.id);
-      const isHovered = hoveredNodeId === edge.source || hoveredNodeId === edge.target;
+      const isHovered = !!hoverChain && hoverChain.edges.has(edge.id);
+      const dotsOn = flowAll || (flowFocus && !!flowChain && flowChain.edges.has(edge.id));
       const isDimmed = !!hoveredNodeId && !isHovered;
       const isCrossPanel = edge.id.includes('pod-') && edge.id.includes('docker-') || edge.id.includes('k8snode-') && edge.id.includes('docker-');
 
@@ -1554,7 +1704,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     if (prev.length === out.length && prev.every((e, i) => e === out[i])) return prev;
     prevFlowEdges.current = out;
     return out;
-  }, [rawEdges, problemVisibleIds, hoveredNodeId, motion, prefersReducedMotion, svgColors.hover, mapTheme]);
+  }, [rawEdges, problemVisibleIds, hoveredNodeId, hoverChain, flowChain, flowMode, prefersReducedMotion, svgColors.hover, mapTheme]);
 
   // Bind node click to open details drawer
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -1602,6 +1752,9 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
     const pod = effK8s.pods.find(p => nsNodeId('pod', p.namespace, p.name) === selectedNodeId);
     if (pod) return { type: 'pod', data: pod };
 
+    const isvc = (effK8s.inferenceServices || []).find((i: any) => relIsvcId(i.namespace, i.name) === selectedNodeId);
+    if (isvc) return { type: 'isvc', data: isvc };
+
     const node = effK8s.nodes.find(n => relK8sNodeId(n.name) === selectedNodeId);
     if (node) return { type: 'k8s-node', data: node };
 
@@ -1618,6 +1771,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       case 'service': return { label: 'YAML', path: `/api/k8s/inspect/service/${d.namespace}/${d.name}` };
       case 'deployment': return { label: 'YAML', path: `/api/k8s/inspect/deployment/${d.namespace}/${d.name}` };
       case 'k8s-node': return { label: 'YAML', path: `/api/k8s/inspect/node/${d.name}` };
+      case 'isvc': return { label: 'YAML', path: `/api/k8s/inspect/isvc/${d.namespace}/${d.name}` };
       default: return null;
     }
   }, [selectedResource]);
@@ -1878,6 +2032,8 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       // Which runtimes these containers actually came from. Docker is one
       // option; a plain Kubernetes node reports containerd instead.
       runtimes: Array.from(new Set(effContainers.map(c => (c as any).runtime || 'docker'))).sort(),
+      isvcs: (effK8s.inferenceServices || []).length,
+      isvcsReady: (effK8s.inferenceServices || []).filter((i: any) => i.health === 'healthy').length,
     };
   }, [effContainers, effK8s]);
 
@@ -1906,6 +2062,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
         {healthStats.nodes > 0 && <StatChip color="#94a3b8" label="Nodes" value={`${healthStats.nodesReady}/${healthStats.nodes} ready`} warn={healthStats.nodesReady < healthStats.nodes} />}
         {healthStats.pods > 0 && <StatChip color="#34d399" label="Pods" value={`${healthStats.podsRunning}/${healthStats.pods} healthy`} />}
         {healthStats.services > 0 && <StatChip color="#fbbf24" label="Services" value={String(healthStats.services)} />}
+        {healthStats.isvcs > 0 && <StatChip color="#f472b6" label="Models" value={`${healthStats.isvcsReady}/${healthStats.isvcs} ready`} warn={healthStats.isvcsReady < healthStats.isvcs} />}
         {healthStats.deployments > 0 && <StatChip color="#a78bfa" label="Deploys" value={String(healthStats.deployments)} />}
         {healthStats.docker > 0 && (
           <StatChip
@@ -2013,24 +2170,25 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           {mapTheme === 'dark' ? <Sun size={11} /> : <Moon size={11} />} {mapTheme === 'dark' ? 'Light' : 'Dark'}
         </button>
 
-        {/* Animation budget. Auto keeps the flow dots on small graphs and drops
-            them once there are more than the canvas can animate smoothly. */}
+        {/* Flow animation: focus (default) / all / off */}
         <button
-          onClick={() => setMotion(m => (m === 'on' ? 'off' : 'on'))}
+          onClick={() => setFlowMode(m => (m === 'focus' ? 'all' : m === 'all' ? 'off' : 'focus'))}
           title={
-            motion === 'on'
-              ? 'Flow animation is on — dashes travel along every live link. Click to stop all movement.'
-              : 'Flow animation is off. Click to turn it back on.'
+            flowMode === 'focus'
+              ? 'Flow: Focus — hover or select a card to see traffic move along its whole path (e.g. InferenceService → Service → pods → node). Click for All.'
+              : flowMode === 'all'
+                ? 'Flow: All — every link animates. Heavier on large clusters. Click to turn flow off.'
+                : 'Flow: Off — no movement. Click for Focus.'
           }
           style={{
-            background: motion === 'off' ? 'var(--tp-ink40, rgba(2, 6, 23, 0.4))' : 'rgba(56, 189, 248, 0.12)',
-            border: `1px solid ${motion === 'off' ? 'var(--tp-w08, rgba(255,255,255,0.08))' : 'rgba(56, 189, 248, 0.4)'}`,
-            borderRadius: '6px', color: motion === 'off' ? 'var(--tp-muted, #94a3b8)' : '#38bdf8',
+            background: flowMode === 'off' ? 'var(--tp-ink40, rgba(2, 6, 23, 0.4))' : 'rgba(56, 189, 248, 0.12)',
+            border: `1px solid ${flowMode === 'off' ? 'var(--tp-w08, rgba(255,255,255,0.08))' : 'rgba(56, 189, 248, 0.4)'}`,
+            borderRadius: '6px', color: flowMode === 'off' ? 'var(--tp-muted, #94a3b8)' : '#38bdf8',
             padding: '6px 12px', fontSize: '11px', cursor: 'pointer', fontWeight: 600,
             display: 'flex', alignItems: 'center', gap: '5px'
           }}
         >
-          <Activity size={11} /> Flow: {motion === 'on' ? 'On' : 'Off'}
+          <Activity size={11} /> Flow: {flowMode === 'focus' ? 'Focus' : flowMode === 'all' ? 'All' : 'Off'}
         </button>
 
         {/* Problems-only focus */}
@@ -2169,6 +2327,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           <option value="Service">Kubernetes Services</option>
           <option value="Deployment">Kubernetes Deployments</option>
           <option value="Node">Kubernetes Host Nodes</option>
+          <option value="InferenceService">KServe InferenceServices</option>
         </select>
 
         {/* Heatmap settings */}
@@ -2451,7 +2610,11 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
           nodeDragThreshold={2}
           // With ~90 cards, drawing the ones scrolled out of view costs more
           // than the culling does.
-          onlyRenderVisibleElements
+          // Viewport culling unmounts and remounts cards as they cross the edge
+          // of the view — measured as 360+ card remounts per 4 s of panning and
+          // a full remount on every refresh: the flicker. Below a few hundred
+          // cards drawing everything is cheaper; above that culling wins.
+          onlyRenderVisibleElements={rawNodes.length > 400}
           fitView
           fitViewOptions={{ padding: 0.2 }}
           minZoom={0.2}
@@ -2486,7 +2649,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
             nodeColor={(n: Node) => {
               if (n.type === 'groupNode') return 'transparent';
               const nodeColors: Record<string, string> = {
-                docker: '#38bdf8', port: '#818cf8', service: '#fbbf24',
+                docker: '#38bdf8', port: '#818cf8', service: '#fbbf24', isvc: '#f472b6',
                 deployment: '#a78bfa', pod: '#34d399', 'k8s-node': 'var(--tp-muted, #94a3b8)'
               };
               return nodeColors[(n.data as any)?.type] || 'rgba(148,163,184,0.5)';
@@ -2528,7 +2691,7 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
               <div style={{ display: 'flex', flexDirection: 'column' }}>
                 <span style={{ fontSize: '10px', textTransform: 'uppercase', color: '#64748b', fontWeight: 'bold', letterSpacing: '0.05em' }}>
-                  {selectedResource.type === 'docker' ? 'Docker Container' : `Kubernetes ${selectedResource.type}`}
+                  {selectedResource.type === 'docker' ? 'Docker Container' : selectedResource.type === 'isvc' ? 'KServe InferenceService' : `Kubernetes ${selectedResource.type}`}
                 </span>
                 <span style={{ fontSize: '15px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '300px' }}>
                   {selectedResource.data.name}
@@ -2611,6 +2774,18 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
                           {formatAge(selectedResource.data.created)}
                         </td>
                       </tr>
+                      {selectedResource.type === 'isvc' && ([
+                        ['Model format', selectedResource.data.modelFormat],
+                        ['Storage', selectedResource.data.storageUri],
+                        ['Runtime', selectedResource.data.runtime],
+                        ['URL', selectedResource.data.url],
+                        ['Traffic', selectedResource.data.traffic],
+                      ] as Array<[string, string]>).filter(([, v]) => v).map(([k, v]) => (
+                        <tr key={k} style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
+                          <td style={{ padding: '8px 0', color: '#64748b' }}>{k}</td>
+                          <td style={{ padding: '8px 0', fontFamily: 'monospace', fontSize: '11px', wordBreak: 'break-all' }}>{v}</td>
+                        </tr>
+                      ))}
                       {selectedResource.data.ip && (
                         <tr style={{ borderBottom: '1px solid var(--tp-w04, rgba(255,255,255,0.04))' }}>
                           <td style={{ padding: '8px 0', color: '#64748b' }}>IP Address</td>
@@ -3266,10 +3441,13 @@ const TopologyGraphInner: React.FC<TopologyGraphProps> = ({
       }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: '5px', marginRight: '8px', paddingRight: '12px', borderRight: '1px solid var(--tp-w08, rgba(255,255,255,0.08))' }}>
           <span style={{ fontSize: '10px', fontWeight: 600, color: 'var(--tp-muted, #94a3b8)', letterSpacing: '0.04em' }}>FLOW →</span>
-          <span style={{ fontSize: '9px', color: '#64748b' }}>Port → Container → Service → Deploy → Pod → Node</span>
+          <span style={{ fontSize: '9px', color: '#64748b' }}>InferenceService → Service → Workload → Pod → Node · Port → Container</span>
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
           <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#0ea5e9', display: 'inline-block' }}></span> Docker
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+          <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#f472b6', display: 'inline-block' }}></span> InferenceService
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
           <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#10b981', display: 'inline-block' }}></span> Pod

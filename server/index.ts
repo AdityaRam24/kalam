@@ -472,7 +472,7 @@ app.get('/api/k8s/resources', async (req, res) => {
   // queues live there, and their pods would otherwise have no owner. ReplicaSets
   // come from a PROJECTED query: only the owner mapping is used, and their full
   // JSON is routinely the largest object in a cluster.
-  const [nodes, daemonsets, statefulsets, services, deployments, pods, rs] = await Promise.all([
+  const [nodes, daemonsets, statefulsets, services, deployments, pods, rs, isvcs] = await Promise.all([
     kubectlKind('get nodes'),
     kubectlKind('get ds -A'),
     kubectlKind('get sts -A'),
@@ -486,6 +486,9 @@ app.get('/api/k8s/resources', async (req, res) => {
       K8S_KIND_TIMEOUT,
       K8S_KIND_BUFFER,
     ),
+    // Optional CRD (KServe). Absent on most clusters, so it never counts as a
+    // failed kind — it only adds InferenceService cards when it exists.
+    kubectlKind('get inferenceservices.serving.kserve.io -A'),
   ]);
 
   const kinds: Record<string, string> = {
@@ -498,7 +501,7 @@ app.get('/api/k8s/resources', async (req, res) => {
   const owners = rs.success ? parseReplicaSetOwners(rs.stdout) : undefined;
   const result = normalizeClusterItems(
     [...nodes.items, ...daemonsets.items, ...statefulsets.items,
-     ...services.items, ...deployments.items, ...pods.items],
+     ...services.items, ...deployments.items, ...pods.items, ...isvcs.items],
     owners,
   );
 
@@ -517,7 +520,7 @@ app.get('/api/k8s/resources', async (req, res) => {
     return res.status(500).json({ error: 'Failed to query Kubernetes resources', details: warning, kinds });
   }
 
-  res.json({ ...result, warning, diagnostics: { kinds } });
+  res.json({ ...result, warning, diagnostics: { kinds, inferenceServices: isvcs.status } });
 });
 
 // Which workload kinds may be acted on, and the resource prefix kubectl needs.

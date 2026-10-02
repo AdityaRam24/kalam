@@ -35,7 +35,13 @@ from the SSH inventory, or **All hosts** — chosen with the source picker in th
 | **Light / Dark** | Map colour scheme, independent of the app theme; remembered per browser. |
 | **Capture map** | PNG of the canvas exactly as drawn (works in fullscreen). |
 | Problems | Shows only unhealthy objects and what they connect to. Uses kubectl status, so crash-looping and image-pull failures count. |
-| Card LEDs | Green = healthy, amber blinking = in progress / degraded, red blinking = failing, grey = completed. Workload and node cards now show status too (e.g. node `Ready · DiskPressure`). |
+| Card LEDs | Steady green = healthy; amber blinking = in progress / degraded; red blinking = failing; grey = completed. Only non-healthy LEDs animate. Workload and node cards show status too (e.g. node `Ready · DiskPressure`). |
+| **InferenceServices** | KServe ISVCs are drawn as the first column (pink cards: model format, status, storage, URL). Edges: **ISVC → Service** (`serves`) and **ISVC → workload** (`deploys`), taken from the `serving.kserve.io/inferenceservice` label on the predictor pods; if no predictor pod exists yet, KServe's `<isvc>-predictor…` naming is used and the edge is drawn faint with a `?`. Click a card for its YAML, events and model details. "Models x/y ready" appears in the summary bar; type filter "KServe InferenceServices". |
+| **Flow: Focus / All / Off** | **Focus** (default): hover or select any card and the whole request path through it animates and lights up — e.g. ISVC → Service → Workload → Pods → Node — everything else dims. **All** animates every link (heavier on big clusters). **Off** = no movement. Remembered per browser. |
+
+Flow order on the map: **InferenceService → Service → Workload → Pod → Node** (and Port → Container for plain containers).
+
+Performance notes (measured on 150 cards / 240 edges): idle 60 fps; no card is unmounted/re-mounted while panning, zooming or refreshing; a live refresh only touches the cards that changed. The flicker was React Flow hiding every re-passed card until re-measured — Kalam now keeps the measured sizes.
 
 Code: `src/components/TopologyGraph.tsx`, signature in `src/lib/topology.ts`.
 
@@ -95,6 +101,11 @@ Which **model** runs on which GPU, and how hard it works.
 - Live nvidia-smi on/off, auto-refresh (15 / 30 / 60 s), namespace filter, search, CSV export. At most 24 containers are probed per refresh (`KALAM_GPU_MAX_PROBES`).
 
 Code: `src/components/GpuUtilization.tsx`, `server/k8s/gpu.ts`.
+
+## App-wide behaviour
+- **Refresh loop** — the cluster is re-read every 10 s only while a page that shows it is open (Dashboard, Containers, Kubernetes, PCAI Stack, Observability), never while the browser tab is hidden, and never twice at once. A response that arrives after a newer read (or after you switched source) is discarded.
+- **Last good read** — if one refresh fails (SSH hiccup, slow `kubectl`), the screen keeps the previous data with a banner "Showing the last good read from HH:MM" instead of going blank. In "All hosts", each host falls back to its own last good read.
+- **Lazy pages** — VMs (terminal), Host Logs, Observability, Change History, Cheat Sheet, PCAI Stack and GPU load on first open; the startup bundle is ~550 KB instead of ~1.2 MB. The screenshot library loads on first capture.
 
 ## Disabled (commented out, not deleted)
 Agent Chat, Agent Teamwork, PCAI Assistant, Image Hardener, the agent/model **settings button**, the "HPE AI: model" pill, the dashboard "Launch AI Console" card and the settings modal (incl. the model picker). They are wrapped in `Disabled:` comments in `src/App.tsx` — un-comment those blocks to restore them.

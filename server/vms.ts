@@ -806,6 +806,11 @@ export const DISCOVER_K8S_CMD = [
   "(kubectl get rs --all-namespaces --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,OKIND:.metadata.ownerReferences[0].kind,ONAME:.metadata.ownerReferences[0].name 2>/dev/null || true)",
   "echo @@KPODS@@",
   `(kubectl get pods -A -o json ${K8S_REQ} 2>/dev/null || kubectl get pods -A ${K8S_REQ} 2>&1 | head -c 300)`,
+  // KServe InferenceServices: an optional CRD, so no error text on failure —
+  // an empty section simply means "no KServe here". Last, so a truncated read
+  // never costs the core kinds.
+  "echo @@KISVC@@",
+  `(kubectl get inferenceservices.serving.kserve.io -A -o json ${K8S_REQ} 2>/dev/null || true)`,
   "echo @@END@@",
 ].join('; ');
 
@@ -975,6 +980,8 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
       ...kitems(k8sOut, 'KSVCS'),
       ...kitems(k8sOut, 'KDEPLOYS'),
       ...kitems(k8sOut, 'KPODS'),
+      // Not through kitems(): an absent CRD must not show up as a failed kind.
+      ...readKindItems(section(k8sOut, 'KISVC')).items,
     ],
     parseReplicaSetOwners(section(k8sOut, 'KRS')),
   );
@@ -1043,6 +1050,7 @@ vmsRouter.post('/api/vms/discover', async (req, res) => {
 
   res.json({
     reachable: true, engines, containers, pods, services, nodes, deployments,
+    inferenceServices: cluster.inferenceServices,
     crictl, systemServices, listeningPorts,
     warning,
     // Everything needed to explain an empty view without guessing.

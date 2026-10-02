@@ -24,7 +24,9 @@ export type RelationKind =
   | 'routes'    // service    → pod
   | 'runs-on'   // pod        → cluster node
   | 'backs'     // pod        → the container actually running it
-  | 'hosts';    // cluster node → container
+  | 'hosts'     // cluster node → container
+  | 'serves'    // InferenceService → the Service that receives its traffic
+  | 'deploys';  // InferenceService → the workload running its predictor
 
 export interface Relation {
   id: string;
@@ -41,7 +43,12 @@ export interface RelationInput {
   services: any[];
   deployments: any[];
   nodes: any[];
+  /** KServe InferenceServices (optional — most clusters have none). */
+  inferenceServices?: any[];
 }
+
+/** The label KServe puts on every pod it runs for an InferenceService. */
+export const ISVC_LABEL = 'serving.kserve.io/inferenceservice';
 
 // ── Node ids ────────────────────────────────────────────────────────────────
 // Shared with the renderer so an edge can never point at an id that no card
@@ -53,6 +60,7 @@ export const svcId = (ns: string, name: string) => `svc-${ns}-${cleanId(name)}`;
 export const deployId = (ns: string, name: string) => `deploy-${ns}-${cleanId(name)}`;
 export const k8sNodeId = (name: string) => `k8snode-${cleanId(name)}`;
 export const containerId = (id: string) => `docker-${(id || '').slice(0, 12)}`;
+export const isvcId = (ns: string, name: string) => `isvc-${ns}-${cleanId(name)}`;
 
 /** Does this pod's label set satisfy every key/value in the selector? */
 export function selectorMatches(selector: Record<string, string>, labels: Record<string, string>): boolean {
@@ -198,6 +206,52 @@ export function buildRelations(input: RelationInput): Relation[] {
     const source = podId(pod.namespace, pod.name);
     const target = containerId(c.id);
     add({ id: `edge-${source}-${target}`, source, target, kind: 'backs' });
+  }
+
+  // ── InferenceService → Service / Workload ─────────────────────────────────
+  // The request path of a served model: ISVC → Service → workload → pods.
+  // Exact first: KServe labels every predictor (and transformer/explainer)
+  // pod with the ISVC name, so the workloads owning those pods and the
+  // Services selecting them are the ISVC's own. Only when no such pod exists
+  // yet (scaled to zero, still rolling out) does KServe's naming convention
+  // (`<isvc>-predictor…`) stand in, drawn as inferred.
+  const isvcs = input.inferenceServices || [];
+  for (const i of isvcs) {
+    if (!i?.name) continue;
+    const source = isvcId(i.namespace, i.name);
+    const mine = pods.filter((p) => p.namespace === i.namespace && p.labels?.[ISVC_LABEL] === i.name);
+
+    if (mine.length > 0) {
+      for (const p of mine) {
+        if (p.owner?.name && workloadByKey.has(`${p.namespace}/${p.owner.name}`)) {
+          const target = deployId(p.namespace, p.owner.name);
+          add({ id: `edge-${source}-${target}`, source, target, kind: 'deploys' });
+        }
+      }
+      for (const s of services) {
+        if (s?.namespace !== i.namespace) continue;
+        const selector = parseSelector(s.selector);
+        if (selector && mine.some((p) => selectorMatches(selector, p.labels || {}))) {
+          const target = svcId(s.namespace, s.name);
+          add({ id: `edge-${source}-${target}`, source, target, kind: 'serves' });
+        }
+      }
+      continue;
+    }
+
+    const prefix = `${i.name}-`;
+    for (const d of deployments) {
+      if (d?.namespace === i.namespace && d.name?.startsWith(prefix)) {
+        const target = deployId(d.namespace, d.name);
+        add({ id: `edge-${source}-${target}`, source, target, kind: 'deploys', inferred: true });
+      }
+    }
+    for (const s of services) {
+      if (s?.namespace === i.namespace && (s.name === i.name || s.name?.startsWith(prefix))) {
+        const target = svcId(s.namespace, s.name);
+        add({ id: `edge-${source}-${target}`, source, target, kind: 'serves', inferred: true });
+      }
+    }
   }
 
   // ── Node → Container ──────────────────────────────────────────────────────

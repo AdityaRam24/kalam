@@ -127,7 +127,7 @@ describe('normalizeClusterItems', () => {
   });
 
   it('handles an empty or junk payload', () => {
-    expect(normalizeClusterItems([])).toEqual({ pods: [], services: [], deployments: [], nodes: [] });
+    expect(normalizeClusterItems([])).toEqual({ pods: [], services: [], deployments: [], nodes: [], inferenceServices: [] });
     expect(normalizeClusterItems([{}, null, { kind: 'Unknown' }] as any).pods).toEqual([]);
   });
 });

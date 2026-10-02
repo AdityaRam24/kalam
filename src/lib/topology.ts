@@ -21,6 +21,7 @@ export interface TopologyK8s {
   services: any[];
   deployments: any[];
   nodes: any[];
+  inferenceServices?: any[];
 }
 
 /** "Up 7 minutes" and "Up 8 minutes" are the same state to the canvas. */
@@ -46,4 +47,5 @@ export const canvasSignature = (
     s: (k8s?.services || []).map((s: any) => [s.name, s.namespace, s.type, s.clusterIp, s.ports, s.selector]),
     d: (k8s?.deployments || []).map((d: any) => [d.name, d.namespace, d.ready, d.replicas, d.available, d.status]),
     n: (k8s?.nodes || []).map((n: any) => [n.name, n.status, n.role, n.ip, (n.pressure || []).join(','), n.schedulable]),
+    i: (k8s?.inferenceServices || []).map((i: any) => [i.name, i.namespace, i.status, i.health, i.url, i.modelFormat, i.storageUri, i.traffic]),
   });

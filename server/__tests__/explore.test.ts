@@ -3,7 +3,7 @@
 // change-history views. All pure, so the rules are asserted rather than trusted.
 
 import { describe, it, expect } from 'vitest';
-import { podDisplayStatus, podHealth, workloadStatus, normalizePod, normalizeWorkload, normalizeNode } from '../k8s/workloads.js';
+import { podDisplayStatus, podHealth, workloadStatus, normalizePod, normalizeWorkload, normalizeNode, normalizeInferenceService, normalizeClusterItems } from '../k8s/workloads.js';
 import { KINDS, rowsFor, stepFor, daysUntil, isvcModel } from '../k8s/resources.js';
 import { parseTopNodes, parseTopPods } from '../k8s/top.js';
 import {
@@ -102,6 +102,25 @@ describe('workloadStatus', () => {
   it('an absent updated count does not read as a rollout in progress', () => {
     const w = normalizeWorkload({ kind: 'StatefulSet', metadata: { name: 'pg' }, spec: { replicas: 2 }, status: { readyReplicas: 2, availableReplicas: 2 } });
     expect(w.status).toBe('Available');
+  });
+});
+
+describe('normalizeInferenceService', () => {
+  const isvc = (cond: any, extra: any = {}) => ({
+    kind: 'InferenceService',
+    metadata: { name: 'llama', namespace: 'ai', ...(extra.metadata || {}) },
+    spec: { predictor: { model: { modelFormat: { name: 'huggingface' }, storageUri: 'pvc://models/llama' } } },
+    status: { url: 'https://llama.ai.example', conditions: cond ? [cond] : [], components: { predictor: { traffic: [{ revisionName: 'llama-predictor-00001', percent: 100 }] } } },
+  });
+  it('reads readiness from the Ready condition, like kubectl READY', () => {
+    expect(normalizeInferenceService(isvc({ type: 'Ready', status: 'True' }))).toMatchObject({ status: 'Ready', health: 'healthy', modelFormat: 'huggingface', storageUri: 'pvc://models/llama', url: 'https://llama.ai.example', traffic: 'llama-predictor-00001:100%' });
+    expect(normalizeInferenceService(isvc({ type: 'Ready', status: 'False', reason: 'RevisionFailed' }))).toMatchObject({ status: 'RevisionFailed', health: 'failing' });
+    expect(normalizeInferenceService(isvc({ type: 'Ready', status: 'Unknown' }))).toMatchObject({ health: 'progressing' });
+    expect(normalizeInferenceService(isvc(null))).toMatchObject({ status: 'Unknown', health: 'unknown' });
+    expect(normalizeInferenceService(isvc({ type: 'Ready', status: 'True' }, { metadata: { deletionTimestamp: 'x' } }))).toMatchObject({ status: 'Terminating' });
+  });
+  it('is collected by normalizeClusterItems', () => {
+    expect(normalizeClusterItems([isvc({ type: 'Ready', status: 'True' })]).inferenceServices).toHaveLength(1);
   });
 });
 
