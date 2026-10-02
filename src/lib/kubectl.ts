@@ -1,7 +1,7 @@
 // kubectl reference data and the pure logic behind the interactive guide.
 //
 // Kept out of the component on purpose: risk classification, placeholder
-// parsing and command building decide whether Kalam will *execute* something
+// parsing and command building decide whether Trinetra will *execute* something
 // against a live cluster, so they are unit-tested rather than buried in JSX.
 
 // ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ export function classifyRisk(command: string): Risk {
 
 /**
  * Shell metacharacters mean the command does more than talk to the API server —
- * it redirects to a file, pipes, or chains. Kalam never auto-runs those.
+ * it redirects to a file, pipes, or chains. Trinetra never auto-runs those.
  */
 export function hasShellSideEffects(command: string): boolean {
   return /[>|;&`$]|\$\(/.test(command);
@@ -107,7 +107,7 @@ export interface Runnability {
 }
 
 /**
- * Kalam only executes a command when all three hold: it is read-only, every
+ * Trinetra only executes a command when all three hold: it is read-only, every
  * placeholder is filled, and it contains no shell redirection or chaining.
  * Anything else is copy-only — the operator runs it themselves, deliberately.
  */

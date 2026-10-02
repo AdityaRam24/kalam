@@ -1,9 +1,9 @@
 @echo off
-title Kalam - Project Setup & Requirements Installer
+title Trinetra - Project Setup & Requirements Installer
 color 0A
 
 echo ===================================================
-echo           KALAM - AUTOMATED PROJECT SETUP          
+echo           TRINETRA - AUTOMATED PROJECT SETUP          
 echo ===================================================
 echo.
 
@@ -38,7 +38,7 @@ echo.
 echo [2/4] Verifying environment configuration (.env)...
 if not exist ".env" (
     echo Creating default .env file...
-    echo # Kalam Configuration > .env
+    echo # Trinetra Configuration > .env
     echo PORT=3001 >> .env
     echo GEMINI_API_KEY= >> .env
     echo [SUCCESS] Created .env file. Add your GEMINI_API_KEY if using Google Gemini.
@@ -57,19 +57,21 @@ if %errorlevel% neq 0 (
 )
 echo [SUCCESS] All dependencies successfully installed.
 
-:: 3b. Register the global 'kalam' CLI command
+:: 3b. Register the global 'trinetra' CLI command
 echo.
-echo [3b/4] Registering the global 'kalam' command (npm link)...
+echo [3b/4] Registering the global 'trinetra' command (npm link)...
+:: MIGRATION: drop the pre-rename global command, if any
+call npm unlink -g kalam >nul 2>&1
 call npm link
 if %errorlevel% neq 0 (
     echo [WARNING] 'npm link' failed. You can retry later by running install-cli.bat
     echo           (running as Administrator often fixes this).
 ) else (
-    echo [SUCCESS] 'kalam' command registered. Open a NEW terminal to use it.
+    echo [SUCCESS] 'trinetra' command registered. Open a NEW terminal to use it.
 )
 
 :: 4. Check Optional Prerequisites (container runtime & kubectl)
-::    None of these are required. Kalam reads containers from whichever
+::    None of these are required. Trinetra reads containers from whichever
 ::    runtime a machine has (Docker, containerd/crictl, nerdctl, podman), and a
 ::    machine with none of them still shows every VM in the SSH inventory.
 echo.
@@ -99,7 +101,7 @@ echo ===================================================
 echo            SETUP COMPLETED SUCCESSFULLY!           
 echo ===================================================
 echo.
-set /p START_DEV="Do you want to start Kalam in development mode now? (Y/N): "
+set /p START_DEV="Do you want to start Trinetra in development mode now? (Y/N): "
 if /i "%START_DEV%"=="Y" (
     echo Starting dev server...
     npm run dev

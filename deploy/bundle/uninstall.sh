@@ -44,13 +44,14 @@ fi
 
 if $PURGE; then
   "${KC[@]}" -n "$NAMESPACE" delete pvc -l app.kubernetes.io/instance="$RELEASE" --ignore-not-found
-  "${KC[@]}" -n "$NAMESPACE" delete secret trinetra-ssh trinetra-llm trinetra-registry kalam-ssh kalam-llm kalam-registry --ignore-not-found
+  OLD=kalam   # MIGRATION: leftovers of the pre-rename install are cleaned up too
+  "${KC[@]}" -n "$NAMESPACE" delete secret trinetra-ssh trinetra-llm trinetra-registry "$OLD-ssh" "$OLD-llm" "$OLD-registry" --ignore-not-found
   if [ -z "$("${KC[@]}" -n "$NAMESPACE" get all,pvc,secret,configmap -o name 2>/dev/null | grep -v -e 'kube-root-ca' -e 'default-token')" ]; then
     "${KC[@]}" delete ns "$NAMESPACE" --ignore-not-found --wait=false
   else
     echo "namespace $NAMESPACE still holds other objects; left in place"
   fi
-  for cache_ns in trinetra-image-cache kalam-image-cache; do   # kalam-*: from before the rename
+  for cache_ns in trinetra-image-cache kalam-image-cache; do   # MIGRATION: the second is from before the rename
     if "${KC[@]}" get ns "$cache_ns" >/dev/null 2>&1; then
       # Empty each node's cache directory before the pods that own it go away.
       for pod in $("${KC[@]}" -n "$cache_ns" get pods -o name); do

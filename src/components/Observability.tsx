@@ -10,7 +10,7 @@
 //    CVD ΔE 8.4 dark / 9.1 light, normal-vision 19.7 / 22.9, all ≥3:1 on the
 //    chart surface. Three light-mode hues sit under 3:1, which obligates the
 //    relief rule — hence the always-present legend AND direct labels.
-//  * Status colours (Kalam's --status-*) are RESERVED for state and never used
+//  * Status colours (Trinetra's --status-*) are RESERVED for state and never used
 //    as a series colour, and every status chip pairs the colour with a word so
 //    it never reads by colour alone.
 //  * A null is a hole. An unreachable host breaks the line rather than joining
@@ -26,7 +26,7 @@ import ClusterMetrics from './ClusterMetrics';
 import { downloadText, stamp, toCsv } from '../lib/health';
 
 // ── Palette ─────────────────────────────────────────────────────────────────
-// Validated with the dataviz palette checker against Kalam's own surfaces
+// Validated with the dataviz palette checker against Trinetra's own surfaces
 // (#0A0D12 dark / #FFFFFF light). Order is the CVD-safety mechanism — do not
 // re-order or extend without re-running the validator.
 const SERIES_DARK = ['#3987e5', '#d55181', '#9085e9', '#199e70', '#c98500'];
@@ -622,7 +622,7 @@ const Observability: React.FC<ObservabilityProps> = ({ k8sResources, source = 'l
           <Activity size={12} />
           {pollerOn
             ? `Sampling every ${status?.intervalSec}s · keeping ${status?.retentionHours}h`
-            : 'Background sampling off — set KALAM_METRICS=1 to record continuously'}
+            : 'Background sampling off — set TRINETRA_METRICS=1 to record continuously'}
         </div>
       </div>
 
@@ -728,7 +728,7 @@ const Observability: React.FC<ObservabilityProps> = ({ k8sResources, source = 'l
           <Gauge size={22} style={{ opacity: 0.5, marginBottom: 8 }} />
           <div style={{ color: 'var(--text-heading)', fontWeight: 600, marginBottom: 4 }}>No samples yet</div>
           Add hosts on the <strong>K8s Nodes</strong> tab, then press <strong>Sample now</strong> above.<br />
-          To record continuously, start Trinetra with <code>KALAM_METRICS=1</code>.
+          To record continuously, start Trinetra with <code>TRINETRA_METRICS=1</code>.
         </div>
       ) : (
         <>

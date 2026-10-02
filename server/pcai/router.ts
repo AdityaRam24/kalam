@@ -426,7 +426,7 @@ pcaiRouter.post('/api/pcai/chat/stream', async (req, res) => {
 
   const kb = await loadKB();
   if (!kb || kb.chunks.length === 0) {
-    sse({ type: 'delta', text: '**Knowledge base is empty.** Run `kalam train` (or click Train in the UI) to build the PCAI brain first.' });
+    sse({ type: 'delta', text: '**Knowledge base is empty.** Run `trinetra train` (or click Train in the UI) to build the PCAI brain first.' });
     return done();
   }
 

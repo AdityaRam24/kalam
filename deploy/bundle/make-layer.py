@@ -1,4 +1,4 @@
-"""Write the Kalam application layer as a tarball that `crane mutate --append`
+"""Write the Trinetra application layer as a tarball that `crane mutate --append`
 lays on top of node:22-alpine.
 
 Built with tarfile rather than `tar` because owners and modes have to be exact
@@ -43,11 +43,11 @@ with tarfile.open(out, 'w', format=tarfile.PAX_FORMAT) as tar:
     passwd = read(os.path.join(base_etc, 'passwd')).rstrip(b'\n')
     group = read(os.path.join(base_etc, 'group')).rstrip(b'\n')
     dir_entry(tar, 'etc')
-    file_entry(tar, 'etc/passwd', passwd + b'\nkalam:x:10001:10001:kalam:/home/kalam:/sbin/nologin\n')
-    file_entry(tar, 'etc/group', group + b'\nkalam:x:10001:\n')
+    file_entry(tar, 'etc/passwd', passwd + b'\ntrinetra:x:10001:10001:trinetra:/home/trinetra:/sbin/nologin\n')
+    file_entry(tar, 'etc/group', group + b'\ntrinetra:x:10001:\n')
 
     dir_entry(tar, 'home')
-    dir_entry(tar, 'home/kalam', UID, GID, 0o750)
+    dir_entry(tar, 'home/trinetra', UID, GID, 0o750)
     # Everything the app writes lives here; the chart mounts a volume over it.
     dir_entry(tar, 'data', UID, GID, 0o770)
 
@@ -59,7 +59,7 @@ with tarfile.open(out, 'w', format=tarfile.PAX_FORMAT) as tar:
     file_entry(tar, 'usr/local/bin/kubectl', read(kubectl), 0o755)
 
     # /app is root-owned and read-only to the app, except server/, which holds
-    # the fallback state paths used when KALAM_*_PATH is not set.
+    # the fallback state paths used when TRINETRA_*_PATH is not set.
     dir_entry(tar, 'app')
     for root, dirs, files in os.walk(app_dir):
         dirs.sort()

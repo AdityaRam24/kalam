@@ -1,14 +1,14 @@
 // The background sampling loop.
 //
 // OFF BY DEFAULT, for the same reason the history poller is (see
-// server/history/poller.ts): Kalam is often pointed at someone else's
+// server/history/poller.ts): Trinetra is often pointed at someone else's
 // production estate, and it does not get to start SSHing into every host on a
-// timer because it was launched. Set KALAM_METRICS=1 to opt in.
+// timer because it was launched. Set TRINETRA_METRICS=1 to opt in.
 //
-//   KALAM_METRICS=1                    enable
-//   KALAM_METRICS_INTERVAL_SEC=30      how often (default 30s, floor 10s)
-//   KALAM_METRICS_SOURCES=all          `all` = every inventory VM, or a list
-//   KALAM_METRICS_RETENTION_HOURS=48   how far back to keep samples
+//   TRINETRA_METRICS=1                    enable
+//   TRINETRA_METRICS_INTERVAL_SEC=30      how often (default 30s, floor 10s)
+//   TRINETRA_METRICS_SOURCES=all          `all` = every inventory VM, or a list
+//   TRINETRA_METRICS_RETENTION_HOURS=48   how far back to keep samples
 //
 // 30 seconds is chosen to be finer than the 5-minute history capture — this is
 // what you watch while doing something, not an audit trail — while staying
@@ -32,7 +32,7 @@ export interface MetricsPollerState {
 
 const state: MetricsPollerState = {
   enabled: false,
-  intervalSec: Number(process.env.KALAM_METRICS_INTERVAL_SEC || 30),
+  intervalSec: Number(process.env.TRINETRA_METRICS_INTERVAL_SEC || 30),
   sources: [],
   running: false,
   last: {},
@@ -44,7 +44,7 @@ export function metricsPollerState(): MetricsPollerState {
 
 async function resolveSources() {
   const vms = await loadVms();
-  const raw = (process.env.KALAM_METRICS_SOURCES || 'all').trim();
+  const raw = (process.env.TRINETRA_METRICS_SOURCES || 'all').trim();
   if (raw === 'all') return vms;
   const wanted = new Set(raw.split(',').map((s) => s.trim()).filter(Boolean));
   return vms.filter((v) => wanted.has(v.name));
@@ -100,7 +100,7 @@ let timer: NodeJS.Timeout | undefined;
 
 /** Called once at startup. Returns whether the loop actually started. */
 export function startMetricsPoller(): boolean {
-  const flag = (process.env.KALAM_METRICS || '').toLowerCase();
+  const flag = (process.env.TRINETRA_METRICS || '').toLowerCase();
   state.enabled = flag === '1' || flag === 'true' || flag === 'yes';
   if (!state.enabled || timer) return false;
 

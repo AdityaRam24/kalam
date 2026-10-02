@@ -74,6 +74,7 @@ EXTRA_ARGS=()
 DRY_RUN=false
 PACKAGE_ONLY=false
 SKIP_TEST=false
+KEEP_OLD=false
 
 usage() {
   cat <<EOF
@@ -123,6 +124,8 @@ Other
       --package-only        push the image and write the PCAI import chart; no install
       --dry-run             show what would be installed; change nothing
       --skip-test           do not run helm test
+      --keep-old            after migrating a pre-rename install, leave the old
+                            release in place instead of removing it
   -h, --help
 EOF
 }
@@ -169,6 +172,7 @@ while [ $# -gt 0 ]; do
     --package-only) PACKAGE_ONLY=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --skip-test) SKIP_TEST=true; shift ;;
+    --keep-old) KEEP_OLD=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown option: $1" ;;
   esac
@@ -215,19 +219,25 @@ kc get --raw /readyz >/dev/null 2>&1 || kc get ns >/dev/null 2>&1 \
   || die "cannot reach the cluster of context '$CTX'. Check: $KUBECTL cluster-info"
 SERVER="$(kc config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
 ok "context $CTX ($SERVER)"
-# ── An install from before the rename (Kalam) ────────────────────────────────
-# Trinetra used to install as release "kalam" in namespace "kalam", and every
-# resource it created — the Deployment and its (immutable) label selector, the
-# Service, the PVC holding the node inventory, KB and change history — is named
-# after that release and chart. Installing "trinetra" next to it would start
-# from an empty PVC and leave both running. So, unless -n/-r say otherwise, the
-# existing release is upgraded IN PLACE: nameOverride=kalam keeps its resource
-# names and selector, so the data volume is reused as-is.
-LEGACY=false
-if ! $NS_SET && ! $RELEASE_SET && hc status kalam -n kalam >/dev/null 2>&1; then
-  NAMESPACE=kalam; RELEASE=kalam; LEGACY=true
-  ok "found the existing Kalam install (release kalam, namespace kalam): upgrading it in place to Trinetra — its data is kept"
-  info "(for a separate fresh install instead: ./install.sh -n trinetra -r trinetra)"
+# ── An install from before the rename ────────────────────────────────────────
+# Before the rename the product installed as release/namespace "${OLD}" and every
+# resource it made carries that name. It is MIGRATED, not upgraded in place:
+# a fresh "trinetra" release is installed with the old release's own values,
+# its secrets and the contents of its data volume (inventory, KB, change and
+# metrics history), and only once the data is verified in the new pod is the
+# old release removed. A copy of the data stays in out/ either way.
+OLD=kalam                        # MIGRATION: the pre-rename release and namespace name
+MIGRATE=false
+if ! $NS_SET && ! $RELEASE_SET && hc status "$OLD" -n "$OLD" >/dev/null 2>&1; then
+  MIGRATE=true
+  ok "found the pre-rename install (release $OLD, namespace $OLD): it will be migrated to release trinetra — data, settings and secrets carried over"
+  $KEEP_OLD && info "(--keep-old: the old release is left running afterwards)"
+  hc get values "$OLD" -n "$OLD" -o yaml 2>/dev/null \
+    | grep -v -E '^(nameOverride|fullnameOverride):' \
+    | sed -e "s/$OLD-/trinetra-/g" >"$WORK/legacy-values.yaml" || true
+  [ -s "$WORK/legacy-values.yaml" ] && [ "$(head -c 4 "$WORK/legacy-values.yaml")" != "null" ] \
+    && EXTRA_ARGS=(-f "$WORK/legacy-values.yaml" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}) \
+    && ok "carrying over the old release's settings"
 fi
 ok "release '$RELEASE' in namespace '$NAMESPACE'"
 kc auth can-i create clusterrolebinding >/dev/null 2>&1 \
@@ -286,15 +296,15 @@ case "$IMAGE_MODE" in
     info "(to use your own registry instead: ./install.sh --registry REPO)"
     IMG_REPO="127.0.0.1:5959/trinetra"
     if ! $DRY_RUN; then
-      if kc get ns kalam-image-cache >/dev/null 2>&1; then
+      if kc get ns $OLD-image-cache >/dev/null 2>&1; then
         # From before the rename: it listens on host port 5959 on every node, so
         # the new cache could not start beside it. Empty it, then remove it.
-        info "removing the pre-rename image cache (kalam-image-cache), which holds port 5959 on each node"
-        for pod in $(kc -n kalam-image-cache get pods -o name 2>/dev/null); do
-          kc -n kalam-image-cache exec "$pod" -- sh -c 'rm -rf /var/lib/registry/*' >/dev/null 2>&1 || true
+        info "removing the pre-rename image cache ($OLD-image-cache), which holds port 5959 on each node"
+        for pod in $(kc -n $OLD-image-cache get pods -o name 2>/dev/null); do
+          kc -n $OLD-image-cache exec "$pod" -- sh -c 'rm -rf /var/lib/registry/*' >/dev/null 2>&1 || true
         done
-        kc delete ns kalam-image-cache --wait=true --timeout=180s >/dev/null 2>&1 \
-          || die "could not remove the old kalam-image-cache namespace (it blocks port 5959). Delete it, then re-run."
+        kc delete ns $OLD-image-cache --wait=true --timeout=180s >/dev/null 2>&1 \
+          || die "could not remove the old $OLD-image-cache namespace (it blocks port 5959). Delete it, then re-run."
       fi
       sed "s#__CACHE_IMAGE__#$CACHE_IMAGE#" "$HERE/manifests/image-cache.yaml" | kc apply -f - >/dev/null
       if ! kc -n trinetra-image-cache rollout status ds/trinetra-image-cache --timeout=180s >/dev/null 2>&1; then
@@ -408,12 +418,10 @@ VALUES="$WORK/values.yaml"
     # The API checks the browser's Origin; node IPs have to be on the list.
     printf 'config:\n  allowedHosts: "%s"\n' "$NODE_IPS"
   fi
-  if $LEGACY; then
-    echo "nameOverride: kalam    # upgrade of a pre-rename install: keep its resource names and data"
-    if [ -z "$SSH_KEY" ] && kc -n "$NAMESPACE" get secret kalam-ssh >/dev/null 2>&1; then
-      printf 'ssh:\n  secretName: kalam-ssh\n  keyFile: id_rsa\n'
-      kc -n "$NAMESPACE" get secret kalam-ssh -o jsonpath='{.data.known_hosts}' 2>/dev/null | grep -q . && echo "  knownHosts: known_hosts"
-    fi
+  if $MIGRATE && [ -z "$SSH_KEY" ] && kc -n "$OLD" get secret "$OLD-ssh" >/dev/null 2>&1; then
+    # The old SSH key secret is copied to trinetra-ssh during the install step.
+    printf 'ssh:\n  secretName: trinetra-ssh\n  keyFile: id_rsa\n'
+    kc -n "$OLD" get secret "$OLD-ssh" -o jsonpath='{.data.known_hosts}' 2>/dev/null | grep -q . && echo "  knownHosts: known_hosts"
   fi
   echo "persistence:"
   echo "  enabled: $([ "$PERSISTENCE" = on ] && echo true || echo false)"
@@ -510,6 +518,45 @@ if [ -n "$GEMINI_KEY" ]; then
   ok "gemini key secret trinetra-llm"
 fi
 
+# ── migration, part 1: copy what the old release holds ───────────────────────
+LEGACY_TAR=""
+if $MIGRATE; then
+  # Secrets, renamed. Contents are copied as-is and never printed.
+  for kind in ssh llm registry; do
+    if kc -n "$OLD" get secret "$OLD-$kind" >/dev/null 2>&1 && ! kc -n "$NAMESPACE" get secret "trinetra-$kind" >/dev/null 2>&1; then
+      kc -n "$OLD" get secret "$OLD-$kind" -o json \
+        | sed -e "s/\"name\": \"$OLD-$kind\"/\"name\": \"trinetra-$kind\"/" -e "s/\"namespace\": \"$OLD\"/\"namespace\": \"$NAMESPACE\"/" \
+        | grep -v -E '"(resourceVersion|uid|creationTimestamp)":' \
+        | kc apply -f - >/dev/null && ok "secret $OLD-$kind → trinetra-$kind"
+    fi
+  done
+  # The data volume: streamed out of the running old pod into out/, so a copy
+  # exists outside the cluster before anything is changed.
+  OLD_POD="$(kc -n "$OLD" get pods -l app.kubernetes.io/instance="$OLD" --field-selector=status.phase=Running -o name 2>/dev/null | head -n1)"
+  if [ -n "$OLD_POD" ]; then
+    LEGACY_TAR="$OUT/$OLD-data-$(date +%Y%m%d-%H%M%S).tar"
+    if kc -n "$OLD" exec "$OLD_POD" -- tar cf - -C /data . >"$LEGACY_TAR" 2>"$WORK/tar.err" && [ -s "$LEGACY_TAR" ]; then
+      ok "backed up the old data volume → $LEGACY_TAR ($(tar tf "$LEGACY_TAR" 2>/dev/null | grep -vc '/$') files)"
+      # Stop the old pod writing (and free a ReadWriteOnce volume) now that it is copied.
+      kc -n "$OLD" scale deploy -l app.kubernetes.io/instance="$OLD" --replicas=0 >/dev/null 2>&1 || true
+    else
+      warn "could not copy /data out of $OLD_POD ($(head -c 200 "$WORK/tar.err")); the old release is kept so nothing is lost"
+      LEGACY_TAR=""; KEEP_OLD=true
+    fi
+  else
+    warn "the old release has no running pod, so its data cannot be copied; it is kept (remove it later with: helm uninstall $OLD -n $OLD)"
+    KEEP_OLD=true
+  fi
+  # A NodePort can only be held by one Service.
+  if [ "$EXPOSE" = nodeport ] && [ -n "$NODE_PORT" ]; then
+    for svc in $(kc -n "$OLD" get svc -l app.kubernetes.io/instance="$OLD" -o name 2>/dev/null); do
+      if kc -n "$OLD" get "$svc" -o jsonpath='{.spec.ports[*].nodePort}' 2>/dev/null | grep -qw "$NODE_PORT"; then
+        kc -n "$OLD" delete "$svc" >/dev/null && info "released NodePort $NODE_PORT from the old $svc"
+      fi
+    done
+  fi
+fi
+
 if ! hc upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$VALUES" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} --wait --timeout 6m >"$WORK/helm.log" 2>&1; then
   cat "$WORK/helm.log" >&2
   echo >&2
@@ -524,6 +571,36 @@ if ! hc upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$VALUES" ${EXT
   esac
 fi
 ok "helm release $RELEASE deployed"
+
+# ── migration, part 2: restore, verify, retire the old release ───────────────
+if $MIGRATE && [ -n "$LEGACY_TAR" ]; then
+  [ "$PERSISTENCE" = on ] || warn "persistence is off: the migrated data lives only until the pod restarts (the backup stays at $LEGACY_TAR)"
+  NEW_POD="$(kc -n "$NAMESPACE" get pods -l app.kubernetes.io/instance="$RELEASE" --field-selector=status.phase=Running -o name | head -n1)"
+  WANT="$(tar tf "$LEGACY_TAR" | grep -vc '/$' || true)"
+  if [ -n "$NEW_POD" ] && kc -n "$NAMESPACE" exec -i "$NEW_POD" -- tar xf - -C /data <"$LEGACY_TAR" 2>"$WORK/untar.err"; then
+    GOT="$(kc -n "$NAMESPACE" exec "$NEW_POD" -- sh -c 'find /data -type f | wc -l' 2>/dev/null | tr -d ' \r')"
+    if [ -n "$GOT" ] && [ "$GOT" -ge "$WANT" ]; then
+      ok "restored $WANT files into the new data volume"
+      # The server reads its state at start-up.
+      kc -n "$NAMESPACE" rollout restart deploy -l app.kubernetes.io/instance="$RELEASE" >/dev/null 2>&1 || true
+      kc -n "$NAMESPACE" rollout status deploy -l app.kubernetes.io/instance="$RELEASE" --timeout=180s >/dev/null 2>&1 || true
+      if ! $KEEP_OLD; then
+        hc uninstall "$OLD" -n "$OLD" --wait >/dev/null 2>&1 && ok "removed the old release $OLD"
+        kc -n "$OLD" delete pvc -l app.kubernetes.io/instance="$OLD" --ignore-not-found >/dev/null 2>&1 || true
+        if [ -z "$(kc -n "$OLD" get pods,deploy,sts,pvc --no-headers 2>/dev/null)" ]; then
+          kc delete ns "$OLD" --wait=false >/dev/null 2>&1 && ok "removed the empty namespace $OLD"
+        else
+          info "namespace $OLD still holds other objects, so it was left in place"
+        fi
+      fi
+    else
+      warn "verification failed (expected $WANT files, found ${GOT:-none}); the old release is kept. Backup: $LEGACY_TAR"
+    fi
+  else
+    warn "could not restore into the new pod ($(head -c 200 "$WORK/untar.err" 2>/dev/null)); the old release is kept. Backup: $LEGACY_TAR"
+    kc -n "$OLD" scale deploy -l app.kubernetes.io/instance="$OLD" --replicas=1 >/dev/null 2>&1 || true
+  fi
+fi
 
 if ! $SKIP_TEST; then
   if hc test "$RELEASE" -n "$NAMESPACE" --timeout 3m >"$WORK/test.log" 2>&1; then

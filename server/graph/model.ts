@@ -1,6 +1,6 @@
-// The infrastructure graph — Kalam's shared model of "what depends on what".
+// The infrastructure graph — Trinetra's shared model of "what depends on what".
 //
-// Until now Kalam *drew* graphs (TopologyGraph, VmTopology) but never *reasoned*
+// Until now Trinetra *drew* graphs (TopologyGraph, VmTopology) but never *reasoned*
 // over one: each view built its own nodes/edges in the browser, and the backend
 // had no idea that a failing SPIRE agent is why six unrelated pods on the same
 // node cannot start. This module is the single typed model both views and the

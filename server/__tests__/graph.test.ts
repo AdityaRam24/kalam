@@ -1,7 +1,7 @@
 // Unit tests for the infrastructure graph: how cluster state becomes nodes and
 // edges, and whether the analysis can tell a cause from its casualties.
 //
-// The scenario used throughout is the one Kalam exists to untangle: a SPIRE
+// The scenario used throughout is the one Trinetra exists to untangle: a SPIRE
 // agent dies on one worker, and every application pod on that worker fails to
 // start. A flat diagnosis reports seven equal problems; the graph must report
 // one cause with six casualties.

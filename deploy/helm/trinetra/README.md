@@ -133,7 +133,7 @@ and logged in the pod's output (`kubectl -n trinetra logs deploy/trinetra | grep
 ```bash
 --set config.history.enabled=true     # periodic cluster fingerprints for the History view
 --set config.metrics.enabled=true     # CPU/mem/disk sampling of inventory VMs
---set 'config.extraEnv[0].name=KALAM_LOG_BUNDLE_MAX_MB' --set-string 'config.extraEnv[0].value=200'
+--set 'config.extraEnv[0].name=TRINETRA_LOG_BUNDLE_MAX_MB' --set-string 'config.extraEnv[0].value=200'
 ```
 
 ## What the chart installs

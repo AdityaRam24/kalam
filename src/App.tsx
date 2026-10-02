@@ -51,7 +51,9 @@ import ClusterResources from './components/ClusterResources';
 import ClusterMetrics from './components/ClusterMetrics';
 const GpuUtilization = lazy(() => import('./components/GpuUtilization'));
 import CaptureButton from './components/CaptureButton';
+import SectionBoundary from './components/SectionBoundary';
 import { HEALTH_BADGE, podHealthOf, podStatusText, workloadHealthOf, ageOf } from './lib/health';
+import { sanitizeK8s, sanitizeContainers } from './lib/sanitize';
 
 interface Container {
   id: string;
@@ -161,22 +163,22 @@ interface SystemStatus {
 export function App() {
   // Tabs & Config
   const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'logs' | 'metrics' | 'history' | 'gpu' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet'>('dashboard');
-//   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
-  const [apiKey] = useState<string>(() => localStorage.getItem('kalam_gemini_api_key') || '');
+//   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('trinetra_gemini_api_key') || '');
+  const [apiKey] = useState<string>(() => localStorage.getItem('trinetra_gemini_api_key') || '');
   // ── Disabled: settings modal state ──
 //   const [showApiKey, setShowApiKey] = useState<boolean>(false);
-  const [provider, setProvider] = useState<'gemini' | 'local' | 'custom'>(() => (localStorage.getItem('kalam_llm_provider') as 'gemini' | 'local' | 'custom') || 'gemini');
-  const [localUrl, setLocalUrl] = useState<string>(() => localStorage.getItem('kalam_local_url') || 'http://localhost:11434/v1');
-  const [localModel, setLocalModel] = useState<string>(() => localStorage.getItem('kalam_local_model') || 'qwen2.5-coder:7b');
+  const [provider, setProvider] = useState<'gemini' | 'local' | 'custom'>(() => (localStorage.getItem('trinetra_llm_provider') as 'gemini' | 'local' | 'custom') || 'gemini');
+  const [localUrl, setLocalUrl] = useState<string>(() => localStorage.getItem('trinetra_local_url') || 'http://localhost:11434/v1');
+  const [localModel, setLocalModel] = useState<string>(() => localStorage.getItem('trinetra_local_model') || 'qwen2.5-coder:7b');
   // ── Disabled: only used by PCAI Assistant ──
-//   const [embedModel, setEmbedModel] = useState<string>(() => localStorage.getItem('kalam_local_embed_model') || 'nomic-embed-text');
+//   const [embedModel, setEmbedModel] = useState<string>(() => localStorage.getItem('trinetra_local_embed_model') || 'nomic-embed-text');
   // Custom OpenAI-compatible model endpoint (e.g. HPE MLIS, vLLM, OpenAI)
-//   const [customUrl, setCustomUrl] = useState<string>(() => localStorage.getItem('kalam_custom_url') || '');
-  const [customUrl] = useState<string>(() => localStorage.getItem('kalam_custom_url') || '');
-//   const [customModel, setCustomModel] = useState<string>(() => localStorage.getItem('kalam_custom_model') || '');
-  const [customModel] = useState<string>(() => localStorage.getItem('kalam_custom_model') || '');
-//   const [customKey, setCustomKey] = useState<string>(() => localStorage.getItem('kalam_custom_key') || '');
-  const [customKey] = useState<string>(() => localStorage.getItem('kalam_custom_key') || '');
+//   const [customUrl, setCustomUrl] = useState<string>(() => localStorage.getItem('trinetra_custom_url') || '');
+  const [customUrl] = useState<string>(() => localStorage.getItem('trinetra_custom_url') || '');
+//   const [customModel, setCustomModel] = useState<string>(() => localStorage.getItem('trinetra_custom_model') || '');
+  const [customModel] = useState<string>(() => localStorage.getItem('trinetra_custom_model') || '');
+//   const [customKey, setCustomKey] = useState<string>(() => localStorage.getItem('trinetra_custom_key') || '');
+  const [customKey] = useState<string>(() => localStorage.getItem('trinetra_custom_key') || '');
 //   const [showCustomKey, setShowCustomKey] = useState<boolean>(false);
   // ── Disabled: the AI pages are commented out, so nothing reads this flag ──
   // // False when the deployment turned AI off (Helm llm.enabled=false): every
@@ -194,9 +196,9 @@ export function App() {
           setActiveTab((t) => (t === 'chat' || t === 'agents' || t === 'pcai' ? 'dashboard' : t));
           return;
         }
-        if (d.provider && !localStorage.getItem('kalam_llm_provider')) setProvider(d.provider);
-        if (d.localUrl && !localStorage.getItem('kalam_local_url')) setLocalUrl(d.localUrl);
-        if (d.localModel && !localStorage.getItem('kalam_local_model')) setLocalModel(d.localModel);
+        if (d.provider && !localStorage.getItem('trinetra_llm_provider')) setProvider(d.provider);
+        if (d.localUrl && !localStorage.getItem('trinetra_local_url')) setLocalUrl(d.localUrl);
+        if (d.localModel && !localStorage.getItem('trinetra_local_model')) setLocalModel(d.localModel);
       })
       .catch(() => {});
   }, []);
@@ -222,7 +224,7 @@ export function App() {
 //         setLlmTest({ status: 'fail', msg: d.error || 'The engine did not answer.', hint: d.hint });
 //       }
 //     } catch (e: any) {
-//       setLlmTest({ status: 'fail', msg: `Could not reach the Kalam backend: ${e.message}` });
+//       setLlmTest({ status: 'fail', msg: `Could not reach the Trinetra backend: ${e.message}` });
 //     }
 //   };
 //
@@ -245,7 +247,7 @@ export function App() {
 //   };
 //   const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('kalam_theme') as 'light' | 'dark') || 'light');
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('trinetra_theme') as 'light' | 'dark') || 'light');
   const [globalSearch, setGlobalSearch] = useState<string>('');
   const [dockerFilter, setDockerFilter] = useState<'all' | 'running' | 'stopped'>('all');
   const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services' | 'resources'>('all');
@@ -255,24 +257,24 @@ export function App() {
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
 
   // ── Where the cluster views read from ────────────────────────────────────
-  // Kalam started as a local-only tool, so every view queried the Docker and
+  // Trinetra started as a local-only tool, so every view queried the Docker and
   // Kubernetes running on THIS machine. With hosts in the VM inventory the
   // interesting cluster is usually somewhere else, so the source is picked once
   // here and every view (dashboard, topology, containers, Kubernetes) follows
   // it: 'local' = this machine, 'all' = every host in the inventory merged,
-  // anything else = that one VM. 'all' exists because the machine running Kalam
+  // anything else = that one VM. 'all' exists because the machine running Trinetra
   // frequently has no container runtime of its own — paging through hosts one
   // at a time hid the whole estate behind an empty dashboard.
-  const [source, setSource] = useState<string>(() => localStorage.getItem('kalam_source') || 'local');
+  const [source, setSource] = useState<string>(() => localStorage.getItem('trinetra_source') || 'local');
   const [vmList, setVmList] = useState<Array<{ name: string; host: string; user: string; via?: string; runsAsRoot?: boolean }>>([]);
   const isAggregate = source === 'all';
   const isRemote = source !== 'local';
-  // Whether the user has ever picked a source by hand. Until they do, Kalam is
+  // Whether the user has ever picked a source by hand. Until they do, Trinetra is
   // free to point itself somewhere that actually has data.
-  const sourcePinnedRef = useRef<boolean>(!!localStorage.getItem('kalam_source'));
+  const sourcePinnedRef = useRef<boolean>(!!localStorage.getItem('trinetra_source'));
   const pickSource = (next: string) => { sourcePinnedRef.current = true; setSource(next); };
 
-  useEffect(() => { localStorage.setItem('kalam_source', source); }, [source]);
+  useEffect(() => { localStorage.setItem('trinetra_source', source); }, [source]);
 
   useEffect(() => {
     const load = () => fetch('/api/vms')
@@ -317,13 +319,18 @@ export function App() {
 //   const [fixOutput, setFixOutput] = useState<string | null>(null);
 
   // Resources Data
-  const [dockerContainers, setDockerContainers] = useState<Container[]>([]);
-  const [k8sResources, setK8sResources] = useState<K8sResources>({
+  // Every write goes through the sanitizer (src/lib/sanitize.ts): one malformed
+  // record must never reach a render and take the whole app down with it.
+  const [dockerContainers, setDockerContainersRaw] = useState<Container[]>([]);
+  const [k8sResources, setK8sResourcesRaw] = useState<K8sResources>({
     pods: [],
     services: [],
     deployments: [],
-    nodes: []
+    nodes: [],
+    inferenceServices: [],
   });
+  const setDockerContainers = (v: unknown) => setDockerContainersRaw(sanitizeContainers(v) as Container[]);
+  const setK8sResources = (v: unknown) => setK8sResourcesRaw(sanitizeK8s(v) as unknown as K8sResources);
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -356,7 +363,7 @@ export function App() {
   // ── Disabled: Agent Chat state ──
 //   // Chat/Agent
 //   const [chatHistory, setChatHistory] = useState<ChatMessage[]>(() => {
-//     const saved = localStorage.getItem('kalam_chat_history');
+//     const saved = localStorage.getItem('trinetra_chat_history');
 //     if (saved) {
 //       try {
 //         const parsed = JSON.parse(saved);
@@ -373,7 +380,7 @@ export function App() {
 //     return [
 //       {
 //         role: 'agent',
-//         content: `Hello! I am **Kalam**, your local DevOps agent. 
+//         content: `Hello! I am **Trinetra**, your local DevOps agent. 
 // I have scanned your local workspace. I can see your running Docker containers and Kubernetes clusters.
 //
 // I can help you:
@@ -390,21 +397,21 @@ export function App() {
 //   const [chatLoading, setChatLoading] = useState<boolean>(false);
 //
 //   // Interactive Diagram State
-//   const [agentMermaidChart, setAgentMermaidChart] = useState<string>(() => localStorage.getItem('kalam_agent_mermaid_chart') || '');
+//   const [agentMermaidChart, setAgentMermaidChart] = useState<string>(() => localStorage.getItem('trinetra_agent_mermaid_chart') || '');
 //
 //   // Persist chat and diagram state
 //   useEffect(() => {
-//     localStorage.setItem('kalam_chat_history', JSON.stringify(chatHistory));
+//     localStorage.setItem('trinetra_chat_history', JSON.stringify(chatHistory));
 //   }, [chatHistory]);
 //
 //   useEffect(() => {
-//     localStorage.setItem('kalam_agent_mermaid_chart', agentMermaidChart);
+//     localStorage.setItem('trinetra_agent_mermaid_chart', agentMermaidChart);
 //   }, [agentMermaidChart]);
 
   // Apply & persist theme (light default / refined dark)
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('kalam_theme', theme);
+    localStorage.setItem('trinetra_theme', theme);
   }, [theme]);
 
   // ── Disabled: graph hover tooltip state, only used by Agent Chat ──
@@ -840,40 +847,35 @@ export function App() {
         return;
       }
 
-      // Get container list
-      if (statusData.docker.running) {
-        const dockerRes = await fetch('/api/docker/containers');
-        if (!current()) return;
-        const dockerData = dockerRes.ok ? await dockerRes.json() : null;
-        if (!current()) return;
-        setDockerContainers(Array.isArray(dockerData) ? dockerData : []);
-      } else {
-        setDockerContainers([]);
-      }
-
-      // Get K8s list
+      // Containers and Kubernetes are read together and published together. The
+      // map draws as soon as anything exists, and publishing the containers one
+      // round trip before the cluster used to make it draw half a picture.
       const keptLocal = lastGoodRef.current?.source === 'local' ? lastGoodRef.current : null;
-      if (statusData.kubernetes.running) {
-        const k8sRes = await fetch('/api/k8s/resources');
-        if (!current()) return;
-        const k8sData = k8sRes.ok ? await k8sRes.json() : null;
-        if (!current()) return;
-        if (!k8sRes.ok && keptLocal) {
+      const [dockerData, k8s] = await Promise.all([
+        statusData.docker.running
+          ? fetch('/api/docker/containers').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+          : Promise.resolve(null),
+        statusData.kubernetes.running
+          ? fetch('/api/k8s/resources')
+              .then(async (r) => ({ ok: r.ok, data: r.ok ? await r.json().catch(() => null) : null }))
+              .catch(() => ({ ok: false, data: null }))
+          : Promise.resolve(null),
+      ]);
+      if (!current()) return;
+      setDockerContainers(Array.isArray(dockerData) ? dockerData : []);
+
+      if (k8s) {
+        const k8sData: any = k8s.data;
+        if (!k8s.ok && keptLocal) {
           // One failed read is not an empty cluster: keep what is on screen.
           setErrorMsg(`The Kubernetes query failed on this refresh.${keptNote(keptLocal.at)}`);
         } else {
-          setK8sResources({
-            pods: Array.isArray(k8sData?.pods) ? k8sData.pods : [],
-            services: Array.isArray(k8sData?.services) ? k8sData.services : [],
-            deployments: Array.isArray(k8sData?.deployments) ? k8sData.deployments : [],
-            nodes: Array.isArray(k8sData?.nodes) ? k8sData.nodes : [],
-            inferenceServices: Array.isArray(k8sData?.inferenceServices) ? k8sData.inferenceServices : [],
-          });
-          if (k8sRes.ok) lastGoodRef.current = { source: 'local', at: Date.now() };
+          setK8sResources(k8sData || {});
+          if (k8s.ok) lastGoodRef.current = { source: 'local', at: Date.now() };
           // A kind that could not be read must say so. Reporting it as "no pods"
           // is what made a full cluster look like a cluster with only containers.
           if (k8sData?.warning) setErrorMsg(k8sData.warning);
-          else if (!k8sRes.ok) setErrorMsg('The Kubernetes query failed on this machine. Run "npm run diagnose -- --local" for the reason.');
+          else if (!k8s.ok) setErrorMsg('The Kubernetes query failed on this machine. Run "npm run diagnose -- --local" for the reason.');
         }
       } else if (keptLocal) {
         // The 8 s reachability probe timed out once; that is not proof the
@@ -881,7 +883,7 @@ export function App() {
         setStatus((s) => ({ ...s, kubernetes: { ...s.kubernetes, running: true } }));
         setErrorMsg(`Kubernetes did not answer this refresh.${keptNote(keptLocal.at)}`);
       } else {
-        setK8sResources({ pods: [], services: [], deployments: [], nodes: [], inferenceServices: [] });
+        setK8sResources({});
       }
     } catch (err: any) {
       console.error(err);
@@ -937,7 +939,7 @@ export function App() {
 //   // Save API Key
 //   const handleSaveApiKey = (key: string) => {
 //     setApiKey(key);
-//     localStorage.setItem('kalam_gemini_api_key', key);
+//     localStorage.setItem('trinetra_gemini_api_key', key);
 //   };
 
   // Fetch Logs
@@ -1712,6 +1714,7 @@ export function App() {
             <div className="loader"></div> Loading…
           </div>
         }>
+        <SectionBoundary name={`${activeTab === 'vms' ? 'K8s Nodes' : activeTab} page`} resetKey={`${activeTab}|${source}`}>
           {errorMsg && (
             <div className="panel-card" style={{ borderLeft: '4px solid var(--status-error)' }}>
               <div style={{ display: 'flex', gap: 12, alignItems: 'center', color: 'var(--status-error)' }}>
@@ -1828,6 +1831,7 @@ export function App() {
                       <span>Scanning cluster topology graph...</span>
                     </div>
                   ) : hasAnyResource ? (
+                    <SectionBoundary name="cluster topology map" resetKey={source}>
                     <TopologyGraph
                       containers={dockerContainers}
                       k8sResources={k8sResources}
@@ -1837,6 +1841,7 @@ export function App() {
                       sources={sourceOptions}
                       defaultNamespace="kube-system"
                     />
+                    </SectionBoundary>
                   ) : (
                     <div className="text-secondary" style={{ fontStyle: 'italic', padding: '32px', textAlign: 'center' }}>
                       No active containers or nodes detected to generate visual map.
@@ -2661,6 +2666,7 @@ export function App() {
         {activeTab === 'cheatsheet' && (
           <KubectlCheatSheet />
         )}
+        </SectionBoundary>
         </Suspense>
       </div>
     </div>
@@ -2760,7 +2766,7 @@ export function App() {
                     onChange={(e) => {
                       const val = e.target.value as 'gemini' | 'local' | 'custom';
                       setProvider(val);
-                      localStorage.setItem('kalam_llm_provider', val);
+                      localStorage.setItem('trinetra_llm_provider', val);
                     }}
                     style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '10px', borderRadius: '8px' }}
                   >
@@ -2780,7 +2786,7 @@ export function App() {
                         className="form-input"
                         placeholder="https://mlis.my-pcai.example.com/v1"
                         value={customUrl}
-                        onChange={(e) => { setCustomUrl(e.target.value); localStorage.setItem('kalam_custom_url', e.target.value); }}
+                        onChange={(e) => { setCustomUrl(e.target.value); localStorage.setItem('trinetra_custom_url', e.target.value); }}
                       />
                       <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                         OpenAI-compatible base URL. For an HPE <strong>MLIS</strong> deployment use its serving URL ending in <code>/v1</code>.
@@ -2796,7 +2802,7 @@ export function App() {
                           style={{ flex: 1 }}
                           placeholder="e.g. meta-llama/Llama-3.1-8B-Instruct"
                           value={customModel}
-                          onChange={(e) => { setCustomModel(e.target.value); localStorage.setItem('kalam_custom_model', e.target.value); }}
+                          onChange={(e) => { setCustomModel(e.target.value); localStorage.setItem('trinetra_custom_model', e.target.value); }}
                         />
                         <button type="button" className="btn secondary" onClick={detectCustomModels} style={{ whiteSpace: 'nowrap' }}>Detect models</button>
                       </div>
@@ -2805,7 +2811,7 @@ export function App() {
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '6px', maxHeight: 120, overflow: 'auto' }}>
                           {customModels.map((m) => (
                             <button key={m} type="button" className={`badge ${customModel === m ? 'running' : 'neutral'}`} style={{ cursor: 'pointer', border: 'none' }}
-                              onClick={() => { setCustomModel(m); localStorage.setItem('kalam_custom_model', m); }}>{m}</button>
+                              onClick={() => { setCustomModel(m); localStorage.setItem('trinetra_custom_model', m); }}>{m}</button>
                           ))}
                         </div>
                       )}
@@ -2818,7 +2824,7 @@ export function App() {
                           className="form-input"
                           placeholder="Deployment token — leave blank if the endpoint is unauthenticated"
                           value={customKey}
-                          onChange={(e) => { setCustomKey(e.target.value); localStorage.setItem('kalam_custom_key', e.target.value); }}
+                          onChange={(e) => { setCustomKey(e.target.value); localStorage.setItem('trinetra_custom_key', e.target.value); }}
                           style={{ flex: 1 }}
                         />
                         <button type="button" className="icon-btn" onClick={() => setShowCustomKey(!showCustomKey)} style={{ position: 'absolute', right: '10px', top: '10px', background: 'transparent', border: 'none' }}>
@@ -2868,7 +2874,7 @@ export function App() {
                         value={localUrl}
                         onChange={(e) => {
                           setLocalUrl(e.target.value);
-                          localStorage.setItem('kalam_local_url', e.target.value);
+                          localStorage.setItem('trinetra_local_url', e.target.value);
                         }}
                       />
                       <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
@@ -2879,9 +2885,9 @@ export function App() {
                     <ModelPicker
                       localUrl={localUrl}
                       localModel={localModel}
-                      onSelectModel={(m) => { setLocalModel(m); localStorage.setItem('kalam_local_model', m); }}
+                      onSelectModel={(m) => { setLocalModel(m); localStorage.setItem('trinetra_local_model', m); }}
                       embedModel={embedModel}
-                      onSelectEmbed={(m) => { setEmbedModel(m); localStorage.setItem('kalam_local_embed_model', m); }}
+                      onSelectEmbed={(m) => { setEmbedModel(m); localStorage.setItem('trinetra_local_embed_model', m); }}
                     />
                   </>
                 )}

@@ -26,7 +26,7 @@ export interface FsSample {
 }
 
 export interface Sample {
-  /** Epoch ms, taken on the Kalam server so hosts with skewed clocks still align. */
+  /** Epoch ms, taken on the Trinetra server so hosts with skewed clocks still align. */
   at: number;
   source: string;
   reachable: boolean;

@@ -306,7 +306,7 @@ describe('what the change is called', () => {
     expect(evs[0].summary).toContain('permission rules were changed');
   });
 
-  it('records the real creation time, not the time Kalam noticed', () => {
+  it('records the real creation time, not the time Trinetra noticed', () => {
     const before = snap('local', at1, [fp(node())], WORKLOAD.concat('CLUSTER'));
     const created = deployment();
     created.metadata.creationTimestamp = '2026-08-09T11:59:00Z';

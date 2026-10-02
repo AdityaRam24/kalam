@@ -1,6 +1,6 @@
 // One way to run kubectl, wherever the cluster happens to be.
 //
-// Kalam talks to two kinds of cluster: the one this machine's kubeconfig points
+// Trinetra talks to two kinds of cluster: the one this machine's kubeconfig points
 // at, and one reachable only by SSH-ing into an inventory VM. Every feature
 // that reads cluster state needs both, so the mechanics live here once:
 //
@@ -11,7 +11,7 @@
 //              use), because ssh latency, not kubectl, dominates the cost.
 //
 // A step may be `optional`: its failure degrades the answer instead of failing
-// the request, which is what lets Kalam work against clusters missing an API
+// the request, which is what lets Trinetra work against clusters missing an API
 // (no Ingress, no CRDs) or a kubectl too old for a flag.
 
 import { execFile } from 'child_process';
@@ -19,6 +19,9 @@ import { loadVms, section, sshRun } from '../vms.js';
 
 /** Names we are willing to put into a remote shell command. */
 export const SAFE_NAME = /^[a-zA-Z0-9_.-]+$/;
+
+/** Concurrent local kubectl processes per runSteps call (see runSteps). */
+const LOCAL_PARALLEL = Math.max(1, Number(process.env.TRINETRA_KUBECTL_PARALLEL || 6));
 
 export interface Step {
   /** Section marker for the remote path; also the key in the result map. */
@@ -89,7 +92,18 @@ export async function runSteps(
   maxBuffer = 1024 * 1024 * 16
 ): Promise<StepResult> {
   if (!vmName) {
-    const results = await Promise.all(steps.map((s) => runLocalKubectl(s.args, Math.min(timeoutMs, 60000), maxBuffer)));
+    // At most LOCAL_PARALLEL kubectl processes at once. Each one holds a whole
+    // list in memory while it serialises it; two dozen at once on a big cluster
+    // is enough to push a 1 GiB pod into the OOM killer.
+    const results: Array<{ stdout: string; ok: boolean; stderr: string }> = new Array(steps.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < steps.length) {
+        const i = next++;
+        results[i] = await runLocalKubectl(steps[i].args, Math.min(timeoutMs, 60000), maxBuffer);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(LOCAL_PARALLEL, steps.length) }, worker));
     const out: Record<string, string> = {};
     const ok = new Set<string>();
     let error: string | undefined;

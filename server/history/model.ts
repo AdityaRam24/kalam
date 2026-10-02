@@ -1,10 +1,10 @@
-// The change-history model — Kalam's memory of what the cluster used to look like.
+// The change-history model — Trinetra's memory of what the cluster used to look like.
 //
 // WHY THIS EXISTS
 //
 // Kubernetes is bad at remembering. Events expire after roughly an hour, a
 // rolled-back Deployment leaves almost no trace, and a pod that was deleted at
-// 3am is simply gone by morning. Everything else Kalam does looks at the
+// 3am is simply gone by morning. Everything else Trinetra does looks at the
 // cluster as it is *right now*; this module is the only part that can answer
 // "what changed, when, and who did it".
 //
@@ -44,6 +44,8 @@ export type ChangeKind =
   | 'lifecycle'    // phase/condition transition worth noticing (Failed, NotReady)
   | 'cordon'       // node made unschedulable, or schedulable again
   | 'taint'
+  | 'label'      // a label moved — selectors, policies and schedulers read these
+  | 'annotation' // an annotation moved — cert-manager, Istio, KServe, Helm read these
   | 'version';     // kubelet / runtime / image-tagless version bump
 
 export type Severity = 'info' | 'notice' | 'warning';
@@ -58,7 +60,7 @@ export interface FieldChange {
 export interface ChangeEvent {
   /** Stable id — the same observed change never lands in the log twice. */
   id: string;
-  /** When Kalam observed it (ISO). See `at` vs `actorAt` below. */
+  /** When Trinetra observed it (ISO). See `at` vs `actorAt` below. */
   at: string;
   /**
    * When it really happened, when the cluster was willing to say: an object's
@@ -89,6 +91,12 @@ export interface ChangeEvent {
   owner?: string;
   /** Set when this change is a consequence of another in the same capture. */
   causedBy?: string;
+  /**
+   * What this change does to the rest of the cluster, worked out at capture
+   * time from the same snapshot: "Service web no longer selects these pods",
+   * "references ConfigMap api-config, which does not exist". See impact.ts.
+   */
+  impact?: string[];
 }
 
 export interface Fingerprint {
@@ -122,6 +130,13 @@ export interface Snapshot {
   at: string;
   /** Query tags that actually returned — see the header note. */
   sections: string[];
+  /**
+   * Which optional fingerprint families this capture recorded ('meta' =
+   * labels/annotations, 'podWaiting'). A family is only diffed when BOTH
+   * sides have it — otherwise the first capture after an upgrade would report
+   * every label in the cluster as newly added.
+   */
+  features?: string[];
   /** key (see objectKey) -> fingerprint */
   objects: Record<string, Fingerprint>;
 }

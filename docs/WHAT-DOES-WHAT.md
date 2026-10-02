@@ -34,7 +34,11 @@ from the SSH inventory, or **All hosts** — chosen with the source picker in th
 | Namespace dropdown | Defaults to **kube-system** on the dashboard when that namespace exists; any manual choice wins. |
 | **Light / Dark** | Map colour scheme, independent of the app theme; remembered per browser. |
 | **Capture map** | PNG of the canvas exactly as drawn (works in fullscreen). |
-| Problems | Shows only unhealthy objects and what they connect to. Uses kubectl status, so crash-looping and image-pull failures count. |
+| Problems | Shows only unhealthy objects and what they connect to. Uses kubectl status **and the why-engine**, so a Service whose selector matches nothing, or an ISVC with no runtime, counts even though nothing reports it as "failing". |
+| **Why line on cards** | A failing card shows one line saying *why* (e.g. `⚠ Issuer not found: ClusterIssuer "letsencrypt-prod"`, `⚠ ConfigMap "app-cfg" is missing`, `⚠ Selector matches no pods`). Hover for the full title. Refreshed after each sample (live mode: at most every 30 s). Not shown in "All hosts". |
+| **Drawer → Details: Why it's failing** | Top of the drawer for any Kubernetes card. For each problem: the cause in plain words, the evidence the cluster gave, the **root cause** object (click to jump to it), the label/annotation involved and who reads it, the **fix**, when it started, and **Changes that may explain this** (ranked suspects from Change History, each with the reason it was picked). |
+| **Drawer → Non-negotiables** | Every reference and contract the object depends on, each ✓ holds / ✗ broken / ? cannot tell: ConfigMaps/Secrets/PVCs it mounts, its ServiceAccount, image-pull secrets, nodeSelector matching a node, Service selector matching pods, named target ports, Certificate issuer exists and is Ready, Ingress backends/class/TLS, cert-manager annotations, KServe runtime/format/model PVC/deploymentMode. "?" is honest: e.g. Secrets are never granted in-cluster, so Trinetra does not guess. |
+| **Drawer → Labels & annotations other components depend on** | The object's labels/annotations (and pod-template ones) that something else reads — who reads it, what it does, and what breaks if it is wrong. |
 | Card LEDs | Steady green = healthy; amber blinking = in progress / degraded; red blinking = failing; grey = completed. Only non-healthy LEDs animate. Workload and node cards show status too (e.g. node `Ready · DiskPressure`). |
 | **InferenceServices** | KServe ISVCs are drawn as the first column (pink cards: model format, status, storage, URL). Edges: **ISVC → Service** (`serves`) and **ISVC → workload** (`deploys`), taken from the `serving.kserve.io/inferenceservice` label on the predictor pods; if no predictor pod exists yet, KServe's `<isvc>-predictor…` naming is used and the edge is drawn faint with a `?`. Click a card for its YAML, events and model details. "Models x/y ready" appears in the summary bar; type filter "KServe InferenceServices". |
 | **Flow: Focus / All / Off** | **Focus** (default): hover or select any card and the whole request path through it animates and lights up — e.g. ISVC → Service → Workload → Pods → Node — everything else dims. **All** animates every link (heavier on big clusters). **Off** = no movement. Remembered per browser. |
@@ -83,8 +87,29 @@ What changed, when, and who did it (from Trinetra's periodic captures).
 - **Most-changed objects** — click to see only that object.
 - **Group by** day / namespace / object; **Root changes only** hides knock-on changes.
 - **Expand / collapse all**, **CSV / JSON export**, **auto-refresh**, **load older changes**, clickable namespace and writer in each row, "All changes to this object" inside each row.
+- **Why things are failing now** (top panel) — every current problem, grouped **by cause** ("ConfigMap app-cfg is missing — affects 5 pods + 1 deployment"), each with the explanation, root cause, fix and the **recorded changes most likely to have caused it**. Click an affected object to filter the timeline to it. **Only changes linked to these** narrows the timeline to the suspects.
+- **Likely cause** badge on timeline rows that Trinetra links to a current failure; expanding the row says which failure and why it was linked.
+- **What this change means** — each change carries its consequence, worked out when it was captured: "Service web no longer selects these pods — its traffic stops", "References ConfigMap x, which does not exist — new pods will not start", "ClusterIssuer x does not exist — cert-manager cannot issue this certificate", "Still referenced by Deployment a, b", "New pods in ns will NOT get an Istio sidecar", "Certificates … depend on it". The first line shows under the row; all lines in the expanded view and in CSV export.
+- **Labels and annotations are tracked** (new change types `label` / `annotation`). Keys another component reads (selectors, `cert-manager.io/*`, `istio-injection`, `sidecar.istio.io/inject`, `serving.kserve.io/*`, Helm ownership, pod-security…) are raised to *needs attention*; controller bookkeeping (last-applied-configuration, revision counters, heartbeats) is ignored.
+- **More kinds tracked**: cert-manager Certificates / Issuers / ClusterIssuers (incl. Ready flips), KServe InferenceServices (model `storageUri` changes read as deploys) / ServingRuntimes / ClusterServingRuntimes, Istio VirtualServices / Gateways, IngressClasses, and the **moment a pod starts waiting** (ImagePullBackOff, CrashLoopBackOff, CreateContainerConfigError…).
+- Upgrading is quiet: the first capture after this version does not report every existing label as "added".
 
-Code: `src/components/ClusterHistory.tsx`, `server/history/router.ts` (`/api/history/facets`).
+Code: `src/components/ClusterHistory.tsx`, `server/history/router.ts` (`/api/history/facets`, `/api/history/why`), `server/history/impact.ts`, `server/history/suspects.ts`.
+
+### The why-engine (behind the map, drawer and Change History)
+`server/k8s/why.ts` reads the cluster (read-only, ~15 s cache per source) and works out **causes**, not statuses:
+- **Image pulls** — classifies the registry's answer: credentials refused (and whether the referenced pull secret even exists), image/tag not found, TLS not trusted, registry unreachable, rate-limited.
+- **Crashes** — OOMKilled (with the limit), exit 0 (a one-off task run as a server), 126/127 (command not found), 139, 143, liveness probe killing it, restart storms.
+- **Config** — missing ConfigMap/Secret or missing key, failed mounts.
+- **Scheduling** — insufficient CPU/memory/GPU, untolerated taints, nodeSelector/affinity nobody satisfies, unbound PVCs, cordoned nodes, pod limits.
+- **Workloads** — quota rejections, stuck rollouts, and "0/3 ready because …" taken from their pods.
+- **Services** — selector matches no pods (with the pod that differs by one label), no ready endpoints and why, named target ports.
+- **cert-manager** — issuer missing (and "right name, wrong kind"), issuer not Ready and which certificates it breaks, CA secret missing, expiry.
+- **Ingress / Istio** — backend Service/port missing, IngressClass missing, cert-manager annotations pointing at missing/not-Ready issuers, VirtualService gateways and destinations that do not exist.
+- **KServe** — no runtime for the model format, named runtime missing, model PVC missing/unbound, invalid deploymentMode, predictor pod failures.
+- **Storage / nodes / HPA** — StorageClass missing or no default, provisioning failures, NotReady and pressure, autoscaler targets missing.
+
+The label/annotation knowledge base is `server/k8s/contracts.ts`.
 
 ### Kubectl Cheat Sheet
 Reference. `src/components/KubectlCheatSheet.tsx`
@@ -98,7 +123,7 @@ Which **model** runs on which GPU, and how hard it works.
 - **One card per GPU workload** — the model name and serving stack (vLLM, NVIDIA NIM, Triton, TGI, KServe…) and *how it was identified* (InferenceService, `--served-model-name`, `--model`, `MODEL_NAME` env, …).
 - **Live per-GPU readings** via `kubectl exec <pod> -n <ns> -- nvidia-smi --query-gpu=…`: compute utilization, memory used/total and bandwidth, power vs limit, temperature, SM/memory clocks, P-state, PCIe gen/width, MIG mode, ECC errors, persistence and compute mode, driver, **throttle reasons**, and the processes on each GPU.
 - **Raw nvidia-smi buttons** per pod: `nvidia-smi`, `-q`, `-L`, `topo -m`, memory + ECC, clocks + perf, power + temp, processes, `--help` (fixed list — no free-form commands).
-- Live nvidia-smi on/off, auto-refresh (15 / 30 / 60 s), namespace filter, search, CSV export. At most 24 containers are probed per refresh (`KALAM_GPU_MAX_PROBES`).
+- Live nvidia-smi on/off, auto-refresh (15 / 30 / 60 s), namespace filter, search, CSV export. At most 24 containers are probed per refresh (`TRINETRA_GPU_MAX_PROBES`).
 
 Code: `src/components/GpuUtilization.tsx`, `server/k8s/gpu.ts`.
 
@@ -122,6 +147,8 @@ Agent Chat, Agent Teamwork, PCAI Assistant, Image Hardener, the agent/model **se
 | `POST /api/gpu/raw` | One fixed nvidia-smi view inside one pod. | `server/k8s/gpu.ts` |
 | `GET /api/history/facets` | Namespaces, kinds, writers, top objects and activity histogram for a window. | `server/history/router.ts` |
 | `GET /api/history?actor=&name=` | New filters on the existing timeline. | `server/history/store.ts` |
+| `GET /api/k8s/why[?vm=&kind=&namespace=&name=]` | Every current finding (cause, evidence, root cause, fix) and a per-object index for cards; with an object: its findings and non-negotiables. | `server/k8s/why.ts` |
+| `GET /api/history/why?source=[&kind=&namespace=&name=]` | Current findings with ranked suspect changes from the last 7 days; with an object also its contracts, root-cause chain and meaningful labels/annotations. | `server/history/router.ts`, `server/history/suspects.ts` |
 
 Changed data: pods now carry `displayStatus`, `health`, `lastReason`; workloads carry `status`, `health`; nodes carry `allocatable`, `capacity`, `pressure`, `schedulable`, `gpuProduct` (`server/k8s/workloads.ts`). kubectl errors shown to users are the readable line, not klog noise (`server/k8s/kubectl.ts`).
 
@@ -129,4 +156,11 @@ Changed data: pods now carry `displayStatus`, `health`, `lastReason`; workloads 
 
 All of the above is **read-only** toward the cluster except the pre-existing actions (restart, scale, delete pod, container start/stop) and the terminal.
 
-Tests: `server/__tests__/explore.test.ts` covers status derivation, resource summaries, `kubectl top` parsing, nvidia-smi parsing, model detection and history facets.
+## Renamed to Trinetra — upgrading from before the rename
+- **Environment variables** are `TRINETRA_*`. Old names are still read (once, with a notice saying what to rename) — `server/legacy-env.ts`.
+- **Browser settings** (theme, source, LLM settings, chat history) move from the old keys to `trinetra_*` on first load — `src/lib/legacy.ts`.
+- **CLI**: the command is `trinetra` (`bin/trinetra.cjs`); `~/.trinetra.json` replaces the old config file, which is moved automatically. The installers also unregister the old global command.
+- **Cluster install**: `deploy/bundle/install.sh` finds a pre-rename release and **migrates** it: installs `trinetra` with the old release's settings and secrets, copies its data volume (inventory, KB, change and metrics history) via a backup in `out/`, verifies it, and only then removes the old release (`--keep-old` to keep it).
+- The image runs as user `trinetra` (same UID 10001, so existing volumes stay readable); paths are `/home/trinetra`, `/etc/trinetra`.
+
+Tests: `server/__tests__/why.test.ts` (the engine, from fixtures), `history-impact.test.ts` (labels/annotations, CRDs, impact sentences), `suspects.test.ts` (ranking), `legacy-env.test.ts`, `src/lib/__tests__/legacy.test.ts`, `sanitize.test.ts`. `server/__tests__/explore.test.ts` covers status derivation, resource summaries, `kubectl top` parsing, nvidia-smi parsing, model detection and history facets.

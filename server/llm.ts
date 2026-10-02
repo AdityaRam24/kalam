@@ -1,4 +1,4 @@
-// LLM provider utilities for Kalam: discover locally-installed Ollama / LM Studio
+// LLM provider utilities for Trinetra: discover locally-installed Ollama / LM Studio
 // models so the user can *choose* one (no more typing a model name by hand), and
 // pull new models on demand with live progress. Also classifies models into
 // chat / embed / vision so the UI can offer the right model in the right place.
@@ -432,11 +432,11 @@ export async function testLocal(localUrl: string, localModel: string, authKey?: 
   }
 }
 
-// KALAM_LLM_ENABLED=false (Helm llm.enabled) turns every AI feature off for a
+// TRINETRA_LLM_ENABLED=false (Helm llm.enabled) turns every AI feature off for a
 // deployment that has no model to talk to: the UI hides them and the server
 // refuses their routes. Anything other than "false" leaves them on.
 export function llmEnabled(): boolean {
-  return process.env.KALAM_LLM_ENABLED !== 'false';
+  return process.env.TRINETRA_LLM_ENABLED !== 'false';
 }
 
 // Routes that reach a model. /api/llm/defaults stays open because it is how
@@ -451,17 +451,17 @@ export const LLM_ROUTES = [
   '/api/llm/pull',
 ];
 
-// Deployment-level engine defaults (KALAM_PROVIDER / KALAM_LOCAL_URL /
-// KALAM_LOCAL_MODEL, set by the Helm chart). The UI applies them only where
+// Deployment-level engine defaults (TRINETRA_PROVIDER / TRINETRA_LOCAL_URL /
+// TRINETRA_LOCAL_MODEL, set by the Helm chart). The UI applies them only where
 // the browser has no saved choice, so an operator can point every fresh
 // browser at the in-cluster model without anyone opening Settings.
 llmRouter.get('/api/llm/defaults', (_req, res) => {
-  const provider = process.env.KALAM_PROVIDER;
+  const provider = process.env.TRINETRA_PROVIDER;
   res.json({
     enabled: llmEnabled(),
     provider: provider === 'gemini' || provider === 'local' ? provider : undefined,
-    localUrl: process.env.KALAM_LOCAL_URL || undefined,
-    localModel: process.env.KALAM_LOCAL_MODEL || undefined,
+    localUrl: process.env.TRINETRA_LOCAL_URL || undefined,
+    localModel: process.env.TRINETRA_LOCAL_MODEL || undefined,
     geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
   });
 });

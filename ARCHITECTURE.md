@@ -1,6 +1,6 @@
-# Kalam — Architecture & Activity Flow
+# Trinetra — Architecture & Activity Flow
 
-Kalam is a single-pane operations console for HPE Private Cloud AI (PCAI) environments:
+Trinetra is a single-pane operations console for HPE Private Cloud AI (PCAI) environments:
 it monitors VMs over SSH (including jump-host hops to VMs behind other VMs), inspects
 Docker/Kubernetes workloads and services, diagnoses cluster problems read-only,
 renders a live multi-host topology map, gives a whole-host view of any VM (health,
@@ -20,7 +20,7 @@ the network deliberately.
 flowchart LR
     subgraph B["Clients"]
         UI["React UI: Dashboard, VM Monitor, Host Logs, PCAI Assistant, Stack Visualizer"]
-        CLI["kalam CLI (bin/kalam.cjs)"]
+        CLI["trinetra CLI (bin/trinetra.cjs)"]
     end
 
     subgraph N["Node.js backend"]
@@ -90,7 +90,7 @@ sequenceDiagram
     S-->>U: containers, pods, services, workloads, nodes, systemd units, ports
 ```
 
-A host added on the Virtual Machines tab is **explored immediately**: Kalam runs
+A host added on the Virtual Machines tab is **explored immediately**: Trinetra runs
 that discovery once and reports what it found ("Mapped: 12 containers, 30 pods,
 8 services") in the row, so an unreachable host or a login that cannot see
 containerd says so at the moment it is added rather than looking like an empty
@@ -127,7 +127,7 @@ read-only host commands.
 ### 2.1c VM topology
 
 `src/components/VmTopology.tsx` draws the same inventory as a ReactFlow graph
-(dagre, left-to-right): **Kalam → jump hosts → VMs → component categories**. A VM
+(dagre, left-to-right): **Trinetra → jump hosts → VMs → component categories**. A VM
 with `via` set is rendered as a child of its jump host, so the real SSH path is
 visible; edges animate green when the host is reachable and go dashed grey when
 it is not. Each VM card carries live metrics and, once the Node Brain scan has
@@ -258,8 +258,8 @@ SSH, no fs, no Express — so the entire edge model is tested from fixtures.
 **Where it shows up:** `/api/vms/diagnose` now builds the graph from the same
 snapshot it diagnoses, so every finding carries `rootCause`, `explains`, or
 `causedBy`, and findings are ordered causes-first. The UI adds a "Start here"
-panel and dims collateral findings; the CLI gains `kalam vm graph <name>` and
-`kalam vm impact <name> <id>`.
+panel and dims collateral findings; the CLI gains `trinetra vm graph <name>` and
+`trinetra vm impact <name> <id>`.
 
 ### 2.2b Object inspect — YAML, describe, events, and what it connects to
 
@@ -291,7 +291,7 @@ answers end to end — a real (tiny) completion, not a ping — and classifies a
 failure by what the wire actually did (`describeConnectError`): host not
 resolvable (off the VPN), timeout/unreachable, refused port, untrusted internal
 certificate, http-vs-https, token rejected, model not served. The call is made by
-the Node backend, so it is the machine running Kalam that must be on the
+the Node backend, so it is the machine running Trinetra that must be on the
 endpoint's network.
 
 One call returns the object's `yaml`, its `describe`, its recent `events`
@@ -325,7 +325,7 @@ endpoint happened to carry. Clicking a related object jumps to its card.
 Everything above looks at the cluster as it is *now*. Kubernetes is bad at
 remembering: events expire after roughly an hour, a rolled-back Deployment
 leaves almost no trace, and a pod deleted at 3am is simply gone by morning.
-`server/history/` is the only part of Kalam with a memory.
+`server/history/` is the only part of Trinetra with a memory.
 
 **It stores fingerprints, not manifests.** Each capture reduces every object to
 the handful of fields whose change is worth reporting — image, replicas,
@@ -347,7 +347,7 @@ failure mode of a naive diff is not a missing entry but a confident, wrong one:
 
 | Guard | Prevents |
 |---|---|
-| **Baseline** — no previous snapshot means no changes | Announcing that all 500 objects were "created" the moment Kalam starts |
+| **Baseline** — no previous snapshot means no changes | Announcing that all 500 objects were "created" the moment Trinetra starts |
 | **Section** — a kind is diffed only when its query succeeded on *both* sides | A lost RBAC permission or a missing Ingress API reading as mass deletion |
 | **Sanity** — a capture that lost >50% of its objects is a bad read | A truncated SSH transfer reading as a catastrophe |
 
@@ -361,16 +361,16 @@ or a controller can be named. kubectl hides it unless `--show-managed-fields=tru
 is passed, so a capture that fails is retried once without the flag: attribution
 degrades, history does not. A change is credited to a manager only when its
 timestamp *moved* since the last capture — comparing two cluster-supplied
-timestamps, never Kalam's clock, so host/cluster skew cannot mislead it.
+timestamps, never Trinetra's clock, so host/cluster skew cannot mislead it.
 Deployment rollout revisions are read on demand from the ReplicaSets, where
 `kubernetes.io/change-cause` carries whatever note the operator left.
 
 **Nothing sensitive is written.** Inline env values are stored as digests, never
 plaintext; ConfigMaps and Secrets are tracked by `resourceVersion` alone, so
-Kalam never reads their contents. `server/history/data/` is gitignored.
+Trinetra never reads their contents. `server/history/data/` is gitignored.
 
-**Collection is opt-in.** `KALAM_HISTORY=1` starts the poller
-(`KALAM_HISTORY_INTERVAL_SEC`, default 300; `KALAM_HISTORY_SOURCES`, default
+**Collection is opt-in.** `TRINETRA_HISTORY=1` starts the poller
+(`TRINETRA_HISTORY_INTERVAL_SEC`, default 300; `TRINETRA_HISTORY_SOURCES`, default
 `local`, or `all`), captures run sequentially with an in-flight guard, and the
 timer is unref'd. Without it, history advances only when someone presses
 "Capture now". Every query is `kubectl get`.
@@ -379,7 +379,7 @@ timer is unref'd. Without it, history advances only when someone presses
 with a filterable day-grouped timeline and expandable field diffs; a **Changes**
 tab in the topology drawer showing one object's history plus its rollout
 revisions; a "Recently changed" heatmap mode on the map; and
-`kalam history [--source x] [--since 7d]` / `kalam history capture` in the CLI.
+`trinetra history [--source x] [--since 7d]` / `trinetra history capture` in the CLI.
 
 ### 2.2d Host Logs — system health, services, `/var/log` and the journal
 
@@ -422,7 +422,7 @@ taken as a raw host):
 | `POST /api/logs/scan` `{ hours }` | no | newest ≤40 text logs changed in the window, `tail -n 5000` each through a keyword pre-filter, `journalctl -p warning --since`, `dmesg --level=err,warn`, plus the unit list for linking |
 | `POST /api/logs/list` | no | `find /var/log -maxdepth 3 -type f` (+ `! -readable` to flag no-access files) |
 | `POST /api/logs/read` `{ path, lines, grep }` | no | `tail -n`, or `zcat`/`xzcat`/`bzcat`/`zstdcat` + `grep -F` + `tail`; `last -f` for wtmp/btmp |
-| `POST /api/logs/download` `{ paths? \| path+raw }` | no | `tar czf` (or the single file) → base64 over SSH → decoded, capped at `KALAM_LOG_BUNDLE_MAX_MB` |
+| `POST /api/logs/download` `{ paths? \| path+raw }` | no | `tar czf` (or the single file) → base64 over SSH → decoded, capped at `TRINETRA_LOG_BUNDLE_MAX_MB` |
 | `POST /api/logs/service` `{ unit, action }` | **`start` / `restart`** | `systemctl show`, `systemctl status`, `journalctl -u -n 80`; for start/restart first `systemctl <action>` |
 | `POST /api/logs/journal` `{ query }` | no | `journalctl` built by `journal.ts` (see below) |
 | `POST /api/logs/journal/meta` | no | `--list-boots`, `-F _SYSTEMD_UNIT`, `-F SYSLOG_IDENTIFIER`, `-N`, `--disk-usage`, journald.conf, persistent vs volatile |
@@ -491,7 +491,7 @@ not be able to destroy the evidence), `--file` / `-D` / `-M` / `--user` (other
 journals), and `systemctl stop` (stopping sshd or networking locks you out).
 
 **Limits are reported, never silent.** Downloads above the cap return
-`X-Kalam-Truncated: 1` and the UI says so; scan output that hits the SSH buffer
+`X-Trinetra-Truncated: 1` and the UI says so; scan output that hits the SSH buffer
 is flagged partial; files unreadable to a non-root login are badged and
 explained. Hosts whose `find` lacks `-printf` (BusyBox) still list files via
 `stat`, but the scan then reads only the journal and dmesg.
@@ -519,7 +519,7 @@ sequenceDiagram
     S->>M: system prompt + retrieved context + question
     M-->>S: token stream
     S-->>U: SSE deltas + source citations
-    Note over S,U: If no model is reachable, Kalam streams the retrieved docs directly.
+    Note over S,U: If no model is reachable, Trinetra streams the retrieved docs directly.
 ```
 
 ### 2.4 Model flexibility — any endpoint works
@@ -549,7 +549,7 @@ flowchart LR
     KB --> ANSWER["future answers retrieve uploads + past solutions"]
 ```
 
-- Any text document fed via `kalam learn <file>` (or the API) is classified,
+- Any text document fed via `trinetra learn <file>` (or the API) is classified,
   chunked, embedded, and immediately usable in answers.
 - Every completed diagnosis is saved back as a "Solved case" (problem +
   resolution), so the next similar error retrieves the previous fix. Cases rotate
@@ -625,7 +625,7 @@ to `0` — it waits on an unresponsive API server forever — and the dashboard
 polls every 10 s, so an unbounded read accumulates stuck processes. But an outer
 process kill cannot be the primary bound: `SIGKILL` destroys the reason, which
 is how a merely slow cluster once reported itself as empty. kubectl therefore
-carries its own `--request-timeout`, derived from `KALAM_KUBECTL_TIMEOUT_MS`
+carries its own `--request-timeout`, derived from `TRINETRA_KUBECTL_TIMEOUT_MS`
 (default 120 s) and set below it, so it always gets to explain itself; the
 process timeout remains only as a backstop for a genuinely wedged kubectl. The
 separate 8 s probe timeout stays short, because a stopped Docker Desktop on
@@ -643,7 +643,7 @@ positions, prints the canvas as an ASCII map, and **asserts**: no card overlaps
 another, stage column ranges never interleave, namespace bands never overlap, no
 card escapes its band, no stage collapses to a single column, and the aspect
 ratio is usable. It exits non-zero on failure, so it can gate a release. It runs
-against live `kubectl`, a JSON snapshot, or a running Kalam — including a remote
+against live `kubectl`, a JSON snapshot, or a running Trinetra — including a remote
 source:
 
 ```bash
@@ -767,18 +767,18 @@ see `deploy/helm/trinetra/README.md`:
 | `ssh.secretName` | `""` | cluster-only until you mount a key |
 | `persistence.enabled` | `false` | without it the SSH inventory and history reset on restart |
 
-Secrets are never granted in RBAC: Kalam does not read secret contents.
+Secrets are never granted in RBAC: Trinetra does not read secret contents.
 
 Because the image is read-only and its writable state must land on a volume,
 three paths are environment-configurable:
 
 | Variable | Default | Holds |
 |---|---|---|
-| `KALAM_VMS_PATH` | `server/vms.json` | the SSH inventory |
-| `KALAM_LEARNED_PATH` | `server/pcai/learned.json` | the learned knowledge base |
-| `KALAM_HISTORY_DIR` | `server/history/data` | change-history snapshots and changelog |
+| `TRINETRA_VMS_PATH` | `server/vms.json` | the SSH inventory |
+| `TRINETRA_LEARNED_PATH` | `server/pcai/learned.json` | the learned knowledge base |
+| `TRINETRA_HISTORY_DIR` | `server/history/data` | change-history snapshots and changelog |
 
-Host Logs writes nothing to disk; its one tunable is `KALAM_LOG_BUNDLE_MAX_MB`
+Host Logs writes nothing to disk; its one tunable is `TRINETRA_LOG_BUNDLE_MAX_MB`
 (default `50`), the cap on a `/var/log` or journal download, set through
 `config.extraEnv`. It reaches hosts over SSH only, so it needs `ssh.secretName`
 and, for most of `/var/log` and any service restart, root access on the host.
@@ -787,7 +787,7 @@ Validate before installing:
 
 ```bash
 helm lint deploy/helm/trinetra
-helm template kalam deploy/helm/trinetra | kubectl apply --dry-run=server -f -
+helm template trinetra deploy/helm/trinetra | kubectl apply --dry-run=server -f -
 ```
 
 ### 4b. On a machine — scripts
@@ -804,15 +804,15 @@ On Linux/macOS the equivalents live in `scripts/` (`setup.sh`, `start.sh`,
 
 ---
 
-## 5. The `kalam` CLI
+## 5. The `trinetra` CLI
 
-`bin/kalam.cjs` (registered globally by `npm link` / `setup.bat`) is a thin client of
+`bin/trinetra.cjs` (registered globally by `npm link` / `setup.bat`) is a thin client of
 the same Express API — it owns no logic of its own, so the UI and CLI always behave
 identically.
 
 ```mermaid
 flowchart LR
-    T["Terminal: kalam ask / solve / learn / vms / vm diagnose / vm logs / vm journal / train"] --> CLI["bin/kalam.cjs"]
+    T["Terminal: trinetra ask / solve / learn / vms / vm diagnose / vm logs / vm journal / train"] --> CLI["bin/trinetra.cjs"]
     CLI -->|"backend up?"| API["Express server :3001"]
     CLI -.->|"if down: spawn node + tsx directly, poll every 250ms"| API
     API --> ANSWER["SSE stream rendered live with ANSI markdown"]
@@ -824,7 +824,7 @@ Key behaviors:
   `tsx` binary through the current Node process (no `npx` resolver overhead) and
   polls readiness every 250 ms; once confirmed up, health checks are skipped for
   the rest of the session.
-- **Interactive REPL** (`kalam` with no args) — streaming answers, slash commands
+- **Interactive REPL** (`trinetra` with no args) — streaming answers, slash commands
   (`/model`, `/provider`, `/mode`, `/train`, `/status`, `/run <n>`), intent routing
   (auto-detects ask vs. diagnose vs. DevOps from the message), and conversation
   memory. Prose streams token-by-token; headings, bullets, and code blocks are
@@ -834,21 +834,21 @@ Key behaviors:
   `!docker ps`). Ctrl+C kills the command, not the REPL.
 - **Ctrl+C cancels, not kills** — during a streaming answer the first Ctrl+C aborts
   just that answer and returns to the prompt; when idle it exits.
-- **One-shot + pipes** — `kalam ask "..."`, `kubectl logs pod | kalam solve`,
-  `kalam list docker|k8s`, `kalam scan/fix <container>`.
-- **Knowledge commands** — `kalam learn <file...>` (or piped stdin) feeds runbooks,
-  logs, and diagrams into the KB; `kalam learned` lists uploads and auto-captured
+- **One-shot + pipes** — `trinetra ask "..."`, `kubectl logs pod | trinetra solve`,
+  `trinetra list docker|k8s`, `trinetra scan/fix <container>`.
+- **Knowledge commands** — `trinetra learn <file...>` (or piped stdin) feeds runbooks,
+  logs, and diagrams into the KB; `trinetra learned` lists uploads and auto-captured
   solved cases.
-- **VM commands** — `kalam vms` (inventory + live status), `kalam vm ssh <name>`
-  (interactive session, hops via jump host), `kalam vm diagnose <name>` (read-only
-  findings with suggested fixes), `kalam vm discover <name>`, `kalam vm peers <name>`,
-  `kalam vm graph <name>` (dependency graph + ranked root causes),
-  `kalam vm impact <name> <id>` (blast radius of one resource).
-- **Host commands** (§2.2d) — `kalam vm health <name>`, `kalam vm logs <name>
-  [--hours N] [--all]`, `kalam vm journal <name> [journalctl flags]` (the flags are
+- **VM commands** — `trinetra vms` (inventory + live status), `trinetra vm ssh <name>`
+  (interactive session, hops via jump host), `trinetra vm diagnose <name>` (read-only
+  findings with suggested fixes), `trinetra vm discover <name>`, `trinetra vm peers <name>`,
+  `trinetra vm graph <name>` (dependency graph + ranked root causes),
+  `trinetra vm impact <name> <id>` (blast radius of one resource).
+- **Host commands** (§2.2d) — `trinetra vm health <name>`, `trinetra vm logs <name>
+  [--hours N] [--all]`, `trinetra vm journal <name> [journalctl flags]` (the flags are
   translated into the same structured query the UI sends, so the server validates
-  them identically; `-f` polls with cursors until Ctrl+C), and `kalam vm service
+  them identically; `-f` polls with cursors until Ctrl+C), and `trinetra vm service
   <name> <unit> [status|start|restart]`, which asks y/N before changing anything
   (`--yes` to skip; inside the REPL, where stdin is taken, `--yes` is required).
-- **Settings persistence** — provider/model/mode choices are saved to `~/.kalam.json`
+- **Settings persistence** — provider/model/mode choices are saved to `~/.trinetra.json`
   and merged with `.env` on startup, so the model you pick sticks across sessions.

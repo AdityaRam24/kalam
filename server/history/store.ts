@@ -23,12 +23,12 @@ import { fileURLToPath } from 'url';
 import type { ChangeEvent, Snapshot } from './model.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.KALAM_HISTORY_DIR || path.join(__dirname, 'data');
+const DATA_DIR = process.env.TRINETRA_HISTORY_DIR || path.join(__dirname, 'data');
 
 /** Rotate once the log passes this; one archive is kept. */
 const MAX_LOG_BYTES = 16 * 1024 * 1024;
 /** Entries older than this are dropped when the log rotates. */
-const RETENTION_DAYS = Number(process.env.KALAM_HISTORY_RETENTION_DAYS || 30);
+const RETENTION_DAYS = Number(process.env.TRINETRA_HISTORY_RETENTION_DAYS || 30);
 
 /** Source names become filenames, so they are restricted like every other. */
 const SAFE_SOURCE = /^[a-zA-Z0-9_.-]+$/;

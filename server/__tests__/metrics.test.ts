@@ -48,24 +48,24 @@ describe('parseGpus', () => {
 
 describe('parseSample', () => {
   const stdout = [
-    '===KALAM:STAT===',
+    '===TRINETRA:STAT===',
     'cpu  100 0 50 800 40 5 5 0',
-    '===KALAM:SELF===',
+    '===TRINETRA:SELF===',
     'LOAD=1.50 1.20 0.90',
     'NCPU=8',
     'UPSEC=123456.78',
-    '===KALAM:FREE===',
+    '===TRINETRA:FREE===',
     '              total        used        free      shared  buff/cache   available',
     'Mem:     16000000000  8000000000  2000000000    10000000   6000000000  7000000000',
     'Swap:     2000000000   500000000  1500000000',
-    '===KALAM:DF===',
+    '===TRINETRA:DF===',
     '/dev/sda1 ext4 100000000000 85000000000 15000000000 85% /',
     '/dev/sdb1 xfs  50000000000  5000000000 45000000000 10% /data',
-    '===KALAM:GPU===',
+    '===TRINETRA:GPU===',
     '0, 77, 40960, 81920, 70, 300.5',
-    '===KALAM:FAILED===',
+    '===TRINETRA:FAILED===',
     '2',
-    '===KALAM:END===',
+    '===TRINETRA:END===',
   ].join('\n');
 
   it('pulls every block into one numeric sample', () => {
@@ -85,7 +85,7 @@ describe('parseSample', () => {
   });
 
   it('leaves fields undefined rather than zero when a tool is missing', () => {
-    const bare = ['===KALAM:STAT===', '===KALAM:SELF===', '===KALAM:GPU===', '===KALAM:END==='].join('\n');
+    const bare = ['===TRINETRA:STAT===', '===TRINETRA:SELF===', '===TRINETRA:GPU===', '===TRINETRA:END==='].join('\n');
     const s = parseSample('vm-b', 1, bare);
     expect(s.cpuTotal).toBeUndefined();
     expect(s.cpus).toBeUndefined();

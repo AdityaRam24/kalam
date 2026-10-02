@@ -151,7 +151,7 @@ const renderInline = (text: string): React.ReactNode => {
 
 const PcaiAssistant: React.FC<PcaiAssistantProps> = ({ provider, apiKey, localUrl, localModel, embedModel, authKey }) => {
   const [messages, setMessages] = useState<PcaiMessage[]>(() => {
-    const saved = localStorage.getItem('kalam_pcai_history');
+    const saved = localStorage.getItem('trinetra_pcai_history');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
@@ -171,7 +171,7 @@ const PcaiAssistant: React.FC<PcaiAssistantProps> = ({ provider, apiKey, localUr
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
-    localStorage.setItem('kalam_pcai_history', JSON.stringify(messages));
+    localStorage.setItem('trinetra_pcai_history', JSON.stringify(messages));
   }, [messages]);
 
   useEffect(() => {
@@ -297,7 +297,7 @@ const PcaiAssistant: React.FC<PcaiAssistantProps> = ({ provider, apiKey, localUr
 
   const clearChat = () => {
     if (window.confirm('Clear the PCAI assistant conversation?')) {
-      localStorage.removeItem('kalam_pcai_history');
+      localStorage.removeItem('trinetra_pcai_history');
       setMessages([WELCOME]);
     }
   };

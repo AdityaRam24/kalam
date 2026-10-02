@@ -88,7 +88,7 @@ mkdir -p "$WORK/etc"
 B="$WORK/bundle/trinetra-$VERSION"
 mkdir -p "$B"/{images,chart,manifests,bin}
 # Git Bash rewrites any argument that looks like a POSIX path ("/app",
-# "HOME=/home/kalam") into a Windows one before crane.exe sees it — which
+# "HOME=/home/trinetra") into a Windows one before crane.exe sees it — which
 # silently bakes C:/Program Files/Git/... into the image. So crane gets its
 # arguments verbatim, and the two real file paths are made native by hand.
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
@@ -96,9 +96,9 @@ MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
 "$CRANE" mutate "$BASE_IMAGE" --platform linux/amd64 --append "$(native "$WORK/layer.tar")" \
   --entrypoint /sbin/tini,-- --cmd node,--import,tsx,server/index.ts \
   -w /app -u 10001:10001 --exposed-ports 3001/tcp \
-  -e NODE_ENV=production -e HOST=0.0.0.0 -e PORT=3001 -e HOME=/home/kalam \
-  -e KALAM_VMS_PATH=/data/inventory/vms.json -e KALAM_LEARNED_PATH=/data/inventory/learned.json \
-  -e KALAM_KB_PATH=/data/pcai/kb.json -e KALAM_HISTORY_DIR=/data/history -e KALAM_METRICS_DIR=/data/metrics \
+  -e NODE_ENV=production -e HOST=0.0.0.0 -e PORT=3001 -e HOME=/home/trinetra \
+  -e TRINETRA_VMS_PATH=/data/inventory/vms.json -e TRINETRA_LEARNED_PATH=/data/inventory/learned.json \
+  -e TRINETRA_KB_PATH=/data/pcai/kb.json -e TRINETRA_HISTORY_DIR=/data/history -e TRINETRA_METRICS_DIR=/data/metrics \
   -l org.opencontainers.image.title=trinetra -l "org.opencontainers.image.version=$VERSION" \
   -l "org.opencontainers.image.revision=$(git rev-parse --short HEAD)" \
   -l "org.opencontainers.image.base.name=$BASE_IMAGE" \
@@ -115,7 +115,7 @@ want = {
     'WorkingDir': '/app', 'User': '10001:10001',
 }
 bad = [f'{k}={c.get(k)!r}' for k, v in want.items() if c.get(k) != v]
-bad += [f'{k}={env.get(k)!r}' for k in ('HOME', 'KALAM_VMS_PATH', 'KALAM_KB_PATH', 'KALAM_HISTORY_DIR', 'KALAM_METRICS_DIR')
+bad += [f'{k}={env.get(k)!r}' for k in ('HOME', 'TRINETRA_VMS_PATH', 'TRINETRA_KB_PATH', 'TRINETRA_HISTORY_DIR', 'TRINETRA_METRICS_DIR')
         if not env.get(k, '').startswith(('/home/', '/data/'))]
 if bad:
     sys.exit('image config is wrong: ' + ', '.join(bad))

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kalam — stop anything listening on the Kalam ports.
+# Trinetra — stop anything listening on the Trinetra ports.
 #
 #   ./scripts/stop.sh                stop the backend (3001) and dev client (5173)
 #   ./scripts/stop.sh --port 8080    stop one specific port

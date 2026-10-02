@@ -1,7 +1,7 @@
 // VM topology — the inventory drawn as a graph instead of a table.
 //
 // Layers, left to right:
-//   Kalam (this machine) → jump hosts → VMs → (expanded) platform components
+//   Trinetra (this machine) → jump hosts → VMs → (expanded) platform components
 //
 // Edges follow the real SSH path: a VM with `via` set hangs off its jump host,
 // so you can see at a glance which hosts are only reachable through another.

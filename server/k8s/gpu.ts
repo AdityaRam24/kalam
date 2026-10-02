@@ -274,7 +274,7 @@ export function smiSteps(i: number, w: Pick<GpuWorkload, 'namespace' | 'pod' | '
 }
 
 /** How many GPU containers are probed live per request — keeps one call bounded. */
-const MAX_PROBES = Number(process.env.KALAM_GPU_MAX_PROBES || 24);
+const MAX_PROBES = Number(process.env.TRINETRA_GPU_MAX_PROBES || 24);
 
 export const gpuRouter = Router();
 

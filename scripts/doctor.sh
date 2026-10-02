@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kalam — diagnose connection problems, in particular:
+# Trinetra — diagnose connection problems, in particular:
 #
 #     connect ECONNREFUSED 0.0.0.0:5173
 #     connect ECONNREFUSED 127.0.0.1:3001

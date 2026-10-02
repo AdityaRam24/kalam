@@ -9,5 +9,10 @@ dataset-generation
 .env.*
 server/vms.json
 server/history/data
+server/metrics/data
+# Generated from crawled docs on this machine; the image starts empty like the bundle does.
+server/pcai/kb.json
 deploy
+# ...except the dependency pruner the Dockerfile runs in its build stage.
+!deploy/bundle/prune-deps.py
 *.ipynb

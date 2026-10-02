@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kalam — register the global 'kalam' command (the equivalent of install-cli.bat).
+# Trinetra — register the global 'trinetra' command (the equivalent of install-cli.bat).
 #
 #   ./scripts/install-cli.sh            npm link
 #   ./scripts/install-cli.sh --uninstall
@@ -23,8 +23,8 @@ require_deps
 guard_no_proxy
 
 if [ "$UNINSTALL" -eq 1 ]; then
-    npm unlink -g kalam || warn "Nothing to unlink."
-    ok "Global 'kalam' removed."
+    npm unlink -g trinetra || warn "Nothing to unlink."
+    ok "Global 'trinetra' removed."
     exit 0
 fi
 
@@ -37,10 +37,11 @@ if [ ! -w "$PREFIX" ] && [ "$(id -u)" -ne 0 ]; then
     hint "Then rerun this script."
 fi
 
+npm unlink -g kalam >/dev/null 2>&1 || true   # MIGRATION: drop the pre-rename global command
 if npm link; then
-    chmod +x bin/kalam.cjs 2>/dev/null || true
-    ok "'kalam' registered. Open a NEW shell, then run: kalam"
-    have kalam && info "Resolved to: $(command -v kalam)"
+    chmod +x bin/trinetra.cjs 2>/dev/null || true
+    ok "'trinetra' registered. Open a NEW shell, then run: trinetra"
+    have trinetra && info "Resolved to: $(command -v trinetra)"
 else
     die "npm link failed — see the hint above about the global prefix."
 fi

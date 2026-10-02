@@ -21,7 +21,7 @@ rules:
     resources: [deployments, statefulsets, daemonsets, replicasets]
     verbs: [get, list, watch]
   - apiGroups: ["networking.k8s.io"]
-    resources: [ingresses, networkpolicies]
+    resources: [ingresses, ingressclasses, networkpolicies]
     verbs: [get, list, watch]
   - apiGroups: ["metrics.k8s.io"]
     resources: [pods, nodes]
@@ -31,7 +31,8 @@ rules:
     verbs: [get, list]
   # Kubernetes page → "Other Resources". Optional APIs (cert-manager, KServe,
   # Istio, Kubeflow, Ray) are granted by name; a cluster without them simply
-  # shows those kinds as n/a. Secrets are still not granted.
+  # shows those kinds as n/a. Secrets are still not granted, so "does this
+  # pull/TLS secret exist?" is answered as "cannot tell", never guessed.
   - apiGroups: [""]
     resources: [persistentvolumes, resourcequotas]
     verbs: [get, list, watch]

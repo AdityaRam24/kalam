@@ -76,7 +76,7 @@ describe('isOriginAllowed', () => {
 
 describe('corsOriginCheck', () => {
   it('allows requests with no Origin header', () => {
-    // The CLI and curl send none; rejecting them would break `kalam ask`.
+    // The CLI and curl send none; rejecting them would break `trinetra ask`.
     expect(corsOriginCheck(undefined, DEFAULT_ALLOWED_HOSTS)).toBe(true);
   });
 

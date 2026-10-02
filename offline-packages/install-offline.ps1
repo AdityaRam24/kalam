@@ -19,7 +19,7 @@ Write-Host "node_modules : $nodeModules"
 Write-Host ""
 
 if (-not (Test-Path (Join-Path $root 'package.json'))) {
-  throw "No package.json in $root - put the offline-packages folder inside the kalam project."
+  throw "No package.json in $root - put the offline-packages folder inside the trinetra project."
 }
 if (-not (Test-Path $nodeModules)) {
   throw "No node_modules in $root - the rest of the dependencies must already be installed there."
@@ -39,7 +39,7 @@ foreach ($p in $packages) {
   $tgz = Join-Path $here $p.tgz
   if (-not (Test-Path $tgz)) { throw "Missing tarball: $tgz" }
 
-  $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("kalam-offline-" + [guid]::NewGuid().ToString('N'))
+  $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("trinetra-offline-" + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $tmp | Out-Null
   try {
     tar -xzf $tgz -C $tmp

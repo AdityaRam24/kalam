@@ -45,33 +45,33 @@ spec:
             - name: PORT
               value: "3001"
             - name: HOME
-              value: /home/kalam
+              value: /home/trinetra
             # See templates/kubeconfig.yaml for why this is not left to kubectl.
             - name: KUBECONFIG
-              value: /etc/kalam/kubeconfig/config
+              value: /etc/trinetra/kubeconfig/config
             {{- with (include "trinetra.allowedHosts" .) }}
             - name: ALLOWED_HOSTS
               value: {{ . | quote }}
             {{- end }}
             # State that must survive a restart lives on the mounted volume.
-            - name: KALAM_VMS_PATH
+            - name: TRINETRA_VMS_PATH
               value: /data/inventory/vms.json
-            - name: KALAM_LEARNED_PATH
+            - name: TRINETRA_LEARNED_PATH
               value: /data/inventory/learned.json
-            - name: KALAM_KB_PATH
+            - name: TRINETRA_KB_PATH
               value: /data/pcai/kb.json
-            - name: KALAM_HISTORY_DIR
+            - name: TRINETRA_HISTORY_DIR
               value: /data/history
-            - name: KALAM_METRICS_DIR
+            - name: TRINETRA_METRICS_DIR
               value: /data/metrics
             # Engine defaults a fresh browser starts with (GET /api/llm/defaults).
-            - name: KALAM_LLM_ENABLED
+            - name: TRINETRA_LLM_ENABLED
               value: {{ ne (toString .Values.llm.enabled) "false" | quote }}
-            - name: KALAM_PROVIDER
+            - name: TRINETRA_PROVIDER
               value: {{ .Values.llm.provider | quote }}
-            - name: KALAM_LOCAL_URL
+            - name: TRINETRA_LOCAL_URL
               value: {{ .Values.llm.localUrl | quote }}
-            - name: KALAM_LOCAL_MODEL
+            - name: TRINETRA_LOCAL_MODEL
               value: {{ .Values.llm.localModel | quote }}
             {{- if or .Values.llm.apiKey .Values.llm.existingSecret }}
             - name: GEMINI_API_KEY
@@ -82,23 +82,23 @@ spec:
                   optional: true
             {{- end }}
             {{- if .Values.config.history.enabled }}
-            - name: KALAM_HISTORY
+            - name: TRINETRA_HISTORY
               value: "true"
-            - name: KALAM_HISTORY_INTERVAL_SEC
+            - name: TRINETRA_HISTORY_INTERVAL_SEC
               value: {{ .Values.config.history.intervalSec | quote }}
-            - name: KALAM_HISTORY_RETENTION_DAYS
+            - name: TRINETRA_HISTORY_RETENTION_DAYS
               value: {{ .Values.config.history.retentionDays | quote }}
-            - name: KALAM_HISTORY_SOURCES
+            - name: TRINETRA_HISTORY_SOURCES
               value: {{ .Values.config.history.sources | quote }}
             {{- end }}
             {{- if .Values.config.metrics.enabled }}
-            - name: KALAM_METRICS
+            - name: TRINETRA_METRICS
               value: "1"
-            - name: KALAM_METRICS_INTERVAL_SEC
+            - name: TRINETRA_METRICS_INTERVAL_SEC
               value: {{ .Values.config.metrics.intervalSec | quote }}
-            - name: KALAM_METRICS_RETENTION_HOURS
+            - name: TRINETRA_METRICS_RETENTION_HOURS
               value: {{ .Values.config.metrics.retentionHours | quote }}
-            - name: KALAM_METRICS_SOURCES
+            - name: TRINETRA_METRICS_SOURCES
               value: {{ .Values.config.metrics.sources | quote }}
             {{- end }}
             {{- with .Values.config.extraEnv }}
@@ -135,13 +135,13 @@ spec:
             - name: tmp
               mountPath: /tmp
             - name: home
-              mountPath: /home/kalam
+              mountPath: /home/trinetra
             - name: kubeconfig
-              mountPath: /etc/kalam/kubeconfig
+              mountPath: /etc/trinetra/kubeconfig
               readOnly: true
             {{- if .Values.ssh.secretName }}
             - name: ssh-key
-              mountPath: /home/kalam/.ssh
+              mountPath: /home/trinetra/.ssh
               readOnly: true
             {{- end }}
       volumes:

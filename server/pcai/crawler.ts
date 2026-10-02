@@ -7,7 +7,7 @@
 import { CRAWL_ALLOWED_HOSTS } from './sources.js';
 
 const UA =
-  'Mozilla/5.0 (compatible; KalamPCAI/1.0; +https://developer.hpe.com/platform/hpe-private-cloud-ai/)';
+  'Mozilla/5.0 (compatible; TrinetraPCAI/1.0; +https://developer.hpe.com/platform/hpe-private-cloud-ai/)';
 
 export interface FetchedPage {
   url: string;

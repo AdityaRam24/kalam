@@ -1,4 +1,4 @@
-// Normalizing raw `kubectl -o json` items into the shapes every Kalam view
+// Normalizing raw `kubectl -o json` items into the shapes every Trinetra view
 // reads — with the fields that make a *topology* possible.
 //
 // The topology map draws relationships, and a relationship can only be drawn
@@ -178,7 +178,7 @@ export function parseResources(block: any): ResourceAmounts {
 // and "Pending" for one stuck on ImagePullBackOff — the phase alone hides
 // exactly the failures people go looking for. `kubectl get pods` prints a
 // derived STATUS column instead; podDisplayStatus reproduces that derivation
-// (kubectl's printPod) so Kalam says what kubectl would say.
+// (kubectl's printPod) so Trinetra says what kubectl would say.
 // ---------------------------------------------------------------------------
 
 export type Health = 'healthy' | 'progressing' | 'failing' | 'completed' | 'unknown';

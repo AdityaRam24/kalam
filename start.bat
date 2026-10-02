@@ -1,10 +1,10 @@
 @echo off
-title Kalam - Start (Production)
+title Trinetra - Start (Production)
 color 0A
 cd /d "%~dp0"
 
 echo ===================================================
-echo               KALAM - ONE-CLICK START
+echo               TRINETRA - ONE-CLICK START
 echo ===================================================
 echo.
 
@@ -43,7 +43,7 @@ if not exist "dist\index.html" (
 )
 
 :: 4. Start the server and open the browser
-echo [3/3] Starting Kalam on http://localhost:3001 ...
+echo [3/3] Starting Trinetra on http://localhost:3001 ...
 start "" http://localhost:3001
 call npx tsx server/index.ts
 
