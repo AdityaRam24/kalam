@@ -52,3 +52,33 @@ export function corsOriginCheck(
   if (!origin) return true;
   return isOriginAllowed(origin, allowed);
 }
+
+// A bare IPv4/IPv6 literal (with optional :port / brackets). A DNS-rebinding
+// attack needs the victim's browser to send the ATTACKER'S domain name as the
+// Host header, so allowing IP literals through is safe and keeps NodePort /
+// ClusterIP / direct-IP access working.
+function isIpLiteralHost(host: string): boolean {
+  const h = host.replace(/^\[/, '').replace(/\](:\d+)?$/, '').replace(/:\d+$/, '');
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || /^[0-9a-fA-F:]+$/.test(h) && h.includes(':');
+}
+
+/**
+ * Guard against DNS rebinding: the browser's Host header must name something we
+ * recognise. Without this, a page on an attacker's domain whose DNS points at
+ * 127.0.0.1 can drive this API as a same-origin request (CORS cannot stop it).
+ *
+ * Permissive by design — it rejects only a hostNAME that is neither loopback,
+ * an IP literal, nor in the allowlist, which is exactly the rebinding case.
+ */
+export function isHostHeaderAllowed(
+  hostHeader: string | undefined,
+  allowed: string[] | 'any',
+): boolean {
+  if (allowed === 'any') return true;
+  if (!hostHeader) return true; // non-browser clients (CLI, curl, probes)
+  const host = hostHeader.trim().toLowerCase();
+  const name = host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+  if (name === 'localhost' || name === '127.0.0.1' || name === '::1') return true;
+  if (isIpLiteralHost(host)) return true;
+  return allowed.some((pattern) => hostMatches(name, pattern));
+}

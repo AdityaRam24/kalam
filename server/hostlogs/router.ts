@@ -76,6 +76,15 @@ export function splitMarked(stdout: string): Array<{ tag: string; arg: string; b
 
 export const mark = (tag: string, arg?: string) => `echo ${shQuote(`${MARK}${tag}${arg !== undefined ? ':' + arg : ''}===`)}`;
 
+// Refuse to read a path whose resolved target escapes /var/log. `safeLogPath`
+// already blocks `..` in the request, but it cannot see a symlink that lives on
+// the remote host; this resolves it at read time and checks again. On a host
+// without readlink -f the test fails closed (no output), which is safe.
+function guardUnderVarLog(file: string, inner: string): string {
+  const q = shQuote(file);
+  return `case "$(readlink -f -- ${q} 2>/dev/null || echo /DENY)" in /var/log|/var/log/*) ${inner} ;; *) echo "refused: ${file} resolves outside /var/log" ;; esac`;
+}
+
 // Remote shell snippet that streams a log file, decompressing by extension.
 function catCmd(file: string): string {
   const q = shQuote(file);
@@ -480,6 +489,10 @@ logsRouter.post('/api/logs/read', async (req, res) => {
     } else {
       cmd = `${catCmd(file)} 2>&1${filter} | tail -n ${lines}`;
     }
+    // Commands run elevated, so a symlink planted under /var/log by a less
+    // privileged user could otherwise make root read, say, /etc/shadow. Refuse
+    // unless the fully-resolved path is still inside /var/log.
+    cmd = guardUnderVarLog(file, cmd);
   }
 
   const { stdout, stderr, ok, truncated } = await sshRun(vm, cmd, 60000, { maxBuffer: 16 * MB });
@@ -591,7 +604,7 @@ logsRouter.post('/api/logs/download', async (req, res) => {
   if (raw) {
     const file = safeLogPath(single);
     if (!file || file === '/var/log') return res.status(400).json({ error: 'Path must be a file under /var/log.' });
-    cmd = `head -c ${cap + 1} ${shQuote(file)} | base64`;
+    cmd = guardUnderVarLog(file, `head -c ${cap + 1} ${shQuote(file)} | base64`);
     filename = `${vm.name}-${path.posix.basename(file)}`;
     contentType = 'application/octet-stream';
   } else {

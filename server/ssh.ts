@@ -11,8 +11,46 @@
 
 import { Client, type ConnectConfig } from 'ssh2';
 import { promises as fs } from 'fs';
+import fsSync from 'fs';
+import crypto from 'crypto';
 import os from 'os';
 import path from 'path';
+
+// ---------------------------------------------------------------------------
+// Host-key verification (trust on first use).
+//
+// ssh2 accepts any host key unless a hostVerifier is given, so a man-in-the-
+// middle on the path to a host could capture the login and sudo/su passwords.
+// We pin the first key seen for each host and reject a later mismatch — the
+// usual SSH behaviour. A legitimate key change (reinstalled host) needs the
+// host's line removed from the pin file.
+//
+// Disabled only in the test harness (SSH_PORT_OVERRIDE), where the daemon's
+// host key is regenerated per run, or explicitly via TRINETRA_SSH_STRICT=off.
+const PINS_PATH = process.env.TRINETRA_SSH_PINS_PATH || path.join(os.homedir(), '.trinetra-ssh-pins.json');
+const strictHostKeys = process.env.TRINETRA_SSH_STRICT !== 'off' && !process.env.SSH_PORT_OVERRIDE;
+let pinCache: Record<string, string> | null = null;
+
+function loadPins(): Record<string, string> {
+  if (pinCache) return pinCache;
+  try { pinCache = JSON.parse(fsSync.readFileSync(PINS_PATH, 'utf-8')); } catch { pinCache = {}; }
+  return pinCache!;
+}
+
+function hostVerifierFor(host: string): ((key: Buffer) => boolean) | undefined {
+  if (!strictHostKeys) return undefined;
+  return (key: Buffer) => {
+    const fp = crypto.createHash('sha256').update(key).digest('hex');
+    const pins = loadPins();
+    const known = pins[host];
+    if (!known) {
+      pins[host] = fp;
+      try { fsSync.writeFileSync(PINS_PATH, JSON.stringify(pins), { mode: 0o600 }); } catch { /* best effort */ }
+      return true; // first sighting — pin it
+    }
+    return known === fp; // reject if the host key changed
+  };
+}
 
 // Every host is reached on the standard SSH port. Non-standard ports were the
 // single most common reason a VM "would not connect", so there is no port knob.
@@ -81,6 +119,8 @@ async function authFor(vm: SshTarget, timeoutMs: number): Promise<ConnectConfig>
     port: connectPort(),
     username: vm.user,
     readyTimeout: Math.min(timeoutMs, 20000),
+    // Reject a host whose key does not match the one first pinned for it.
+    hostVerifier: hostVerifierFor(vm.host) as ConnectConfig['hostVerifier'],
     // Older appliance/hypervisor SSH daemons (common on the hosts this monitors)
     // still offer only legacy KEX and host-key algorithms, which ssh2 supports
     // but leaves out of its defaults. `append` keeps every modern default first

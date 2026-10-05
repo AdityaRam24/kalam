@@ -43,6 +43,11 @@ const VMS_PATH = process.env.TRINETRA_VMS_PATH || path.join(__dirname, 'vms.json
 
 const NAME_RE = /^[a-zA-Z0-9_.-]+$/;
 const HOST_RE = /^[a-zA-Z0-9_.:-]+$/; // hostname or IPv4/IPv6-ish
+// A filesystem path to a private key (POSIX or Windows). Deliberately excludes
+// every shell metacharacter — quotes, ; & | ` $ ( ) < > * ? and newlines — so
+// the value is safe both as a file path and inside the `ssh -i <path>` string
+// the UI offers for copy/paste (which is run through a shell by the CLI).
+const KEYPATH_RE = /^[A-Za-z0-9 _.\-~:\\/]{1,260}$/;
 
 export interface VmEntry {
   name: string;
@@ -85,7 +90,11 @@ async function saveVms(vms: VmEntry[]): Promise<void> {
   // The inventory may point at a mounted volume whose directory does not exist
   // yet on a first run, and losing every host to ENOENT is not an option.
   await fs.mkdir(path.dirname(VMS_PATH), { recursive: true }).catch(() => {});
-  await fs.writeFile(VMS_PATH, JSON.stringify(vms, null, 2), 'utf-8');
+  // This file holds SSH / sudo / su passwords in the clear, so it must not be
+  // world- or group-readable. mode is honoured on POSIX (the container and
+  // Linux hosts) and harmlessly ignored on Windows.
+  await fs.writeFile(VMS_PATH, JSON.stringify(vms, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  await fs.chmod(VMS_PATH, 0o600).catch(() => {});
 }
 
 // Fast liveness check: can we open a TCP socket to the SSH port?
@@ -175,6 +184,9 @@ vmsRouter.post('/api/vms', async (req, res) => {
   const vms = await loadVms();
   if (vms.some((v) => v.name === name)) return res.status(409).json({ error: `A VM named "${name}" already exists.` });
   if (via && !vms.some((v) => v.name === via)) return res.status(400).json({ error: `Jump host "${via}" is not in the inventory.` });
+  if (keyPath !== undefined && keyPath !== '' && (typeof keyPath !== 'string' || !KEYPATH_RE.test(keyPath.trim()))) {
+    return res.status(400).json({ error: 'Invalid key path.' });
+  }
   const entry: VmEntry = { name, host, user };
   if (password && typeof password === 'string') entry.password = password;
   if (keyPath && typeof keyPath === 'string' && keyPath.trim()) entry.keyPath = keyPath.trim();
@@ -211,7 +223,10 @@ vmsRouter.put('/api/vms/:name', async (req, res) => {
     if (password) vm.password = password; else delete vm.password;
   }
   if (typeof keyPath === 'string') {
-    if (keyPath.trim()) vm.keyPath = keyPath.trim(); else delete vm.keyPath;
+    if (keyPath.trim()) {
+      if (!KEYPATH_RE.test(keyPath.trim())) return res.status(400).json({ error: 'Invalid key path.' });
+      vm.keyPath = keyPath.trim();
+    } else delete vm.keyPath;
   }
   if (typeof via === 'string') {
     if (via && !vms.some((v) => v.name === via && v.name !== vm.name)) {
@@ -231,6 +246,9 @@ vmsRouter.post('/api/vms/test', async (req, res) => {
   const { host, user, password, keyPath, via } = req.body || {};
   if (!host || !HOST_RE.test(host)) return res.status(400).json({ error: 'Invalid host/IP.' });
   if (!user || !NAME_RE.test(user)) return res.status(400).json({ error: 'Invalid SSH user.' });
+  if (keyPath !== undefined && keyPath !== '' && (typeof keyPath !== 'string' || !KEYPATH_RE.test(keyPath.trim()))) {
+    return res.status(400).json({ error: 'Invalid key path.' });
+  }
   const jump = via ? (await loadVms()).find((v) => v.name === via) : undefined;
   const check = await sshCheck({ name: host, host, user, password, keyPath: keyPath || undefined }, jump);
   res.json(check);

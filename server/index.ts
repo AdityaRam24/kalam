@@ -2,7 +2,7 @@
 import { adoptLegacyEnv } from './legacy-env.js';
 import express from 'express';
 import cors from 'cors';
-import { exec, spawn } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { pcaiRouter, streamLocalChat, streamGemini } from './pcai/router.js';
-import { llmRouter, llmEnabled, LLM_ROUTES } from './llm.js';
+import { llmRouter, llmEnabled, LLM_ROUTES, llmUrlError } from './llm.js';
 import { vmsRouter } from './vms.js';
 import { logsRouter } from './hostlogs/router.js';
 import { shellRouter } from './shell.js';
@@ -26,12 +26,38 @@ import { pollerState, startHistoryPoller } from './history/poller.js';
 import { metricsRouter } from './metrics/router.js';
 import { insightRouter } from './insight/router.js';
 import { metricsPollerState, startMetricsPoller } from './metrics/poller.js';
-import { parseAllowedHosts, corsOriginCheck } from './cors.js';
+import { parseAllowedHosts, corsOriginCheck, isHostHeaderAllowed } from './cors.js';
 
 dotenv.config();
 adoptLegacyEnv(); // .env files written before the rename
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+// Run a binary with an argv array — no shell, so nothing in the arguments can
+// be interpreted as a shell metacharacter. This is the safe path for any value
+// that originates from a request body; `runCmd` (shell) is only for fixed,
+// server-authored command strings.
+async function runFile(
+  file: string,
+  args: string[],
+  timeout = 8000,
+  maxBuffer = 1024 * 1024 * 10,
+): Promise<{ stdout: string; stderr: string; success: boolean }> {
+  try {
+    const { stdout, stderr } = await execFileAsync(file, args, { timeout, maxBuffer, killSignal: 'SIGKILL' });
+    return { stdout, stderr, success: true };
+  } catch (error: any) {
+    return { stdout: error?.stdout || '', stderr: error?.stderr || error?.message || '', success: false };
+  }
+}
+
+// A Docker image reference: repo[:tag][@digest], registry host optional. No
+// spaces and none of the shell metacharacters that made the scan/apply-fix
+// endpoints injectable — those are rejected before the value reaches Docker.
+const IMAGE_REF_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,250}$/;
+// A container name as Docker assigns/accepts it.
+const CONTAINER_NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -44,6 +70,19 @@ const allowedOrigins = parseAllowedHosts(
 app.use(cors({
   origin: (origin, callback) => callback(null, corsOriginCheck(origin, allowedOrigins)),
 }));
+
+// Reject requests whose Host header we do not recognise BEFORE any handler
+// runs. This is what stops DNS rebinding: CORS alone cannot, because a rebound
+// request looks same-origin to the browser. Loopback, IP literals and the
+// configured hosts all pass; an attacker's domain name does not. /healthz is
+// exempt so a kubelet probe (which may use the pod IP or a bare name) is never
+// blocked.
+app.use((req, res, next) => {
+  if (req.path === '/healthz') return next();
+  if (isHostHeaderAllowed(req.headers.host, allowedOrigins)) return next();
+  res.status(403).json({ error: 'Host not allowed.' });
+});
+
 app.use(express.json({ limit: '2mb' })); // allow pasting large logs/stack traces
 // Express 5 leaves req.body undefined for non-JSON requests; every handler
 // destructures it, so give them an empty object to reject instead of a crash.
@@ -225,7 +264,7 @@ app.get('/api/status', async (req, res) => {
 
 // API: List Docker Containers
 app.get('/api/docker/containers', async (req, res) => {
-  const { stdout, success, stderr } = await runCmd('docker ps -a --format "{{json .}}"');
+  const { stdout, success, stderr } = await runFile('docker', ['ps', '-a', '--format', '{{json .}}']);
   // "No Docker here" is a normal state for a visualizer, not an error. Always
   // answer with an array so a failure can never land in client state where an
   // array is expected and blow up a render-time .filter().
@@ -270,23 +309,14 @@ app.post('/api/docker/action', async (req, res) => {
     return res.status(400).json({ error: 'Invalid action' });
   }
 
-  let cmd = '';
-  switch (action) {
-    case 'start':
-      cmd = `docker start ${containerId}`;
-      break;
-    case 'stop':
-      cmd = `docker stop ${containerId}`;
-      break;
-    case 'restart':
-      cmd = `docker restart ${containerId}`;
-      break;
-    case 'remove':
-      cmd = `docker rm -f ${containerId}`;
-      break;
-  }
+  const argsByAction: Record<string, string[]> = {
+    start: ['start', containerId],
+    stop: ['stop', containerId],
+    restart: ['restart', containerId],
+    remove: ['rm', '-f', containerId],
+  };
 
-  const { stdout, stderr, success } = await runCmd(cmd);
+  const { stdout, stderr, success } = await runFile('docker', argsByAction[action]);
   if (!success) {
     return res.status(500).json({ error: `Failed to ${action} container`, details: stderr });
   }
@@ -302,8 +332,8 @@ app.get('/api/docker/logs/:id', async (req, res) => {
     return res.status(400).json({ error: 'Invalid container ID format' });
   }
 
-  const { stdout, stderr, success } = await runCmd(`docker logs --tail 150 ${id}`);
-  
+  const { stdout, stderr, success } = await runFile('docker', ['logs', '--tail', '150', id]);
+  void success;
   // Docker logs often write to stderr even when successful, so return stdout + stderr combined
   res.json({ logs: stdout + (stderr ? `\n--- STDERR ---\n${stderr}` : '') });
 });
@@ -311,13 +341,15 @@ app.get('/api/docker/logs/:id', async (req, res) => {
 // API: Docker Image Security Vulnerability Scan
 app.post('/api/docker/scan', async (req, res) => {
   const { imageName } = req.body;
-  if (!imageName) {
+  if (!imageName || typeof imageName !== 'string') {
     return res.status(400).json({ error: 'Image name is required' });
   }
+  if (!IMAGE_REF_REGEX.test(imageName)) {
+    return res.status(400).json({ error: 'Invalid image name format' });
+  }
 
-  // Try running docker scout
-  const cmd = `docker scout quickview ${imageName}`;
-  const scoutRes = await runCmd(cmd);
+  // Try running docker scout — argv form, never a shell string.
+  const scoutRes = await runFile('docker', ['scout', 'quickview', imageName]);
   
   let isMock = !scoutRes.success;
   let rawOutput = scoutRes.stdout || scoutRes.stderr;
@@ -424,39 +456,52 @@ app.post('/api/docker/apply-fix', async (req, res) => {
   if (!containerId || !targetImage) {
     return res.status(400).json({ error: 'Container ID and target image are required' });
   }
+  if (typeof containerId !== 'string' || !DOCKER_ID_REGEX.test(containerId)) {
+    return res.status(400).json({ error: 'Invalid container ID format' });
+  }
+  if (typeof targetImage !== 'string' || !IMAGE_REF_REGEX.test(targetImage)) {
+    return res.status(400).json({ error: 'Invalid target image format' });
+  }
 
-  const inspectRes = await runCmd(`docker inspect ${containerId}`);
+  const inspectRes = await runFile('docker', ['inspect', containerId]);
   if (!inspectRes.success) {
     return res.status(500).json({ error: 'Failed to inspect container', details: inspectRes.stderr });
   }
 
   try {
     const data = JSON.parse(inspectRes.stdout)[0];
-    const name = data.Name.replace(/^\//, ''); // Strip leading slash
+    const name = String(data.Name || '').replace(/^\//, ''); // Strip leading slash
+    if (!CONTAINER_NAME_REGEX.test(name)) {
+      return res.status(500).json({ error: 'Container has an unexpected name; not re-deploying.' });
+    }
     const config = data.Config || {};
     const hostConfig = data.HostConfig || {};
 
-    const envs = config.Env || [];
-    const envArgs = envs.map((e: string) => `-e "${e}"`).join(' ');
+    // Each value is its own argv entry, so a crafted env var or port value is
+    // passed verbatim to Docker and can never break out into a new command.
+    const envArgs: string[] = (config.Env || [])
+      .filter((e: unknown): e is string => typeof e === 'string')
+      .flatMap((e: string) => ['-e', e]);
 
     const portBindings = hostConfig.PortBindings || {};
-    const portArgs = Object.keys(portBindings).map(containerPort => {
-      const binding = portBindings[containerPort][0];
-      const hostPort = binding.HostPort;
-      return `-p ${hostPort}:${containerPort.split('/')[0]}`;
-    }).join(' ');
+    const portArgs: string[] = Object.keys(portBindings).flatMap((containerPort) => {
+      const binding = (portBindings[containerPort] || [])[0];
+      const hostPort = binding?.HostPort;
+      if (!hostPort) return [];
+      return ['-p', `${hostPort}:${containerPort.split('/')[0]}`];
+    });
 
-    const pullRes = await runCmd(`docker pull ${targetImage}`);
+    const pullRes = await runFile('docker', ['pull', targetImage], 120000);
     if (!pullRes.success) {
       return res.status(500).json({ error: `Failed to pull secure image ${targetImage}`, details: pullRes.stderr });
     }
 
-    await runCmd(`docker stop ${containerId}`);
-    await runCmd(`docker rm ${containerId}`);
+    await runFile('docker', ['stop', containerId]);
+    await runFile('docker', ['rm', containerId]);
 
-    const runCmdStr = `docker run -d --name ${name} ${portArgs} ${envArgs} ${targetImage}`;
-    const newRunRes = await runCmd(runCmdStr);
-    
+    const runArgs = ['run', '-d', '--name', name, ...portArgs, ...envArgs, targetImage];
+    const newRunRes = await runFile('docker', runArgs, 60000);
+
     if (!newRunRes.success) {
       return res.status(500).json({ error: 'Failed to launch secured container', details: newRunRes.stderr });
     }
@@ -464,7 +509,7 @@ app.post('/api/docker/apply-fix', async (req, res) => {
     res.json({
       message: 'Container upgraded and re-deployed successfully!',
       newContainerId: newRunRes.stdout.trim().slice(0, 12),
-      cmdRun: runCmdStr
+      cmdRun: `docker ${runArgs.join(' ')}`,
     });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to process container upgrade', details: err.message });
@@ -721,6 +766,11 @@ app.post('/api/agent/chat', async (req, res) => {
     authKey
   } = req.body;
 
+  if (provider === 'local') {
+    const blocked = llmUrlError(localUrl);
+    if (blocked) return res.status(400).json({ error: blocked });
+  }
+
   const { dockerVer, k8sVer, dockerRes, k8sRes, dockerStateStr, k8sStateStr } = await gatherClusterState();
   const systemInstruction = buildAgentSystemInstruction({ dockerVer, k8sVer, dockerStateStr, k8sStateStr });
 
@@ -854,6 +904,11 @@ app.post('/api/agent/chat/stream', async (req, res) => {
     authKey
   } = req.body;
 
+  if (provider === 'local') {
+    const blocked = llmUrlError(localUrl);
+    if (blocked) return res.status(400).json({ error: blocked });
+  }
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
@@ -920,6 +975,10 @@ app.post('/api/agent/orchestrate', async (req, res) => {
 
   if (!prompt) {
     return res.status(400).json({ error: 'Goal prompt is required' });
+  }
+  if (provider === 'local') {
+    const blocked = llmUrlError(localUrl);
+    if (blocked) return res.status(400).json({ error: blocked });
   }
 
   // Gather cluster state
