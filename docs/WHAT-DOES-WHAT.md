@@ -109,7 +109,7 @@ Code: `src/components/ClusterHistory.tsx`, `server/history/router.ts` (`/api/his
 - **KServe** — no runtime for the model format, named runtime missing, model PVC missing/unbound, invalid deploymentMode, predictor pod failures.
 - **Storage / nodes / HPA** — StorageClass missing or no default, provisioning failures, NotReady and pressure, autoscaler targets missing.
 
-The label/annotation knowledge base is `server/k8s/contracts.ts`.
+The label/annotation knowledge base is `server/k8s/contracts.ts`. Full rule reference: [`docs/WHY-ENGINE.md`](WHY-ENGINE.md).
 
 ### Kubectl Cheat Sheet
 Reference. `src/components/KubectlCheatSheet.tsx`

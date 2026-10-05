@@ -18,7 +18,10 @@
 #   3. works out how the UI should be reached:
 #        PCAI (Istio ezaf-gateway) → https://trinetra.<pcai-domain> behind SSO
 #        --host NAME             → an Ingress for NAME
-#        otherwise               → a NodePort on every node
+#        otherwise               → ClusterIP (reach it with kubectl port-forward).
+#                                  The API can run kubectl/SSH actions, so it is
+#                                  NOT exposed on the network unless you ask:
+#                                  pass --nodeport or --host (put auth in front).
 #   4. turns on persistence if the cluster has a default StorageClass
 #   5. helm upgrade --install, waits for the rollout, runs `helm test`
 #   6. prints the URL, and writes a PCAI-importable chart with the image baked
@@ -337,7 +340,10 @@ if has_api networking.istio.io gateways && kc -n istio-system get gateways.netwo
   PCAI_GATEWAY=true
 fi
 if [ "$EXPOSE" = auto ]; then
-  if $PCAI_GATEWAY; then EXPOSE=pcai; else EXPOSE=nodeport; fi
+  # Default to no network exposure off-PCAI: the API runs kubectl/SSH actions,
+  # so a NodePort with nothing in front is not a safe default. Opt in with
+  # --nodeport, or --host NAME for an Ingress you can put auth on.
+  if $PCAI_GATEWAY; then EXPOSE=pcai; else EXPOSE=clusterip; fi
 fi
 if [ "$EXPOSE" = pcai ] && [ -z "$DOMAIN" ]; then
   # The domain every PCAI app is published under: from the gateway's hosts, or

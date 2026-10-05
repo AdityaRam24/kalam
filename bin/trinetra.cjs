@@ -67,7 +67,9 @@ function loadUserConfig() {
 }
 function saveUserConfig(patch) {
   const cfg = { ...loadUserConfig(), ...patch };
-  try { fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2)); } catch (_) { /* best effort */ }
+  // 0600: the file can hold a Gemini API key, so keep it owner-only (honoured
+  // on POSIX, ignored on Windows).
+  try { fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 }); try { fs.chmodSync(CONFIG_PATH, 0o600); } catch (_) {} } catch (_) { /* best effort */ }
   return cfg;
 }
 

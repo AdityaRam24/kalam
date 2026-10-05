@@ -6,6 +6,7 @@
 
 import { Router } from 'express';
 import { GoogleGenAI } from '@google/genai';
+import { llmUrlError } from '../llm.js';
 import { resolveEmbedConfig, embedTexts, EmbedConfig } from './embed.js';
 import { loadKB, saveKB, searchKB, SearchHit, KnowledgeBase, chunkText, tokenize, loadLearned, saveLearned, LearnedDoc } from './store.js';
 import { runIngest } from './ingest.js';
@@ -72,6 +73,9 @@ pcaiRouter.post('/api/pcai/ingest', async (req, res) => {
     crawl = true,
     maxPages = 40,
   } = req.body || {};
+
+  const blocked = provider === 'local' ? llmUrlError(localUrl) : null;
+  if (blocked) return res.status(400).json({ error: blocked });
 
   const embed = resolveEmbedConfig({ provider, apiKey, localUrl, embedModel });
 
@@ -168,6 +172,8 @@ export async function learnDocument(opts: {
 pcaiRouter.post('/api/pcai/learn', async (req, res) => {
   const { title, text, kind, apiKey, localUrl } = req.body || {};
   if (!text || !String(text).trim()) return res.status(400).json({ error: 'Provide the document text to learn.' });
+  const blockedLearn = llmUrlError(localUrl);
+  if (blockedLearn) return res.status(400).json({ error: blockedLearn });
   try {
     const result = await learnDocument({ title: title || 'Untitled', text: String(text), kind, apiKey, localUrl });
     if (!result.ok) return res.status(400).json({ error: result.error });
@@ -332,6 +338,8 @@ pcaiRouter.post('/api/pcai/chat', async (req, res) => {
   if (!prompt || !prompt.trim()) {
     return res.status(400).json({ error: 'A question or error text is required.' });
   }
+  const blockedChat = llmUrlError(localUrl);
+  if (blockedChat) return res.status(400).json({ error: blockedChat });
 
   const kb = await loadKB();
   if (!kb || kb.chunks.length === 0) {
@@ -409,6 +417,9 @@ pcaiRouter.post('/api/pcai/chat/stream', async (req, res) => {
     localModel = 'qwen2.5-coder:7b',
     authKey,
   } = req.body || {};
+
+  const blockedStream = llmUrlError(localUrl);
+  if (blockedStream) return res.status(400).json({ error: blockedStream });
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',

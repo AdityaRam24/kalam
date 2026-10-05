@@ -23,6 +23,35 @@ export interface DiscoveredModel {
   modified: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// SSRF guard for caller-supplied model endpoints.
+//
+// Several routes fetch a URL the request chose (localUrl / authKey). Left open,
+// the server is a proxy an unauthenticated caller can aim at internal services
+// or the cloud metadata endpoint. This blocks the metadata address outright and,
+// when TRINETRA_LLM_ALLOWED_HOSTS is set, restricts endpoints to that allowlist
+// (comma-separated hostnames; a leading dot matches a domain and subdomains).
+// ---------------------------------------------------------------------------
+const BLOCKED_LLM_HOSTS = new Set(['169.254.169.254', 'metadata.google.internal', '[fd00:ec2::254]', 'fd00:ec2::254']);
+
+export function llmUrlError(rawUrl: string | undefined): string | null {
+  const url = (rawUrl || '').trim();
+  if (!url) return null; // empty → the route falls back to its own default
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return 'Invalid endpoint URL.';
+  }
+  if (BLOCKED_LLM_HOSTS.has(host)) return 'That endpoint host is not permitted.';
+  const allow = (process.env.TRINETRA_LLM_ALLOWED_HOSTS || '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+  if (allow.length) {
+    const ok = allow.some((p) => (p.startsWith('.') ? host === p.slice(1) || host.endsWith(p) : host === p));
+    if (!ok) return 'This endpoint host is not on the allowed list (TRINETRA_LLM_ALLOWED_HOSTS).';
+  }
+  return null;
+}
+
 // An endpoint may be given as http://host:11434/v1 (OpenAI-compatible) or the
 // bare Ollama root http://host:11434. Return the bare root for native calls.
 export function ollamaBase(localUrl?: string): string {
@@ -147,6 +176,8 @@ function sortModels(models: DiscoveredModel[]): DiscoveredModel[] {
 llmRouter.get('/api/llm/models', async (req, res) => {
   const localUrl = (req.query.localUrl as string) || undefined;
   const authKey = (req.query.authKey as string) || undefined;
+  const blocked = llmUrlError(localUrl);
+  if (blocked) return res.status(400).json({ ok: false, error: blocked, endpointUp: false, models: [] });
   try {
     const result = await discoverModels(localUrl, authKey);
     const chat = result.models.filter((m) => m.kind !== 'embed');
@@ -172,6 +203,8 @@ llmRouter.post('/api/llm/pull', async (req, res) => {
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'A model name is required (e.g. "nomic-embed-text").' });
   }
+  const blocked = llmUrlError(localUrl);
+  if (blocked) return res.status(400).json({ error: blocked });
   const base = ollamaBase(localUrl);
 
   res.writeHead(200, {
@@ -446,6 +479,11 @@ export const LLM_ROUTES = [
   '/api/pcai/chat',
   '/api/pcai/ingest',
   '/api/pcai/learn',
+  // The learned-doc store is part of the PCAI brain: listing and deleting it
+  // must be off when AI is off, not just the write path above. ('/api/pcai/learn'
+  // does not prefix-match '/api/pcai/learned' — the segment differs — so it is
+  // listed separately on purpose.)
+  '/api/pcai/learned',
   '/api/llm/test',
   '/api/llm/models',
   '/api/llm/pull',
@@ -468,6 +506,10 @@ llmRouter.get('/api/llm/defaults', (_req, res) => {
 
 llmRouter.post('/api/llm/test', async (req, res) => {
   const { provider = 'gemini', apiKey, localUrl, localModel, authKey } = req.body || {};
+  if (provider === 'local') {
+    const blocked = llmUrlError(localUrl);
+    if (blocked) return res.status(400).json({ ok: false, provider, latencyMs: 0, error: blocked });
+  }
   try {
     const result = provider === 'local'
       ? await testLocal(String(localUrl || ''), String(localModel || ''), authKey ? String(authKey) : undefined)

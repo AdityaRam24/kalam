@@ -258,9 +258,12 @@ shellRouter.post('/api/vms/shell/:id/close', (req, res) => {
   res.json({ ok: true });
 });
 
-// Convenience for the UI: which terminals are already open.
+// Convenience for the UI: how many terminals are open, against which hosts.
+// The session id is deliberately NOT returned: it is the capability that lets a
+// client attach to a live (often root) shell, so it is handed out only to
+// whoever opened the session via /open, never listed.
 shellRouter.get('/api/vms/shell', (_req, res) => {
-  res.json({ sessions: Array.from(sessions.values()).map((s) => ({ id: s.id, vm: s.vm, idleSec: Math.round((Date.now() - s.lastUsed) / 1000) })) });
+  res.json({ sessions: Array.from(sessions.values()).map((s) => ({ vm: s.vm, idleSec: Math.round((Date.now() - s.lastUsed) / 1000) })) });
 });
 
 // Exported for tests / shutdown.

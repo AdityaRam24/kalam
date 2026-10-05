@@ -71,6 +71,20 @@ ingress:
     enabled: false
     secretName: ""
 
+# ── Who may reach the pod (NetworkPolicy) ───────────────────────────────────
+# The API can run kubectl and SSH actions, so on a shared cluster you usually
+# want only the ingress path to reach it, not every other pod. Opt-in because
+# it only has effect on a CNI that enforces NetworkPolicy, and the right source
+# depends on how you expose it.
+networkPolicy:
+  enabled: false
+  # Allow traffic from the PCAI / Istio ingress gateway namespace.
+  ingressFromIstio: true
+  istioNamespace: istio-system
+  # Extra namespaces allowed to reach the pod (e.g. an ingress-controller ns).
+  extraNamespaces: []
+  # With all sources off, the policy denies all ingress to the pod (strictest).
+
 # ── What Trinetra may do to the cluster it runs in ─────────────────────────────
 rbac:
   create: true
