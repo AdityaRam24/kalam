@@ -28,7 +28,13 @@ export function demoRaw(now = Date.now()): { raw: RawVme; k8sNodes: any; podNode
     computeServerType: { id: 300, code: 'mvmHypervisor', name: 'HPE VM Hypervisor', vmHypervisor: true, managed: true },
     zone: { id: 1, name: 'pcai-cloud' }, maxCores: h.cores, maxMemory: h.mem * GiB, maxStorage: 3840 * GiB,
     stats: { ts: ago(now, h.agentMin), maxMemory: h.mem * GiB, usedMemory: Math.round(h.memUsed * h.mem * GiB), maxStorage: 3840 * GiB, usedStorage: 1900 * GiB, cpuUsage: h.cpu },
-    serverOs: { name: 'Ubuntu 22.04' }, lastAgentUpdate: ago(now, h.agentMin), interfaces: [{ ipAddress: h.ip }],
+    serverOs: { name: 'Ubuntu 22.04' }, lastAgentUpdate: ago(now, h.agentMin), agentInstalled: true, agentVersion: '8.0.5', guestAgentStatus: 'ok',
+    dateCreated: ago(now, 400 * 24 * 60), owner: { username: 'vme-admin' }, tags: [{ name: 'rack', value: h.cluster === 11 ? 'R12' : 'E02' }],
+    interfaces: [
+      { name: 'eno1', ipAddress: h.ip, macAddress: `3c:ec:ef:00:${h.id.toString(16).padStart(2, '0')}:01`, primaryInterface: true, network: { name: 'mgmt (VLAN 10)' }, type: { name: 'bond0 member' } },
+      { name: 'eno2', macAddress: `3c:ec:ef:00:${h.id.toString(16).padStart(2, '0')}:02`, primaryInterface: false, network: { name: 'pcai-nodes (VLAN 20)' }, type: { name: 'bond0 member' } },
+    ],
+    volumes: [{ name: 'boot', maxStorage: 480 * GiB, rootVolume: true }, { name: 'local-nvme', maxStorage: 3360 * GiB, rootVolume: false }],
   });
 
   // [id, name, host, ip, vcpu, memGiB, gpus, power, cpu%, mem%]
@@ -56,7 +62,16 @@ export function demoRaw(now = Date.now()): { raw: RawVme; k8sNodes: any; podNode
     zone: { id: 1, name: 'pcai-cloud' }, plan: { name: `${vcpu} vCPU, ${mem} GB Memory` },
     maxCores: vcpu, maxMemory: mem * GiB, maxStorage: (name.startsWith('pcai') ? 500 : 120) * GiB, maxGpus: gpus || null,
     stats: { maxMemory: mem * GiB, usedMemory: Math.round((memPct / 100) * mem * GiB), maxStorage: 500 * GiB, usedStorage: 210 * GiB, cpuUsage: cpu },
-    serverOs: { name: 'Ubuntu 22.04' }, interfaces: [{ ipAddress: ip }],
+    serverOs: { name: 'Ubuntu 22.04' }, agentInstalled: power === 'on', agentVersion: power === 'on' ? '8.0.5' : null, guestAgentStatus: power === 'on' ? 'ok' : 'unknown',
+    dateCreated: ago(now, (id % 97) * 24 * 60 + 600), owner: { username: name.startsWith('pcai') ? 'pcai-ops' : 'platform' },
+    tags: [{ name: 'env', value: name.startsWith('edge') || name === 'build-runner' ? 'edge' : 'pcai' }, ...(name.startsWith('pcai') ? [{ name: 'k8s', value: 'true' }] : [])],
+    hourlyCost: Math.round(vcpu * 0.012 * 1000) / 1000,
+    interfaces: [{ name: 'eth0', ipAddress: ip, macAddress: `52:54:00:${(id >> 8).toString(16).padStart(2, '0')}:${(id & 255).toString(16).padStart(2, '0')}:10`, primaryInterface: true, dhcp: false,
+      network: { name: ip.startsWith('10.20') ? 'edge (VLAN 40)' : 'pcai-nodes (VLAN 20)' }, type: { name: 'virtio' } }],
+    volumes: [
+      { name: 'root', maxStorage: 100 * GiB, rootVolume: true, datastoreId: host < 200 ? 501 : 503 },
+      ...(name.startsWith('pcai') ? [{ name: 'data', maxStorage: 400 * GiB, rootVolume: false, datastoreId: name.includes('gpu') ? 502 : 501 }] : []),
+    ],
   }));
   const instances = vmRows.map(([id, name]) => ({ id: id + 50000, name, servers: [id], status: 'running', connectionInfo: [] }));
 
@@ -91,6 +106,74 @@ export function demoRaw(now = Date.now()): { raw: RawVme; k8sNodes: any; podNode
       { _id: 'a4', success: true, activityType: 'Backup', name: 'Backup', message: 'nightly-vms completed with 2 warnings', objectType: 'Backup', objectId: 1, ts: ago(now, 600) },
     ],
   };
+
+  // ── Everything else the Manager exposes ───────────────────────────────────
+  raw.health = {
+    success: true, buildVersion: '8.0.5', applianceUrl: 'https://vme-manager.demo/',
+    cpu: { cpuTotalLoad: 0.31, systemLoad: 1.7, processorCount: 8, status: 'ok' },
+    memory: { memoryPercent: 0.48, systemMemoryPercent: 0.91, status: 'warning' },
+    database: { usedConnections: 41, maxConnections: 1000, maxUsedConnections: 220, status: 'ok' },
+    threads: { totalThreads: 412, status: 'ok' }, elastic: { status: 'ok' }, rabbit: { status: 'ok' },
+  };
+  raw.license = { productTier: 'HPE VM Essentials', startDate: ago(now, 340 * 24 * 60), endDate: new Date(now + 21 * 86_400_000).toISOString(), maxHosts: 8, maxMvm: 5, maxMvmSockets: 10, maxInstances: 500, hardLimit: true, freeTrial: false, accountName: 'PCAI Demo' };
+  raw.logs = [
+    { ts: ago(now, 3), level: 'ERROR', hostname: 'vme-manager', sourceType: 'appliance', message: 'Stats sync failed for server hvm-a-03: agent connection timed out' },
+    { ts: ago(now, 18), level: 'ERROR', hostname: 'vme-manager', sourceType: 'appliance', message: 'Stats sync failed for server hvm-a-03: agent connection timed out' },
+    { ts: ago(now, 33), level: 'ERROR', hostname: 'vme-manager', sourceType: 'appliance', message: 'Stats sync failed for server hvm-a-03: agent connection timed out' },
+    { ts: ago(now, 95), level: 'WARN', hostname: 'vme-manager', sourceType: 'appliance', message: 'Resize of build-runner rejected: insufficient memory on hvm-edge-02' },
+    { ts: ago(now, 240), level: 'INFO', hostname: 'vme-manager', sourceType: 'appliance', message: 'Nightly backup job nightly-vms started' },
+  ];
+  raw.zones = [{ id: 1, name: 'pcai-cloud', zoneType: { name: 'HPE VM' }, status: 'ok', enabled: true }];
+  raw.groups = [{ id: 1, name: 'PCAI', zones: [{ id: 1 }] }, { id: 2, name: 'Edge', zones: [{ id: 1 }] }];
+  raw.subnets = [
+    { id: 701, name: 'pcai-nodes-a', cidr: '10.10.1.0/25', gateway: '10.10.1.1', dhcpServer: false, active: true, network: { name: 'pcai-nodes' } },
+    { id: 702, name: 'pcai-nodes-b', cidr: '10.10.1.128/25', gateway: '10.10.1.129', dhcpServer: false, active: true, network: { name: 'pcai-nodes' } },
+  ];
+  raw.ipPools = [
+    { id: 801, name: 'pcai-nodes-pool', ipCount: 40, freeCount: 3, poolEnabled: true, ipRanges: [{ startAddress: '10.10.1.10', endAddress: '10.10.1.49' }] },
+    { id: 802, name: 'edge-pool', ipCount: 60, freeCount: 44, poolEnabled: true, ipRanges: [{ startAddress: '10.20.1.10', endAddress: '10.20.1.69' }] },
+  ];
+  raw.securityGroups = [{ id: 901, name: 'pcai-nodes', description: 'Kubernetes node traffic', rules: [{}, {}, {}, {}, {}, {}] }, { id: 902, name: 'mgmt-ssh', description: 'SSH from jump host', rules: [{}] }];
+  raw.virtualSwitches = [
+    { id: 12, name: 'vs-mgmt', baseType: 'management', bondMode: 'active-backup', mtu: 1500, status: 'available', active: true, clusterId: 11, nicCount: 2, networkCount: 1 },
+    { id: 13, name: 'vs-pcai', baseType: 'general', bondMode: '802.3ad (LACP)', mtu: 9000, status: 'available', active: true, clusterId: 11, nicCount: 2, networkCount: 2 },
+    { id: 14, name: 'vs-storage', baseType: 'storage', bondMode: 'none', mtu: 9000, status: 'available', active: true, clusterId: 11, nicCount: 1, networkCount: 1 },
+    { id: 21, name: 'vs-edge', baseType: 'general', bondMode: 'active-backup', mtu: 1500, status: 'available', active: true, clusterId: 12, nicCount: 2, networkCount: 1 },
+  ];
+  raw.storageServers = [{ id: 1001, name: 'alletra-mp-01', type: { name: 'HPE Alletra Storage MP' }, status: 'ok', serviceUrl: 'https://10.30.0.10' }];
+  raw.storageVolumes = vmServers.flatMap((v: any) => v.volumes.map((d: any, i: number) => ({
+    id: v.id * 10 + i, volumeName: `${v.name}-disk-${i}`, maxStorage: d.maxStorage, usedStorage: Math.round(d.maxStorage * (0.2 + ((v.id + i) % 7) / 10)),
+    datastore: { name: d.datastoreId === 502 ? 'pcai-nfs-models' : d.datastoreId === 503 ? 'edge-local' : 'pcai-gfs2-01' }, datastoreId: d.datastoreId,
+    poolName: d.datastoreId === 502 ? 'nfs-models' : 'gfs2-pool', deviceDisplayName: i ? 'vdb' : 'vda', status: 'provisioned', refType: 'ComputeServer', refId: v.id, rootVolume: !!d.rootVolume,
+  })));
+  raw.images = [
+    { id: 1201, name: 'ubuntu-22.04-pcai-node', imageType: 'qcow2', osType: { name: 'Ubuntu 22.04' }, rawSize: 4.2 * GiB, isCloudInit: true, dateCreated: ago(now, 90 * 24 * 60), visibility: 'private' },
+    { id: 1202, name: 'rocky-9-base', imageType: 'qcow2', osType: { name: 'Rocky Linux 9' }, rawSize: 1.9 * GiB, isCloudInit: true, dateCreated: ago(now, 200 * 24 * 60), visibility: 'public' },
+    { id: 1203, name: 'win2022-std', imageType: 'qcow2', osType: { name: 'Windows Server 2022' }, rawSize: 14.5 * GiB, isCloudInit: false, dateCreated: ago(now, 150 * 24 * 60), visibility: 'private' },
+  ];
+  raw.plans = [
+    { id: 1301, name: '4 vCPU, 16 GB Memory', maxCores: 4, maxMemory: 16 * GiB, maxStorage: 100 * GiB, active: true, provisionType: { name: 'HPE VM' } },
+    { id: 1302, name: '8 vCPU, 32 GB Memory', maxCores: 8, maxMemory: 32 * GiB, maxStorage: 200 * GiB, active: true, provisionType: { name: 'HPE VM' } },
+    { id: 1303, name: '32 vCPU, 128 GB Memory', maxCores: 32, maxMemory: 128 * GiB, maxStorage: 500 * GiB, active: true, provisionType: { name: 'HPE VM' } },
+    { id: 1304, name: '48 vCPU, 192 GB, 2 GPU', maxCores: 48, maxMemory: 192 * GiB, maxStorage: 500 * GiB, active: true, provisionType: { name: 'HPE VM' } },
+  ];
+  raw.backups = [
+    { id: 1401, name: 'dsc-jump-daily', instance: { id: 1031 + 50000, name: 'dsc-jump' }, enabled: true, cronExpression: '0 2 * * *', nextFire: new Date(now + 6 * 3600_000).toISOString(), lastResult: { status: 'SUCCEEDED', endDate: ago(now, 600) } },
+    { id: 1402, name: 'ezua-proxy-daily', instance: { id: 1032 + 50000, name: 'ezua-proxy' }, enabled: true, cronExpression: '0 2 * * *', nextFire: new Date(now + 6 * 3600_000).toISOString(), lastResult: { status: 'FAILED', endDate: ago(now, 590) } },
+    { id: 1403, name: 'edge-gw-weekly', instance: { id: 2001 + 50000, name: 'edge-gw-1' }, enabled: true, cronExpression: '0 3 * * 0', nextFire: new Date(now + 3 * 86_400_000).toISOString(), lastResult: { status: 'SUCCEEDED', endDate: ago(now, 4 * 24 * 60) } },
+  ];
+  raw.backupJobs = [{ id: 1501, name: 'nightly-vms', cronExpression: '0 2 * * *' }];
+  raw.backupResults = [
+    { id: 1601, backup: { id: 1401, name: 'dsc-jump-daily' }, status: 'SUCCEEDED', startDate: ago(now, 605), endDate: ago(now, 600), durationMillis: 300000, sizeInMb: 2140 },
+    { id: 1602, backup: { id: 1402, name: 'ezua-proxy-daily' }, status: 'FAILED', startDate: ago(now, 600), endDate: ago(now, 590), durationMillis: 610000, sizeInMb: 0, errorMessage: 'Snapshot timed out: datastore pcai-gfs2-01 above 90%' },
+    { id: 1603, backup: { id: 1403, name: 'edge-gw-weekly' }, status: 'SUCCEEDED', startDate: ago(now, 4 * 24 * 60 + 5), endDate: ago(now, 4 * 24 * 60), durationMillis: 290000, sizeInMb: 3880 },
+  ];
+  raw.checks = [
+    { id: 1701, name: 'pcai-ingress https', checkType: { name: 'Web' }, lastCheckStatus: 'success', availability: 99.98, lastRunDate: ago(now, 1), muted: false },
+    { id: 1702, name: 'edge-cache tcp/6379', checkType: { name: 'Socket' }, lastCheckStatus: 'error', availability: 96.4, lastError: 'connection refused', lastRunDate: ago(now, 2), muted: false },
+  ];
+  raw.incidents = [{ id: 1801, displayName: 'edge-cache tcp/6379 down', severity: 'warning', status: 'open', startDate: ago(now, 34), lastError: 'connection refused' }];
+  raw.powerSchedules = [{ id: 1, name: 'edge-nightly-off' }];
 
   const k8sNode = (name: string, ip: string, roles: string[], gpus = 0, ready = true) => ({
     metadata: { name, labels: Object.fromEntries(roles.map((r) => [`node-role.kubernetes.io/${r}`, ''])) },

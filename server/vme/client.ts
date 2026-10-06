@@ -17,8 +17,32 @@ import type { RawVme } from './model.js';
 /** The only API paths Trinetra will ever GET from a Manager. */
 export const ALLOWED_PATHS = [
   '/api/whoami', '/api/servers', '/api/instances', '/api/clusters', '/api/datastores',
-  '/api/networks', '/api/health', '/api/health/alarms', '/api/activity',
+  '/api/networks', '/api/health', '/api/health/alarms', '/api/health/logs', '/api/activity',
+  '/api/license', '/api/zones', '/api/groups', '/api/subnets', '/api/networks/pools', '/api/security-groups',
+  '/api/virtual-switches', '/api/storage-servers', '/api/storage-volumes', '/api/virtual-images',
+  '/api/service-plans', '/api/backups', '/api/backups/jobs', '/api/backups/results',
+  '/api/monitoring/checks', '/api/monitoring/incidents', '/api/power-schedules',
 ] as const;
+
+/**
+ * Keys whose values never leave this server, at any depth. The Manager returns
+ * some of these on ordinary objects (servers carry `sshPassword`, `apiKey`;
+ * images carry `sshPassword`, `userData`), and the Explorer shows raw objects.
+ */
+const SECRET_KEY = /password|passwd|passphrase|secret|token|api[-_]?key|private[-_]?key|ssh[-_]?key|hash$|cypher|credential|access[-_]?key|serviceaccess|user[-_]?data|cert(ificate)?[-_]?(key|data)/i;
+
+export function sanitize(v: any, depth = 0): any {
+  if (depth > 12) return '[deep]';
+  if (Array.isArray(v)) return v.map((x) => sanitize(x, depth + 1));
+  if (v && typeof v === 'object') {
+    const out: Record<string, any> = {};
+    for (const [k, x] of Object.entries(v)) {
+      out[k] = SECRET_KEY.test(k) && x !== null && x !== undefined && x !== '' && typeof x !== 'boolean' ? '<redacted>' : sanitize(x, depth + 1);
+    }
+    return out;
+  }
+  return v;
+}
 export type AllowedPath = (typeof ALLOWED_PATHS)[number];
 
 const TIMEOUT_MS = 30_000;
@@ -113,31 +137,55 @@ export async function vmeList(conn: VmeConnection, path: AllowedPath, key: strin
   return out;
 }
 
+/** What one fetch covers: name in RawVme, how to get it. */
+type Job = [keyof RawVme, () => Promise<any>];
+
 /**
  * Everything the page needs, each endpoint independently: a Manager version
- * without /api/datastores still gives hosts and VMs. Returns per-source status.
+ * without /api/datastores (or a user without rights to backups) still gives
+ * hosts and VMs. Six requests at a time — enough to be quick, few enough not
+ * to load the Manager. Returns per-source status.
  */
 export async function fetchAll(conn: VmeConnection): Promise<{ raw: RawVme; sources: Record<string, { ok: boolean; count?: number; error?: string }> }> {
   const sources: Record<string, { ok: boolean; count?: number; error?: string }> = {};
   const raw: RawVme = {};
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
-  const jobs: Array<[keyof RawVme, () => Promise<any>]> = [
+  const one = (path: AllowedPath, key: string, q: Record<string, string | number> = {}) => async () => (await vmeGet(conn, path, { max: 200, ...q }))?.[key] ?? [];
+  const jobs: Job[] = [
     ['whoami', () => vmeGet(conn, '/api/whoami')],
     ['servers', () => vmeList(conn, '/api/servers', 'servers')],
     ['instances', () => vmeList(conn, '/api/instances', 'instances')],
     ['clusters', () => vmeList(conn, '/api/clusters', 'clusters')],
     ['datastores', () => vmeList(conn, '/api/datastores', 'datastores')],
     ['networks', () => vmeList(conn, '/api/networks', 'networks')],
-    ['alarms', async () => (await vmeGet(conn, '/api/health/alarms', { max: 200 }))?.alarms || []],
-    ['activity', async () => (await vmeGet(conn, '/api/activity', { max: 200, startDate: since }))?.activity || []],
+    ['alarms', one('/api/health/alarms', 'alarms')],
+    ['activity', one('/api/activity', 'activity', { startDate: since })],
+    ['health', async () => (await vmeGet(conn, '/api/health'))?.health ?? null],
+    ['logs', one('/api/health/logs', 'logs', { startDate: since })],
+    ['license', async () => (await vmeGet(conn, '/api/license'))?.license ?? null],
+    ['zones', () => vmeList(conn, '/api/zones', 'zones')],
+    ['groups', () => vmeList(conn, '/api/groups', 'groups')],
+    ['subnets', () => vmeList(conn, '/api/subnets', 'subnets')],
+    ['ipPools', () => vmeList(conn, '/api/networks/pools', 'networkPools')],
+    ['securityGroups', () => vmeList(conn, '/api/security-groups', 'securityGroups')],
+    ['storageServers', () => vmeList(conn, '/api/storage-servers', 'storageServers')],
+    ['storageVolumes', () => vmeList(conn, '/api/storage-volumes', 'storageVolumes')],
+    ['images', () => vmeList(conn, '/api/virtual-images', 'virtualImages')],
+    ['plans', () => vmeList(conn, '/api/service-plans', 'servicePlans')],
+    ['backups', () => vmeList(conn, '/api/backups', 'backups')],
+    ['backupJobs', () => vmeList(conn, '/api/backups/jobs', 'jobs')],
+    ['backupResults', one('/api/backups/results', 'results')],
+    ['checks', () => vmeList(conn, '/api/monitoring/checks', 'checks')],
+    ['incidents', one('/api/monitoring/incidents', 'incidents', { status: 'open' })],
+    ['powerSchedules', () => vmeList(conn, '/api/power-schedules', 'schedules')],
   ];
-  // Login once before fanning out, so a bad password is one clear error, not eight.
+  // Login once before fanning out, so a bad password is one clear error, not twenty.
   try { await tokenFor(conn); } catch (e: any) {
     const error = friendlyError(e);
     for (const [k] of jobs) sources[k] = { ok: false, error };
     return { raw, sources };
   }
-  await Promise.all(jobs.map(async ([k, fn]) => {
+  const run = async ([k, fn]: Job) => {
     try {
       const v = await fn();
       (raw as any)[k] = v;
@@ -145,6 +193,29 @@ export async function fetchAll(conn: VmeConnection): Promise<{ raw: RawVme; sour
     } catch (e: any) {
       sources[k] = { ok: false, error: friendlyError(e) };
     }
-  }));
+  };
+  await pool(jobs, 6, run);
+
+  // Virtual switches are listed per hypervisor cluster (clusterId is required).
+  const hvClusters = (raw.clusters || []).filter((c: any) => !/kubernetes|docker/i.test(`${c?.type?.name || ''} ${c?.type?.code || ''}`));
+  if (hvClusters.length) {
+    const all: any[] = [];
+    const errors: string[] = [];
+    await pool(hvClusters, 6, async (c: any) => {
+      try {
+        const j = await vmeGet(conn, '/api/virtual-switches', { clusterId: c.id });
+        for (const sw of j?.virtualSwitches || []) all.push({ ...sw, clusterId: sw.clusterId ?? c.id });
+      } catch (e: any) { errors.push(friendlyError(e)); }
+    });
+    raw.virtualSwitches = all;
+    sources.virtualSwitches = errors.length === hvClusters.length ? { ok: false, error: errors[0] } : { ok: true, count: all.length };
+  }
   return { raw, sources };
+}
+
+async function pool<T>(items: T[], n: number, fn: (x: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (next < items.length) await fn(items[next++]);
+  }));
 }

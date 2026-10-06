@@ -10,18 +10,18 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from '
 import ReactFlow, { Background, Controls, MiniMap, ReactFlowProvider, useReactFlow, Handle, Position, type Node, type Edge, type NodeProps } from 'reactflow';
 import 'reactflow/dist/style.css';
 import dagre from '@dagrejs/dagre';
-import { Cloud, Boxes, Server, Monitor, Container, HardDrive, X, AlertTriangle, Info } from 'lucide-react';
+import { Cloud, Boxes, Server, Monitor, Container, HardDrive, Network, X, AlertTriangle, Info } from 'lucide-react';
 import { sevColor, type VmeView, type TopoNode } from './types';
 
 const SIZE: Record<TopoNode['kind'], { w: number; h: number }> = {
   manager: { w: 210, h: 58 }, cluster: { w: 200, h: 58 }, host: { w: 220, h: 78 },
-  vm: { w: 210, h: 72 }, k8s: { w: 200, h: 58 }, datastore: { w: 200, h: 62 },
+  vm: { w: 210, h: 72 }, k8s: { w: 200, h: 58 }, datastore: { w: 200, h: 62 }, switch: { w: 200, h: 58 },
 };
 const ICON: Record<TopoNode['kind'], React.ComponentType<{ size?: number }>> = {
-  manager: Cloud, cluster: Boxes, host: Server, vm: Monitor, k8s: Container, datastore: HardDrive,
+  manager: Cloud, cluster: Boxes, host: Server, vm: Monitor, k8s: Container, datastore: HardDrive, switch: Network,
 };
 const KIND_LABEL: Record<TopoNode['kind'], string> = {
-  manager: 'VME Manager', cluster: 'Cluster', host: 'Host', vm: 'VM', k8s: 'Kubernetes node', datastore: 'Datastore',
+  manager: 'VME Manager', cluster: 'Cluster', host: 'Host', vm: 'VM', k8s: 'Kubernetes node', datastore: 'Datastore', switch: 'Virtual switch',
 };
 const READABLE = 0.85;
 const levelColor = (l: TopoNode['level']) => (l === 'off' ? '#8b95a1' : l === 'unknown' ? 'var(--text-muted)' : sevColor(l));
@@ -91,6 +91,7 @@ const Inner: React.FC<Props> = ({ view, focus, onClearFocus }) => {
   const [k8sOnly, setK8sOnly] = useState(false);
   const [problems, setProblems] = useState(false);
   const [showDs, setShowDs] = useState(true);
+  const [showSw, setShowSw] = useState(true);
   const [selected, setSelected] = useState<string | undefined>(focus);
   useEffect(() => { if (focus) setSelected(focus); }, [focus]);
 
@@ -100,7 +101,7 @@ const Inner: React.FC<Props> = ({ view, focus, onClearFocus }) => {
 
   const visible = useMemo(() => {
     const ancestorsOf = (id: string) => { const out: string[] = []; let p = byId.get(id)?.parent; while (p) { out.push(p); p = byId.get(p)?.parent; } return out; };
-    let keep = all.nodes.filter((n) => showDs || n.kind !== 'datastore');
+    let keep = all.nodes.filter((n) => (showDs || n.kind !== 'datastore') && (showSw || n.kind !== 'switch'));
     if (cluster !== 'all') keep = keep.filter((n) => n.kind === 'manager' || n.id === cluster || ancestorsOf(n.id).includes(cluster));
     if (k8sOnly) {
       const k8sVms = new Set(all.edges.filter((e) => e.kind === 'is').map((e) => e.from));
@@ -117,7 +118,7 @@ const Inner: React.FC<Props> = ({ view, focus, onClearFocus }) => {
     }
     const ids = new Set(keep.map((n) => n.id));
     return { nodes: keep, edges: all.edges.filter((e) => ids.has(e.from) && ids.has(e.to)) };
-  }, [all, byId, cluster, k8sOnly, problems, showDs]);
+  }, [all, byId, cluster, k8sOnly, problems, showDs, showSw]);
 
   const pos = useMemo(() => layout(visible.nodes, visible.edges), [visible]);
 
@@ -145,7 +146,7 @@ const Inner: React.FC<Props> = ({ view, focus, onClearFocus }) => {
       id: `${e.from}->${e.to}`, source: e.from, target: e.to, type: 'smoothstep',
       style: {
         stroke: target?.level === 'critical' ? 'var(--status-error)' : target?.level === 'warning' ? 'var(--status-warning)' : 'var(--border-color)',
-        strokeWidth: hot ? 2.2 : 1.2, strokeDasharray: e.kind === 'storage' ? '5 4' : target?.level === 'off' ? '3 3' : undefined, opacity: chain && !hot ? 0.3 : 1,
+        strokeWidth: hot ? 2.2 : 1.2, strokeDasharray: e.kind === 'storage' || e.kind === 'network' ? '5 4' : target?.level === 'off' ? '3 3' : undefined, opacity: chain && !hot ? 0.3 : 1,
       },
     };
   }), [visible.edges, byId, chain]);
@@ -190,6 +191,7 @@ const Inner: React.FC<Props> = ({ view, focus, onClearFocus }) => {
     if (kind === 'vm') { const v = s.vms.find((x) => x.id === id); return v ? [['Host', v.host], ['IPs', v.ips.join(', ')], ['Power', v.power], ['vCPU', v.cores], ['Plan', v.plan], ['GPUs', v.gpus], ['Kubernetes node', v.k8sNode], ['Instance', v.instance]] : []; }
     if (kind === 'k8s') { const n = s.k8s?.nodes.find((x) => x.name === rawId); return n ? [['Roles', n.roles.join(', ') || 'worker'], ['Ready', n.ready ? 'yes' : 'NO'], ['Pods', n.pods], ['GPUs', n.gpus], ['Addresses', n.addresses.join(', ')]] : []; }
     if (kind === 'datastore') { const d = s.datastores.find((x) => x.id === id); return d ? [['Type', d.type], ['Online', d.online ? 'yes' : 'NO'], ['Active', d.active ? 'yes' : 'no']] : []; }
+    if (kind === 'switch') { const w = s.switches?.find((x) => x.id === id); return w ? [['Type', w.type], ['Bond mode', w.bondMode], ['Uplink NICs', w.nics], ['Networks', w.networks], ['MTU', w.mtu], ['Status', w.status]] : []; }
     if (kind === 'cluster') { const c = s.clusters.find((x) => x.id === id); return c ? [['Type', c.type], ['Status', c.status], ['Hosts', c.hostIds.length]] : []; }
     return [['User', s.manager?.user], ['Version', s.manager?.version]];
   }, [sel, view.snapshot]);
@@ -208,7 +210,7 @@ const Inner: React.FC<Props> = ({ view, focus, onClearFocus }) => {
           {clusters.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
         </select>
         {[
-          ['Kubernetes VMs only', k8sOnly, setK8sOnly], ['Problems only', problems, setProblems], ['Datastores', showDs, setShowDs],
+          ['Kubernetes VMs only', k8sOnly, setK8sOnly], ['Problems only', problems, setProblems], ['Datastores', showDs, setShowDs], ['Virtual switches', showSw, setShowSw],
         ].map(([label, v, set]: any) => (
           <label key={label} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }}>
             <input type="checkbox" checked={v} onChange={(e) => set(e.target.checked)} /> {label}

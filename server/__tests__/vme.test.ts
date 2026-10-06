@@ -231,3 +231,42 @@ describe('client against a local Manager', () => {
 // Type-level guard: the snapshot shape stays what the page expects.
 const _typecheck: Partial<VmeSnapshot> = { connection: 'x' };
 void _typecheck;
+
+describe('everything else the Manager exposes', () => {
+  it('sanitize blanks secrets at any depth but keeps look-alike fields', async () => {
+    const { sanitize } = await import('../vme/client.js');
+    const out = sanitize({ name: 'vm', sshPassword: 'pw', apiKey: 'k', config: { cloudInit: { userData: '#cloud-config', sshKey: 'ssh-rsa' } }, gpuPassthrough: true, passwordHash: null, tokens: [{ token: 'x' }] });
+    expect(out).toEqual({ name: 'vm', sshPassword: '<redacted>', apiKey: '<redacted>', config: { cloudInit: { userData: '<redacted>', sshKey: '<redacted>' } }, gpuPassthrough: true, passwordHash: null, tokens: '<redacted>' });
+  });
+
+  it('normalizes health, license, logs, networking, storage, catalog, backups and monitoring', () => {
+    const { raw } = demoRaw(NOW);
+    const n = normalize(raw, 'demo');
+    expect(n.health).toMatchObject({ overall: 'warning', version: '8.0.5', memory: { status: 'warning' } });
+    expect(n.health?.memory?.systemPct).toBeCloseTo(91);
+    expect(n.license).toMatchObject({ tier: 'HPE VM Essentials', maxMvm: 5, hardLimit: true });
+    expect(n.logs[0].level).toBe('ERROR');
+    expect(n.switches.find((w) => w.name === 'vs-storage')).toMatchObject({ nics: 1, mtu: 9000, clusterId: 11 });
+    expect(n.ipPools[0]).toMatchObject({ total: 40, free: 3, ranges: ['10.10.1.10–10.10.1.49'] });
+    expect(n.volumes.length).toBeGreaterThan(14);
+    expect(n.backupResults[0]).toMatchObject({ status: 'FAILED' });
+    expect(n.incidents[0]).toMatchObject({ severity: 'warning', status: 'open' });
+    const vm = n.vms.find((v) => v.name === 'pcai-gpu-1')!;
+    expect(vm.disks.map((d) => d.datastore)).toEqual(['pcai-gfs2-01', 'pcai-nfs-models']);
+    expect(vm.nics[0]).toMatchObject({ ip: '10.10.1.31', network: 'pcai-nodes (VLAN 20)', primary: true });
+    expect(vm.agent.installed).toBe(true);
+    expect(vm.tags).toContain('env=pcai');
+  });
+
+  it('judges the Manager, license, IP pools, switches, backups and monitoring', () => {
+    const { raw, k8sNodes, podNodes } = demoRaw(NOW);
+    const v = buildView(normalize(raw, 'demo'), {}, { source: 'demo', nodes: k8sNodesFrom(k8sNodes, podNodes) }, NOW, raw);
+    const ids = v.findings.map((f) => f.id);
+    for (const id of ['mgr-health', 'mgr-mem', 'license-expiry', 'license-hosts', 'mgr-logs', 'pool:801', 'switch-nic:14', 'backup-fail', 'backup-none', 'incident:1801', 'checks']) expect(ids).toContain(id);
+    expect(ids).not.toContain('backup:1402'); // already reported as a recent failed run
+    expect(v.topology.nodes.filter((n) => n.kind === 'switch')).toHaveLength(4);
+    // Raw objects ride along for the Explorer, secrets removed.
+    expect(JSON.stringify(v.snapshot.raw)).not.toMatch(/"sshPassword":"[^<]/);
+    expect(v.snapshot.raw?.servers).toHaveLength(19);
+  });
+});

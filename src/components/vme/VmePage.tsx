@@ -12,6 +12,7 @@ import { VME_SUBPAGES, type VmeSub, type VmeView } from './types';
 import { VmeOverview, VmeHosts, VmeVms, VmeStorage, VmeNetworks, VmeEvents, VmeCapacity } from './VmeViews';
 import { VmeTopology } from './VmeTopology';
 import { VmeConnections, type PublicConnection } from './VmeConnections';
+import { VmeManager, VmeBackups, VmeCatalog, VmeExplorer } from './VmeMore';
 
 const DEMO = '__demo__';
 const PICK_KEY = 'trinetra_vme_connection';
@@ -128,7 +129,11 @@ export const VmePage: React.FC<Props> = ({ sub, onSub, vmNames }) => {
               : sub === 'storage' ? <VmeStorage view={view} onFocus={focusOn} />
                 : sub === 'networks' ? <VmeNetworks view={view} />
                   : sub === 'events' ? <VmeEvents view={view} />
-                    : <VmeCapacity view={view} onFocus={focusOn} />}
+                    : sub === 'backups' ? <VmeBackups view={view} />
+                      : sub === 'manager' ? <VmeManager view={view} />
+                        : sub === 'catalog' ? <VmeCatalog view={view} />
+                          : sub === 'explorer' ? <VmeExplorer view={view} />
+                            : <VmeCapacity view={view} onFocus={focusOn} />}
     </div>
   );
 };

@@ -7,6 +7,7 @@ import React, { useMemo, useState } from 'react';
 import { AlertTriangle, Info, CheckCircle2, Search, Download, MapPin, Server, Monitor, HardDrive, Network as NetIcon, Bell, Gauge, Boxes, Cpu } from 'lucide-react';
 import { downloadText, stamp, toCsv } from '../../lib/health';
 import { gib, pct, pctColor, sevColor, isOff, ago, type VmeView, type Finding } from './types';
+import { ServerDrawer, NetworkExtras, StorageExtras, MonitoringExtras } from './VmeMore';
 
 type Focus = (topoId: string) => void;
 
@@ -116,6 +117,12 @@ export const VmeOverview: React.FC<{ view: VmeView; onFocus: Focus; go: (s: any)
         <Tile icon={<Cpu size={13} />} label="Host CPU (avg)" value={k.cpu === null ? '—' : `${Math.round(k.cpu)}%`} color={pctColor(k.cpu)} />
         <Tile icon={<Gauge size={13} />} label="Host memory" value={k.mem === null ? '—' : `${Math.round(k.mem)}%`} color={pctColor(k.mem)} sub={`${gib(k.memU)} of ${gib(k.memT)}`} />
         <Tile icon={<HardDrive size={13} />} label="Datastores used" value={k.ds === null ? '—' : `${Math.round(k.ds)}%`} color={pctColor(k.ds)} sub={k.dsT ? `${gib(k.dsF)} free of ${gib(k.dsT)}` : undefined} onClick={() => go('storage')} />
+        <Tile icon={<Server size={13} />} label="VME Manager" value={s.health ? s.health.overall : '—'}
+          color={s.health ? (s.health.overall === 'ok' ? 'var(--status-success)' : s.health.overall === 'error' ? 'var(--status-error)' : 'var(--status-warning)') : undefined}
+          sub={s.license ? `license ${s.license.daysLeft !== null ? (s.license.daysLeft < 0 ? 'expired' : `${s.license.daysLeft} d left`) : '?'}` : s.manager?.version ? `VME ${s.manager.version}` : undefined} onClick={() => go('manager')} />
+        <Tile icon={<HardDrive size={13} />} label="Backups" value={`${s.backups.length}`}
+          color={s.backupResults.some((r) => /FAIL|ERROR/.test(r.status)) ? 'var(--status-warning)' : undefined}
+          sub={`${s.backupResults.filter((r) => /FAIL|ERROR/.test(r.status)).length} failed recent run(s)`} onClick={() => go('backups')} />
         <Tile icon={<Bell size={13} />} label="Needs attention" value={`${k.crit + k.warn}`} color={k.crit ? 'var(--status-error)' : k.warn ? 'var(--status-warning)' : 'var(--status-success)'} sub={`${k.crit} critical · ${k.alarms} open alarm${k.alarms === 1 ? '' : 's'}`} onClick={() => go('events')} />
       </div>
 
@@ -152,6 +159,7 @@ export const VmeOverview: React.FC<{ view: VmeView; onFocus: Focus; go: (s: any)
 // ── Hosts ──────────────────────────────────────────────────────────────────
 export const VmeHosts: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, onFocus }) => {
   const [q, setQ] = useState('');
+  const [drawer, setDrawer] = useState<number | null>(null);
   const rows = view.snapshot.hosts.filter((h) => match(q, h.name, h.cluster, h.ip, h.status, h.os));
   const csv = () => downloadText(toCsv([
     ['Host', 'Cluster', 'IP', 'Power', 'Status', 'Cores', 'CPU %', 'Mem used', 'Mem total', 'Storage used', 'Storage total', 'VMs', 'Agent last seen'],
@@ -160,6 +168,8 @@ export const VmeHosts: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, on
   return (
     <div className="panel-card">
       <TableBar title={<><Server size={18} /> Hypervisor hosts ({rows.length})</>} query={q} setQuery={setQ} onCsv={csv} />
+      {drawer !== null && <ServerDrawer view={view} target={{ kind: 'host', id: drawer }} onClose={() => setDrawer(null)} />}
+      <p style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--text-muted)' }}>Click a host for its disks, NICs and every field the Manager returns.</p>
       <div className="table-wrapper">
         <table className="resource-table">
           <thead><tr><th>Host</th><th>Cluster</th><th>Power</th><th>CPU</th><th>Memory</th><th>Storage</th><th>VMs</th><th>Agent</th><th></th></tr></thead>
@@ -168,7 +178,7 @@ export const VmeHosts: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, on
               const kNodes = view.snapshot.vms.filter((v) => v.hostId === h.id && v.k8sNode).length;
               return (
                 <tr key={h.id}>
-                  <td><strong>{h.name}</strong><div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{h.ip || ''}{h.os ? ` · ${h.os}` : ''}</div></td>
+                  <td><a href="#" onClick={(e) => { e.preventDefault(); setDrawer(h.id); }} title="Details: disks, NICs, every field"><strong>{h.name}</strong></a><div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{h.ip || ''}{h.os ? ` · ${h.os}` : ''}</div></td>
                   <td style={{ fontSize: 12 }}>{h.cluster || '—'}</td>
                   <td><Power power={h.power} /></td>
                   <td><Bar value={h.cpuPct} label={h.cores ? `${h.cores} cores` : ''} /></td>
@@ -191,6 +201,7 @@ export const VmeHosts: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, on
 export const VmeVms: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, onFocus }) => {
   const [q, setQ] = useState('');
   const [only, setOnly] = useState<'all' | 'k8s' | 'gpu' | 'off'>('all');
+  const [drawer, setDrawer] = useState<number | null>(null);
   const nodes = new Map((view.snapshot.k8s?.nodes || []).map((n) => [n.name, n]));
   const rows = view.snapshot.vms.filter((v) =>
     (only === 'all' || (only === 'k8s' && v.k8sNode) || (only === 'gpu' && v.gpus) || (only === 'off' && isOff(v.power))) &&
@@ -210,20 +221,24 @@ export const VmeVms: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, onFo
             <option value="off">Powered off</option>
           </select>
         } />
+      {drawer !== null && <ServerDrawer view={view} target={{ kind: 'vm', id: drawer }} onClose={() => setDrawer(null)} />}
+      <p style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--text-muted)' }}>Click a VM for its disks, NICs and every field the Manager returns.</p>
       <div className="table-wrapper">
         <table className="resource-table">
-          <thead><tr><th>VM</th><th>Host</th><th>Power</th><th>CPU</th><th>Memory</th><th>Size</th><th>IPs</th><th>Kubernetes node</th><th></th></tr></thead>
+          <thead><tr><th>VM</th><th>Host</th><th>Power</th><th>CPU</th><th>Memory</th><th>Size</th><th>Disks</th><th>IPs</th><th>Kubernetes node</th><th></th></tr></thead>
           <tbody>
             {rows.map((v) => {
               const n = v.k8sNode ? nodes.get(v.k8sNode) : undefined;
               return (
                 <tr key={v.id}>
-                  <td><strong>{v.name}</strong>{v.instance && v.instance !== v.name && <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>instance {v.instance}</div>}</td>
+                  <td><a href="#" onClick={(e) => { e.preventDefault(); setDrawer(v.id); }} title="Details: disks, NICs, every field"><strong>{v.name}</strong></a>{v.instance && v.instance !== v.name && <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>instance {v.instance}</div>}
+                    {(v.tags.length > 0 || v.owner) && <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>{[v.owner, ...v.tags].filter(Boolean).join(' · ')}</div>}</td>
                   <td style={{ fontSize: 12 }}>{v.host || '—'}<div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{v.cluster || ''}</div></td>
                   <td><Power power={v.power} /></td>
                   <td><Bar value={isOff(v.power) ? null : v.cpuPct} /></td>
                   <td><Bar value={isOff(v.power) ? null : pct(v.memUsed, v.memTotal)} /></td>
                   <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{v.cores ?? '—'} vCPU · {gib(v.memTotal)}{v.gpus ? <span className="badge running" style={{ marginLeft: 6, textTransform: 'none' }}>{v.gpus} GPU</span> : null}</td>
+                  <td style={{ fontSize: 11.5 }} title={v.disks.map((d) => `${d.name} ${gib(d.size)} on ${d.datastore || '?'}`).join('\n')}>{v.disks.length ? `${v.disks.length} · ${gib(v.disks.reduce((a, d) => a + (d.size || 0), 0))}` : '—'}</td>
                   <td style={{ fontSize: 11.5, fontFamily: 'var(--font-mono)' }}>{v.ips.join(', ') || '—'}</td>
                   <td style={{ fontSize: 12 }}>
                     {v.k8sNode ? <>
@@ -248,7 +263,14 @@ export const VmeVms: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, onFo
 };
 
 // ── Storage ────────────────────────────────────────────────────────────────
-export const VmeStorage: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, onFocus }) => {
+export const VmeStorage: React.FC<{ view: VmeView; onFocus: Focus }> = (p) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <Datastores {...p} />
+    <StorageExtras view={p.view} />
+  </div>
+);
+
+const Datastores: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, onFocus }) => {
   const [q, setQ] = useState('');
   const cname = new Map(view.snapshot.clusters.map((c) => [c.id, c.name]));
   const rows = view.snapshot.datastores.filter((d) => match(q, d.name, d.type, d.cloud, d.clusterId !== undefined ? cname.get(d.clusterId) : ''))
@@ -285,7 +307,14 @@ export const VmeStorage: React.FC<{ view: VmeView; onFocus: Focus }> = ({ view, 
 };
 
 // ── Networks ───────────────────────────────────────────────────────────────
-export const VmeNetworks: React.FC<{ view: VmeView }> = ({ view }) => {
+export const VmeNetworks: React.FC<{ view: VmeView }> = ({ view }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <NetworkExtras view={view} />
+    <NetworkList view={view} />
+  </div>
+);
+
+const NetworkList: React.FC<{ view: VmeView }> = ({ view }) => {
   const [q, setQ] = useState('');
   const rows = view.snapshot.networks.filter((n) => match(q, n.name, n.type, n.cidr, n.vlan, n.gateway, n.cloud));
   // Which VMs sit in each CIDR (IPv4 only) — a quick answer to "who is on this VLAN".
@@ -302,7 +331,7 @@ export const VmeNetworks: React.FC<{ view: VmeView }> = ({ view }) => {
   `trinetra-vme-networks-${stamp()}.csv`, 'text/csv');
   return (
     <div className="panel-card">
-      <TableBar title={<><NetIcon size={18} /> Networks ({rows.length})</>} query={q} setQuery={setQ} onCsv={csv} />
+      <TableBar title={<><NetIcon size={18} /> Networks / VLANs ({rows.length})</>} query={q} setQuery={setQ} onCsv={csv} />
       <div className="table-wrapper">
         <table className="resource-table">
           <thead><tr><th>Network</th><th>Type</th><th>CIDR</th><th>VLAN</th><th>Gateway</th><th>VMs in this CIDR</th></tr></thead>
@@ -365,6 +394,7 @@ export const VmeEvents: React.FC<{ view: VmeView }> = ({ view }) => {
           </div>
         )}
       </div>
+      <MonitoringExtras view={view} />
       <div className="panel-card">
         <TableBar title={<><Info size={18} /> Activity — last 24 h ({acts.length})</>} query={q} setQuery={setQ} onCsv={csv} />
         {view.snapshot.sources.activity && !view.snapshot.sources.activity.ok && <p style={{ fontSize: 12.5, color: 'var(--status-warning)', margin: '0 0 8px' }}>Activity could not be read: {view.snapshot.sources.activity.error}</p>}

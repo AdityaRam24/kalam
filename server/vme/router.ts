@@ -7,9 +7,9 @@
 
 import { Router } from 'express';
 import { runSteps, parseJson, SAFE_NAME } from '../k8s/kubectl.js';
-import { fetchAll, forgetToken, vmeGet, friendlyError } from './client.js';
+import { fetchAll, forgetToken, vmeGet, friendlyError, sanitize } from './client.js';
 import { loadConnections, saveConnections, publicConnection, validateConnection, NAME_RE, type VmeConnection } from './store.js';
-import { normalize, joinKubernetes, k8sNodesFrom, vmeFindings, capacity, topology, type VmeSnapshot, type K8sNodeInfo } from './model.js';
+import { normalize, joinKubernetes, k8sNodesFrom, vmeFindings, capacity, topology, type VmeSnapshot, type K8sNodeInfo, type RawVme } from './model.js';
 import { demoRaw } from './demo.js';
 
 export const vmeRouter = Router();
@@ -31,8 +31,10 @@ async function k8sFor(source: string | undefined): Promise<{ source: string; nod
 }
 
 /** Normalize + join + judge + lay out. Shared by real connections and demo. */
-export function buildView(base: Omit<VmeSnapshot, 'at' | 'sources'>, sources: VmeSnapshot['sources'], k8s?: { source: string; nodes: K8sNodeInfo[]; error?: string }, now = Date.now()) {
-  const snapshot: VmeSnapshot = { ...base, at: new Date(now).toISOString(), sources };
+export function buildView(base: Omit<VmeSnapshot, 'at' | 'sources'>, sources: VmeSnapshot['sources'], k8s?: { source: string; nodes: K8sNodeInfo[]; error?: string }, now = Date.now(), raw?: RawVme) {
+  // Raw objects go to the browser for the Explorer and detail views — always
+  // through sanitize(), which blanks password / token / key fields at any depth.
+  const snapshot: VmeSnapshot = { ...base, at: new Date(now).toISOString(), sources, raw: raw ? sanitize(raw) : undefined };
   if (k8s) snapshot.k8s = { ...k8s, unmatched: k8s.nodes.length ? joinKubernetes(snapshot.vms, k8s.nodes) : [] };
   const findings = vmeFindings(snapshot, now);
   return { snapshot, findings, capacity: capacity(snapshot), topology: topology(snapshot, findings) };
@@ -41,7 +43,7 @@ export function buildView(base: Omit<VmeSnapshot, 'at' | 'sources'>, sources: Vm
 async function collect(conn: VmeConnection, k8sSource?: string) {
   const [{ raw, sources }, k8s] = await Promise.all([fetchAll(conn), k8sFor(k8sSource).catch((e) => ({ source: k8sSource!, nodes: [], error: String(e?.message || e) }))]);
   const okCount = Object.values(sources).filter((s) => s.ok).length;
-  const view = buildView(normalize(raw, conn.name), sources, k8s);
+  const view = buildView(normalize(raw, conn.name), sources, k8s, Date.now(), raw);
   return { ...view, insecureTls: !!conn.insecureTls, error: okCount === 0 ? Object.values(sources)[0]?.error || 'The Manager did not answer.' : undefined };
 }
 
@@ -97,7 +99,7 @@ vmeRouter.get('/api/vme/snapshot', async (req, res) => {
   if (req.query.demo === '1') {
     const { raw, k8sNodes, podNodes } = demoRaw();
     const sources = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, { ok: true, count: Array.isArray(v) ? v.length : undefined }]));
-    const view = buildView(normalize(raw, 'demo'), sources, { source: 'demo', nodes: k8sNodesFrom(k8sNodes, podNodes) });
+    const view = buildView(normalize(raw, 'demo'), sources, { source: 'demo', nodes: k8sNodesFrom(k8sNodes, podNodes) }, Date.now(), raw);
     view.snapshot.demo = true;
     return res.json(view);
   }
