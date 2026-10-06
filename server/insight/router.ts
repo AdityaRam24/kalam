@@ -18,6 +18,7 @@ import { analyzeCauses } from '../graph/analyze.js';
 import { levelOf, valueAt, METRICS, type MetricId } from '../metrics/model.js';
 import { readSamples, listSources } from '../metrics/store.js';
 import { correlate, verdict, type CorrelateInput, type Issue } from './correlate.js';
+import { cachedNodeConfig, collectNodeConfig } from '../k8s/nodeconfig.js';
 
 export const insightRouter = Router();
 
@@ -69,7 +70,7 @@ insightRouter.post('/api/insight/host', async (req, res) => {
   if (!vm) return res.status(404).json({ error: 'VM not found.' });
 
   const started = Date.now();
-  const gathered = { overview: false, scan: false, scanReused: false, metrics: false, graph: false };
+  const gathered = { overview: false, scan: false, scanReused: false, metrics: false, graph: false, config: false };
 
   try {
     const overview: any = await collectOverview(vm);
@@ -86,6 +87,11 @@ insightRouter.post('/api/insight/host', async (req, res) => {
     gathered.metrics = !!metrics;
     const graph = graphFor(vm.name);
     gathered.graph = !!graph;
+    // One more ~1s SSH round trip (or the 5-minute cache): the node's
+    // Kubernetes files. A host that is not a node simply contributes nothing.
+    const nodeCfg = cachedNodeConfig(vm.name) || await collectNodeConfig(vm).catch(() => undefined);
+    const config = nodeCfg?.reachable ? nodeCfg.checks : undefined;
+    gathered.config = !!config && nodeCfg?.config?.distro !== 'none';
 
     let findings;
     if (Array.isArray(givenFindings)) {
@@ -103,6 +109,7 @@ insightRouter.post('/api/insight/host', async (req, res) => {
       findings,
       metrics,
       graph,
+      config,
     });
 
     res.json({
@@ -136,6 +143,7 @@ insightRouter.get('/api/insight/fleet', async (_req, res) => {
       subject: source,
       metrics,
       graph: graphFor(source),
+      config: cachedNodeConfig(source, 30 * 60_000)?.checks,
       unreachable: cur && !cur.reachable ? (cur.error || 'Host unreachable') : undefined,
     });
     hosts[source] = { verdict: verdict(issues), issues };

@@ -35,7 +35,21 @@ export interface StepResult {
   out: Record<string, string>;
   /** Tags whose command actually produced output — see `ok` below. */
   ok: Set<string>;
+  /**
+   * Remote only: tags whose section marker never came back — the SSH call
+   * timed out (or was cut off) before reaching them. "Never ran" and "ran and
+   * printed nothing" need different words on screen.
+   */
+  missing?: Set<string>;
   error?: string;
+}
+
+/** How the remote script runs its steps. Default: one after another. */
+export interface RemoteOptions {
+  /** Run up to this many steps at once on the remote host (batched). */
+  parallel?: number;
+  /** Kill any single step after this many seconds (needs coreutils `timeout`). */
+  stepTimeoutSec?: number;
 }
 
 /**
@@ -89,7 +103,8 @@ export async function runSteps(
   steps: Step[],
   vmName?: string,
   timeoutMs = 45000,
-  maxBuffer = 1024 * 1024 * 16
+  maxBuffer = 1024 * 1024 * 16,
+  remote: RemoteOptions = {}
 ): Promise<StepResult> {
   if (!vmName) {
     // At most LOCAL_PARALLEL kubectl processes at once. Each one holds a whole
@@ -120,17 +135,7 @@ export async function runSteps(
   const vm = (await loadVms()).find((v) => v.name === vmName);
   if (!vm) return { out: {}, ok: new Set(), error: `VM "${vmName}" is not in the inventory.` };
 
-  // `section()` slices to the next literal "@@", so any value in the output
-  // containing "@@" would silently truncate the rest of the section. Defusing
-  // it in the stream costs one sed and removes a whole class of phantom data
-  // loss; the substitution only ever lands inside a string value.
-  const cmd = steps
-    .flatMap((s) => [
-      `echo @@${s.tag}@@`,
-      `(kubectl ${s.args.map(shellQuote).join(' ')} 2>/dev/null || true) | sed "s/@@/@ @/g"`,
-    ])
-    .concat('echo @@END@@')
-    .join('; ');
+  const cmd = buildRemoteScript(steps, remote);
 
   const { stdout, stderr, ok: sshOk } = await sshRun(vm, cmd, timeoutMs, maxBuffer);
   if (!sshOk && !stdout.trim()) {
@@ -139,14 +144,62 @@ export async function runSteps(
 
   const out: Record<string, string> = {};
   const ok = new Set<string>();
+  const missing = new Set<string>();
   for (const s of steps) {
+    if (!stdout.includes(`@@${s.tag}@@`)) missing.add(s.tag);
     const raw = section(stdout, s.tag);
     out[s.tag] = raw;
     // `|| true` swallows the exit code remotely, so presence of output is the
     // only signal available. An empty section means "nothing came back".
     if (raw.trim()) ok.add(s.tag);
   }
-  return { out, ok };
+  return { out, ok, missing };
+}
+
+/**
+ * The one shell script that runs every step on the remote host.
+ *
+ * Sequential by default. With `parallel`, steps run in background batches and
+ * each batch's output is printed (behind its markers) as soon as the batch
+ * finishes — so if the SSH call times out, what was read so far still comes
+ * back instead of nothing. Steps are written to a temp dir rather than straight
+ * to stdout because concurrent writers would interleave their lines.
+ */
+export function buildRemoteScript(steps: Step[], opts: RemoteOptions = {}): string {
+  // `section()` slices to the next literal "@@", so any value in the output
+  // containing "@@" would silently truncate the rest of the section. Defusing
+  // it in the stream costs one sed and removes a whole class of phantom data
+  // loss; the substitution only ever lands inside a string value.
+  const parallel = Math.max(1, Math.floor(opts.parallel || 1));
+  const limit = opts.stepTimeoutSec && opts.stepTimeoutSec > 0 ? Math.floor(opts.stepTimeoutSec) : 0;
+  const kubectl = (s: Step) =>
+    `(${limit ? `_to ${limit} ` : ''}kubectl ${s.args.map(shellQuote).join(' ')} 2>/dev/null || true) | sed "s/@@/@ @/g"`;
+  // A host without coreutils `timeout` still runs the step, just unbounded.
+  const prelude = limit
+    ? ['_to() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }']
+    : [];
+
+  if (parallel === 1) {
+    return [
+      ...prelude,
+      ...steps.flatMap((s) => [`echo @@${s.tag}@@`, kubectl(s)]),
+      'echo @@END@@',
+    ].join('; ');
+  }
+
+  const lines: string[] = [
+    ...prelude,
+    '_T=$(mktemp -d 2>/dev/null || (d=/tmp/trinetra.$$; mkdir -p "$d" && echo "$d"))',
+  ];
+  for (let start = 0; start < steps.length; start += parallel) {
+    const batch = steps.slice(start, start + parallel);
+    batch.forEach((s, j) => lines.push(`${kubectl(s)} > "$_T/${start + j}" &`));
+    lines.push('wait');
+    batch.forEach((s, j) => lines.push(`echo @@${s.tag}@@; cat "$_T/${start + j}"`));
+  }
+  lines.push('echo @@END@@', 'rm -rf "$_T"');
+  // `&` already ends a command; a following `;` would be a syntax error.
+  return lines.map((l) => (l.endsWith('&') ? `${l} ` : `${l}; `)).join('').trim().replace(/;$/, '');
 }
 
 /** Parse a step's output as JSON, tolerating empty output from a missing binary. */

@@ -21,7 +21,7 @@ from the SSH inventory, or **All hosts** — chosen with the source picker in th
 
 ### Dashboard
 - **KPI cards** — containers, nodes, pods, kube context.
-- **Cluster Topology Map** — see the next section.
+- **Cluster Topology Map** — see the next section. A **Containers** selector above it shows *all* containers, *hides Kubernetes pod containers* (the ones crictl reports for every pod on a node — they flood the map when nodes are added, and are already drawn as pods), or *hides all* containers. The choice is remembered per browser; the KPI card says how many are hidden.
 - **Cluster Resource Metrics** — CPU and memory **used** (live, from `kubectl top`) next to **requested** (sum of pod requests) against each node's allocatable capacity; GPUs allocated; pod slots; per-node table with pressure and cordon state; top pods by CPU or memory. Without metrics-server it says so and shows requested values only.
 - **Workload Status** — pod counts by kubectl status (`Running`, `CrashLoopBackOff`, `ImagePullBackOff`, `Init:0/1`, `Completed`…) and workload counts by rollout state. Click any chip to open the Kubernetes page filtered to it.
 - **Host and Daemon Health** — runtime and kubectl availability.
@@ -56,9 +56,10 @@ Docker/containerd/podman containers with start/stop/restart/logs/remove. `src/Ap
 - **Nodes, Workloads, Services, Pods** tables.
 - **Pods** show the **kubectl STATUS** (`CrashLoopBackOff`, `ImagePullBackOff`, `ErrImagePull`, `OOMKilled`, `Init:1/2`, `Terminating`, `Evicted`, `Completed`…), ready count, restarts with the **reason of the last restart** (e.g. `OOMKilled`), age. Status chips above the table filter it.
 - **Workloads** (Deployments, StatefulSets, DaemonSets) show kind and rollout state: `Available`, `Degraded`, `Updating`, `Unavailable`, `Failed` (progress deadline exceeded), `ScaledToZero`.
+- **Node Config (/etc/kubernetes)** — read over SSH from each inventory node (root needed), read-only: **certificate expiry** for every cert under `pki/` (plus etcd, kubelet and the client certs inside `admin.conf`/`kubelet.conf`…), **API server posture** (anonymous auth, AlwaysAllow, audit log, encryption at rest, NodeRestriction, profiling, insecure port), **etcd size vs quota**, **kubelet** risks and limits (read-only port, anonymous, rotation off, max pods, eviction thresholds, reserved resources), **manifests edited in the last day**, **clock skew**, and **drift** between control-plane nodes (static-pod flags, image versions, kubelet API endpoint). Works for kubeadm, RKE2 and k3s. Certificates are parsed *on the node* (`openssl x509 -noout`): only dates, subjects and SANs leave it; secret-looking flag values are redacted on the host. Its warnings also feed **Understand this host** and the fleet roll-up as `/etc/kubernetes` evidence. CSV export.
 - **Other Resources** — every other kind, grouped: Workloads (Jobs, CronJobs, HPAs, PDBs), **AI / ML** (KServe **InferenceServices**, ServingRuntimes, Kubeflow Notebooks, RayClusters), **Network** (Ingresses, Istio VirtualServices / Gateways / DestinationRules, NetworkPolicies), **Storage** (**PVCs**, PVs, StorageClasses), **Certificates** (cert-manager Certificates with expiry — *ExpiringSoon* within 14 days, *Expired*; Issuers, ClusterIssuers), **Config** (ConfigMaps, Secrets — names and types only, contents are never read), **Cluster** (Namespaces, ResourceQuotas, warning Events, CRDs). Kinds a cluster doesn't have are shown as `n/a`. Filters: group, kind, namespace, "not healthy only", search; CSV export.
 
-Code: `src/App.tsx`, `src/components/ClusterResources.tsx`, status logic in `server/k8s/workloads.ts`.
+Code: `src/App.tsx`, `src/components/ClusterResources.tsx`, `src/components/NodeConfig.tsx`, status logic in `server/k8s/workloads.ts`, node config in `server/k8s/nodeconfig.ts`.
 
 ### K8s Nodes (formerly "Virtual Machines")
 SSH inventory, metrics, discovery, node "brain", diagnose, root access.
@@ -121,16 +122,19 @@ PCAI component map and health per component. The AI "health read" card is hidden
 Which **model** runs on which GPU, and how hard it works.
 - **GPU nodes** — model (e.g. A100), allocated / allocatable, GPU memory, driver/CUDA, MIG strategy.
 - **One card per GPU workload** — the model name and serving stack (vLLM, NVIDIA NIM, Triton, TGI, KServe…) and *how it was identified* (InferenceService, `--served-model-name`, `--model`, `MODEL_NAME` env, …).
-- **Live per-GPU readings** via `kubectl exec <pod> -n <ns> -- nvidia-smi --query-gpu=…`: compute utilization, memory used/total and bandwidth, power vs limit, temperature, SM/memory clocks, P-state, PCIe gen/width, MIG mode, ECC errors, persistence and compute mode, driver, **throttle reasons**, and the processes on each GPU.
+- **Live per-GPU readings**, preferably from the **NVIDIA DCGM exporter** the GPU Operator runs on each GPU node (`kubectl get --raw …/pods/<exporter>:9400/proxy/metrics` — one call per node, no exec, also counts GPUs no pod holds, adds XID faults and *engine active*), else via `kubectl exec <pod> -n <ns> -- nvidia-smi --query-gpu=…` for the workloads DCGM does not cover. Each card says which source it used. Readings include compute utilization, memory used/total and bandwidth, power vs limit, temperature, SM/memory clocks, P-state, PCIe gen/width, MIG mode, ECC errors, persistence and compute mode, driver, **throttle reasons**, and the processes on each GPU.
 - **Raw nvidia-smi buttons** per pod: `nvidia-smi`, `-q`, `-L`, `topo -m`, memory + ECC, clocks + perf, power + temp, processes, `--help` (fixed list — no free-form commands).
-- Live nvidia-smi on/off, auto-refresh (15 / 30 / 60 s), namespace filter, search, CSV export. At most 24 containers are probed per refresh (`TRINETRA_GPU_MAX_PROBES`).
+- **What needs attention** — GPU faults (XID), memory ≥95% (OOM risk), hardware throttling, **GPUs allocated but idle** (<5% for ≥1 h of history), **pods queued for GPUs** while allocated ones idle, and free GPUs per node.
+- **6-hour utilization sparkline** per model. Every read is appended to `gpu-<source>.jsonl` beside the metrics samples; `TRINETRA_GPU_POLL_SEC=300` (with `TRINETRA_GPU_POLL_SOURCES=local,vm1`) records in the background so idle findings exist even when nobody has the page open.
+- Concurrent reads of the same source (two viewers, auto-refresh) share one probe.
+- Live readings on/off, auto-refresh (15 / 30 / 60 s), namespace filter, search, CSV export. The newest running containers are probed first, at most 64 per refresh (`TRINETRA_GPU_MAX_PROBES`); on a remote VM the execs run 8 at a time (`TRINETRA_GPU_PARALLEL`), each capped at 20 s. Terminating pods are not probed and finished pods are hidden unless asked for.
 
-Code: `src/components/GpuUtilization.tsx`, `server/k8s/gpu.ts`.
+Code: `src/components/GpuUtilization.tsx`, `server/k8s/gpu.ts`, `server/k8s/dcgm.ts`, `server/k8s/gpuhistory.ts`. Set `TRINETRA_GPU_DCGM=off` to skip DCGM.
 
 ## App-wide behaviour
 - **Refresh loop** — the cluster is re-read every 10 s only while a page that shows it is open (Dashboard, Containers, Kubernetes, PCAI Stack, Observability), never while the browser tab is hidden, and never twice at once. A response that arrives after a newer read (or after you switched source) is discarded.
 - **Last good read** — if one refresh fails (SSH hiccup, slow `kubectl`), the screen keeps the previous data with a banner "Showing the last good read from HH:MM" instead of going blank. In "All hosts", each host falls back to its own last good read.
-- **Lazy pages** — K8s Nodes (terminal), Host Logs, Observability, Change History, Cheat Sheet, PCAI Stack and GPU load on first open; the startup bundle is ~550 KB instead of ~1.2 MB. The screenshot library loads on first capture.
+- **Lazy pages** — K8s Nodes (terminal), Host Logs, Observability, Change History, Cheat Sheet, PCAI Stack, GPU, Node Config, the topology map, Other Resources and the resource metrics load on first use; the startup bundle is ~270 KB instead of ~1.2 MB. The screenshot library loads on first capture.
 
 ## Disabled (commented out, not deleted)
 Agent Chat, Agent Teamwork, PCAI Assistant, Image Hardener, the agent/model **settings button**, the "HPE AI: model" pill, the dashboard "Launch AI Console" card and the settings modal (incl. the model picker). They are wrapped in `Disabled:` comments in `src/App.tsx` — un-comment those blocks to restore them.
@@ -143,7 +147,8 @@ Agent Chat, Agent Teamwork, PCAI Assistant, Image Hardener, the agent/model **se
 |---|---|---|
 | `GET /api/k8s/extra[?vm=]` | Every other resource kind, with status and health; `kinds` says which APIs exist. | `server/k8s/resources.ts` |
 | `GET /api/k8s/top[?vm=]` | Live node and pod CPU/memory (`kubectl top`); reports *why* when unavailable. | `server/k8s/top.ts` |
-| `GET /api/gpu/overview[?vm=&probe=0]` | GPU nodes, GPU workloads with model detection, live nvidia-smi readings. | `server/k8s/gpu.ts` |
+| `GET /api/gpu/overview[?vm=&probe=0]` | GPU nodes, GPU workloads with model detection, live DCGM / nvidia-smi readings, 6 h history, findings. | `server/k8s/gpu.ts` |
+| `GET /api/nodeconfig[?vm=a,b&fresh=1]` | /etc/kubernetes per node (certs, flags, kubelet, etcd) with checks, plus drift across control-plane nodes. 5-minute cache. | `server/k8s/nodeconfig.ts` |
 | `POST /api/gpu/raw` | One fixed nvidia-smi view inside one pod. | `server/k8s/gpu.ts` |
 | `GET /api/history/facets` | Namespaces, kinds, writers, top objects and activity histogram for a window. | `server/history/router.ts` |
 | `GET /api/history?actor=&name=` | New filters on the existing timeline. | `server/history/store.ts` |
@@ -152,7 +157,7 @@ Agent Chat, Agent Teamwork, PCAI Assistant, Image Hardener, the agent/model **se
 
 Changed data: pods now carry `displayStatus`, `health`, `lastReason`; workloads carry `status`, `health`; nodes carry `allocatable`, `capacity`, `pressure`, `schedulable`, `gpuProduct` (`server/k8s/workloads.ts`). kubectl errors shown to users are the readable line, not klog noise (`server/k8s/kubectl.ts`).
 
-**In-cluster (Helm):** `templates/rbac.yaml` now grants read access to the new kinds (batch, autoscaling, policy, storage, PVs, quotas, CRDs, cert-manager, KServe, Istio, Kubeflow, Ray — Secrets are still not granted, so they show as n/a in-cluster). `rbac.allowGpuExec` (default `true`) grants `pods/exec` for the GPU page; set it `false` to keep Trinetra strictly read-only.
+**In-cluster (Helm):** `templates/rbac.yaml` now grants read access to the new kinds (batch, autoscaling, policy, storage, PVs, quotas, CRDs, cert-manager, KServe, Istio, Kubeflow, Ray — Secrets are still not granted, so they show as n/a in-cluster). `rbac.allowGpuExec` (default `true`) grants `pods/exec` for the GPU page; set it `false` to keep Trinetra strictly read-only. `rbac.allowGpuMetrics` (default `true`) grants `get pods/proxy` so the GPU page can read the DCGM exporter without exec.
 
 All of the above is **read-only** toward the cluster except the pre-existing actions (restart, scale, delete pod, container start/stop) and the terminal.
 

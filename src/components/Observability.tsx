@@ -43,7 +43,7 @@ const LEVEL_TOKEN: Record<Level, { color: string; label: string; Icon: typeof Ch
 };
 
 interface Point { t: number; v: number | null }
-interface Evidence { kind: 'log' | 'health' | 'metric' | 'graph'; severity: Severity; summary: string; detail?: string; count?: number }
+interface Evidence { kind: 'log' | 'health' | 'metric' | 'graph' | 'config'; severity: Severity; summary: string; detail?: string; count?: number }
 type Severity = 'critical' | 'warning' | 'info';
 interface Issue {
   id: string; concern: string; severity: Severity; title: string; subject: string;
@@ -329,7 +329,7 @@ const StatTile: React.FC<{
 };
 
 const EVIDENCE_LABEL: Record<Evidence['kind'], string> = {
-  health: 'health check', log: '/var/log', metric: 'metric', graph: 'dependency graph',
+  health: 'health check', log: '/var/log', metric: 'metric', graph: 'dependency graph', config: '/etc/kubernetes',
 };
 
 const SEV_LEVEL: Record<Severity, Level> = { critical: 'critical', warning: 'warn', info: 'unknown' };

@@ -31,9 +31,12 @@ import {
   History,
   Gauge,
   ScrollText,
-  Zap
+  Zap,
+  ShieldCheck
 } from 'lucide-react';
-import TopologyGraph from './components/TopologyGraph';
+// The topology map (React Flow + dagre) and the resource pages are the bulk of
+// the bundle; loading them on demand keeps the first paint small.
+const TopologyGraph = lazy(() => import('./components/TopologyGraph'));
 // import AgentTeamwork from './components/AgentTeamwork';
 // import HPEAgentChat from './components/HPEAgentChat';
 // import PcaiAssistant from './components/PcaiAssistant';
@@ -47,9 +50,10 @@ const ClusterHistory = lazy(() => import('./components/ClusterHistory'));
 const HostLogs = lazy(() => import('./components/HostLogs'));
 const Observability = lazy(() => import('./components/Observability'));
 const KubectlCheatSheet = lazy(() => import('./components/KubectlCheatSheet'));
-import ClusterResources from './components/ClusterResources';
-import ClusterMetrics from './components/ClusterMetrics';
+const ClusterResources = lazy(() => import('./components/ClusterResources'));
+const ClusterMetrics = lazy(() => import('./components/ClusterMetrics'));
 const GpuUtilization = lazy(() => import('./components/GpuUtilization'));
+const NodeConfig = lazy(() => import('./components/NodeConfig'));
 import CaptureButton from './components/CaptureButton';
 import SectionBoundary from './components/SectionBoundary';
 import { HEALTH_BADGE, podHealthOf, podStatusText, workloadHealthOf, ageOf } from './lib/health';
@@ -65,7 +69,14 @@ interface Container {
   created: string;
   runtime?: string; // docker | containerd | nerdctl | podman
   host?: string;    // set in the merged "All hosts" view
+  pod?: string;     // crictl: the Kubernetes pod this container belongs to
 }
+
+// Which containers the dashboard draws. A Kubernetes node reports every pod's
+// containers through crictl, so adding nodes floods the map with containers
+// that are already drawn as pods — 'standalone' keeps only the ones that are not.
+type DashContainers = 'all' | 'standalone' | 'none';
+const isPodContainer = (c: Container) => !!c.pod || /^k8s_/.test(c.name || '');
 
 interface Pod {
   name: string;
@@ -250,7 +261,16 @@ export function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('trinetra_theme') as 'light' | 'dark') || 'light');
   const [globalSearch, setGlobalSearch] = useState<string>('');
   const [dockerFilter, setDockerFilter] = useState<'all' | 'running' | 'stopped'>('all');
-  const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services' | 'resources'>('all');
+  const [dashContainers, setDashContainers] = useState<DashContainers>(() => {
+    try {
+      const v = localStorage.getItem('trinetra_dashboard_containers');
+      return v === 'standalone' || v === 'none' ? v : 'all';
+    } catch { return 'all'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('trinetra_dashboard_containers', dashContainers); } catch { /* storage unavailable */ }
+  }, [dashContainers]);
+  const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services' | 'resources' | 'nodeconfig'>('all');
   // Status filters on the Kubernetes page ('all' or an exact status word).
   const [podStatusFilter, setPodStatusFilter] = useState<string>('all');
   const [workloadStatusFilter, setWorkloadStatusFilter] = useState<string>('all');
@@ -1257,6 +1277,12 @@ export function App() {
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} ${r}`).join(', ');
   }, [dockerContainers]);
 
+  const dashboardContainers = useMemo(
+    () => dashContainers === 'none' ? [] : dashContainers === 'standalone' ? dockerContainers.filter((c) => !isPodContainer(c)) : dockerContainers,
+    [dockerContainers, dashContainers],
+  );
+  const hiddenContainers = dockerContainers.length - dashboardContainers.length;
+
   // Merged views carry the host each resource came from; single-host views
   // don't need it. Actions resolve it here so call sites stay unchanged.
   const hostFor = (kind: 'container' | 'k8s', id: string, namespace?: string): string => {
@@ -1414,13 +1440,28 @@ export function App() {
               <span className="nav-item-badge">{dockerContainers.length}</span>
             </button>
             <button
-              className={`nav-item ${activeTab === 'k8s' ? 'active' : ''}`}
-              onClick={() => setActiveTab('k8s')}
-              disabled={!status.kubernetes.installed && k8sResources.pods.length === 0 && k8sResources.nodes.length === 0}
+              className={`nav-item ${activeTab === 'k8s' && k8sSubTab !== 'nodeconfig' ? 'active' : ''}`}
+              onClick={() => { if (k8sSubTab === 'nodeconfig') setK8sSubTab('all'); setActiveTab('k8s'); }}
+              // Stays open while there are inventory hosts: Node Config reads
+              // /etc/kubernetes over SSH, and is most needed exactly when the
+              // API itself is down (e.g. an expired apiserver certificate).
+              disabled={!status.kubernetes.installed && k8sResources.pods.length === 0 && k8sResources.nodes.length === 0 && vmList.length === 0}
             >
               <span className="nav-item-icon"><Server size={18} /></span>
               <span className="nav-item-text">Kubernetes</span>
               <span className="nav-item-badge">{k8sResources.pods.length}</span>
+            </button>
+            {/* Sub-page of Kubernetes, listed here so it is visible without
+                opening that page first. Always enabled: it reads the nodes over
+                SSH, and matters most when the API itself is down. */}
+            <button
+              className={`nav-item nav-subitem ${activeTab === 'k8s' && k8sSubTab === 'nodeconfig' ? 'active' : ''}`}
+              onClick={() => { setK8sSubTab('nodeconfig'); setActiveTab('k8s'); }}
+              title="What /etc/kubernetes says on each node: certificate expiry, API server posture, etcd headroom, kubelet limits, drift between control-plane nodes"
+            >
+              <span className="nav-item-icon"><ShieldCheck size={15} /></span>
+              <span className="nav-item-text">Node Config</span>
+              <span className="nav-item-badge">/etc/k8s</span>
             </button>
             <button
               className={`nav-item ${activeTab === 'vms' ? 'active' : ''}`}
@@ -1769,7 +1810,7 @@ export function App() {
                     <span className="kpi-label">Containers</span>
                     <div className="kpi-value-row">
                       <span className="kpi-number">{dockerContainers.length}</span>
-                      <span className="kpi-subtext">{runtimeBreakdown || 'None detected'}</span>
+                      <span className="kpi-subtext">{runtimeBreakdown || 'None detected'}{hiddenContainers > 0 ? ` · ${hiddenContainers} hidden on map` : ''}</span>
                     </div>
                   </div>
                   <div className="kpi-icon-box">
@@ -1822,7 +1863,16 @@ export function App() {
               <div className="panel-card" style={{ height: 'fit-content', width: '100%' }}>
                 <div className="panel-card-title">
                   <h2><Network size={18} /> Cluster Topology Map</h2>
-                  <span className="badge neutral">Interactive Visualizer</span>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <select className="form-input" value={dashContainers} onChange={(e) => setDashContainers(e.target.value as DashContainers)}
+                      style={{ width: 'auto', padding: '4px 10px', fontSize: 12 }}
+                      title="Kubernetes nodes report every pod's containers too. Hide them to see the cluster without the container column.">
+                      <option value="all">Containers: show all</option>
+                      <option value="standalone">Containers: hide Kubernetes pod containers</option>
+                      <option value="none">Containers: hide all</option>
+                    </select>
+                    <span className="badge neutral">Interactive Visualizer</span>
+                  </div>
                 </div>
                 <div className="topology-visualizer-container" style={{ width: '100%' }}>
                   {loading ? (
@@ -1832,8 +1882,9 @@ export function App() {
                     </div>
                   ) : hasAnyResource ? (
                     <SectionBoundary name="cluster topology map" resetKey={source}>
+                    <Suspense fallback={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '400px', gap: '12px', color: 'var(--text-secondary)' }}><div className="loader"></div><span>Loading topology map…</span></div>}>
                     <TopologyGraph
-                      containers={dockerContainers}
+                      containers={dashboardContainers}
                       k8sResources={k8sResources}
                       onRefresh={fetchClusterState}
                       source={source}
@@ -1841,6 +1892,7 @@ export function App() {
                       sources={sourceOptions}
                       defaultNamespace="kube-system"
                     />
+                    </Suspense>
                     </SectionBoundary>
                   ) : (
                     <div className="text-secondary" style={{ fontStyle: 'italic', padding: '32px', textAlign: 'center' }}>
@@ -1851,7 +1903,7 @@ export function App() {
               </div>
 
               {/* CPU / memory / GPU / pod capacity — used and requested */}
-              <ClusterMetrics k8sResources={k8sResources} source={source} vmNames={vmList.map(v => v.name)} compact />
+              <Suspense fallback={null}><ClusterMetrics k8sResources={k8sResources} source={source} vmNames={vmList.map(v => v.name)} compact /></Suspense>
 
               {/* Secondary Info Grid */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '16px' }}>
@@ -2151,6 +2203,13 @@ export function App() {
                       title="Certificates, InferenceServices, PVCs, ingresses, Istio, jobs, config, events, CRDs…"
                     >
                       Other Resources
+                    </button>
+                    <button
+                      className={`subnav-pill-btn ${k8sSubTab === 'nodeconfig' ? 'active' : ''}`}
+                      onClick={() => setK8sSubTab('nodeconfig')}
+                      title="What /etc/kubernetes says on each node: certificate expiry, API server posture, etcd headroom, kubelet limits, drift between control-plane nodes"
+                    >
+                      Node Config (/etc/kubernetes)
                     </button>
                   </div>
                 </div>
@@ -2469,6 +2528,10 @@ export function App() {
             {/* OTHER RESOURCES — certificates, InferenceServices, PVCs, ingresses, Istio, jobs, config, events, CRDs */}
             {(k8sSubTab === 'all' || k8sSubTab === 'resources') && (
               <ClusterResources source={source} vmNames={vmList.map(v => v.name)} globalSearch={globalSearch} />
+            )}
+            {/* NODE CONFIG — /etc/kubernetes over SSH; only on request, never in "All" (one SSH round trip per node) */}
+            {k8sSubTab === 'nodeconfig' && (
+              <NodeConfig source={source} vmNames={vmList.map(v => v.name)} />
             )}
           </div>
         )}

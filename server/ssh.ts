@@ -27,8 +27,11 @@ import path from 'path';
 //
 // Disabled only in the test harness (SSH_PORT_OVERRIDE), where the daemon's
 // host key is regenerated per run, or explicitly via TRINETRA_SSH_STRICT=off.
+// Both are read per connection, not at import: the test harness sets
+// SSH_PORT_OVERRIDE after this module loads, and a decision frozen at import
+// time made the tests verify against (and write to) the real pin file.
 const PINS_PATH = process.env.TRINETRA_SSH_PINS_PATH || path.join(os.homedir(), '.trinetra-ssh-pins.json');
-const strictHostKeys = process.env.TRINETRA_SSH_STRICT !== 'off' && !process.env.SSH_PORT_OVERRIDE;
+const strictHostKeys = () => process.env.TRINETRA_SSH_STRICT !== 'off' && !process.env.SSH_PORT_OVERRIDE;
 let pinCache: Record<string, string> | null = null;
 
 function loadPins(): Record<string, string> {
@@ -38,7 +41,7 @@ function loadPins(): Record<string, string> {
 }
 
 function hostVerifierFor(host: string): ((key: Buffer) => boolean) | undefined {
-  if (!strictHostKeys) return undefined;
+  if (!strictHostKeys()) return undefined;
   return (key: Buffer) => {
     const fp = crypto.createHash('sha256').update(key).digest('hex');
     const pins = loadPins();

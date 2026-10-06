@@ -22,7 +22,7 @@ interface VmEntry { name: string; host: string; user: string; runsAsRoot?: boole
 type Severity = 'critical' | 'warning' | 'info';
 
 interface Evidence {
-  kind: 'log' | 'health' | 'metric' | 'graph';
+  kind: 'log' | 'health' | 'metric' | 'graph' | 'config';
   severity: Severity; summary: string; detail?: string; count?: number;
 }
 interface Issue {
@@ -34,7 +34,7 @@ interface InsightResult {
   subject: string;
   issues: Issue[];
   verdict: { severity: Severity | 'ok'; summary: string };
-  gathered: { overview: boolean; scan: boolean; scanReused: boolean; metrics: boolean; graph: boolean };
+  gathered: { overview: boolean; scan: boolean; scanReused: boolean; metrics: boolean; graph: boolean; config?: boolean };
   error?: string;
   durationMs?: number;
 }
@@ -532,6 +532,7 @@ export const HostLogs: React.FC = () => {
                     insight.gathered.scan && `/var/log${insight.gathered.scanReused ? ' (reused)' : ''}`,
                     insight.gathered.metrics && 'metrics',
                     insight.gathered.graph && 'dependency graph',
+                    insight.gathered.config && '/etc/kubernetes',
                   ].filter(Boolean).join(' · ') || 'nothing'}
                 </span>
               )}
@@ -594,7 +595,7 @@ export const HostLogs: React.FC = () => {
                             textTransform: 'uppercase', letterSpacing: '0.03em',
                           }}>
                             {e.kind === 'log' ? '/var/log' : e.kind === 'health' ? 'health check'
-                              : e.kind === 'metric' ? 'metric' : 'dependency graph'}
+                              : e.kind === 'metric' ? 'metric' : e.kind === 'config' ? '/etc/kubernetes' : 'dependency graph'}
                           </span>
                           <span style={{ color: 'var(--text-primary)' }}>
                             {e.summary}

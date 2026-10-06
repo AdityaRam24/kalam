@@ -14,6 +14,11 @@
 import { Router } from 'express';
 import { runSteps, parseJson, SAFE_NAME, type Step } from './kubectl.js';
 import { isvcModel } from './resources.js';
+import { parseDcgm, dcgmExporters, type DcgmGpu } from './dcgm.js';
+import {
+  appendGpuHistory, readGpuHistory, pruneGpuHistory, seriesByWorkload, gpuFindings,
+  type GpuHistLine, type GpuHistPoint,
+} from './gpuhistory.js';
 
 // Long-standing fields (driver 450+). Kept separate from EXT_FIELDS so that a
 // driver rejecting one newer field cannot blank the whole reading.
@@ -57,6 +62,8 @@ export interface GpuReading {
   memTempC?: number | null;
   encoderSessions?: number | null;
   processes: Array<{ pid: string; name: string; usedMiB: number | null }>;
+  /** Where the reading came from: the DCGM exporter, or nvidia-smi exec'd in the pod. */
+  source?: 'dcgm' | 'nvidia-smi';
 }
 
 const num = (v: string | undefined): number | null => {
@@ -214,7 +221,29 @@ export interface GpuWorkload {
   gpus: number;
   image: string;
   owner?: string;
+  /** When the pod started (status.startTime, else creation) — ISO string. */
+  startedAt?: string;
+  /** Being deleted: still holds its GPUs, but is on its way out. */
+  terminating?: boolean;
   model: ModelInfo;
+}
+
+const startOf = (w: Pick<GpuWorkload, 'startedAt'>) => (w.startedAt ? Date.parse(w.startedAt) || 0 : 0);
+
+/**
+ * What to show first and probe first: live pods before finished ones, and
+ * within each, the NEWEST first. `kubectl get pods` sorts by namespace/name,
+ * so taking its first N meant a freshly deployed model in a late-sorting
+ * namespace was never probed — the page kept showing the old pods only.
+ */
+export function byNewest(a: GpuWorkload, b: GpuWorkload): number {
+  const rank = (w: GpuWorkload) => (w.phase === 'Running' && !w.terminating ? 0 : w.phase === 'Pending' ? 1 : w.terminating ? 2 : 3);
+  return rank(a) - rank(b) || startOf(b) - startOf(a) || `${a.namespace}/${a.pod}`.localeCompare(`${b.namespace}/${b.pod}`);
+}
+
+/** Running containers worth exec-ing into, newest first, at most `max`. */
+export function probeTargets(workloads: GpuWorkload[], max: number): GpuWorkload[] {
+  return workloads.filter((w) => w.phase === 'Running' && !w.terminating).sort(byNewest).slice(0, Math.max(0, max));
 }
 
 export function gpuWorkloads(pods: any[], isvcs: Map<string, any>): GpuWorkload[] {
@@ -233,11 +262,13 @@ export function gpuWorkloads(pods: any[], isvcs: Map<string, any>): GpuWorkload[
         gpus,
         image: c.image || '',
         owner: ref ? `${ref.kind}/${ref.name}` : undefined,
+        startedAt: p?.status?.startTime || p?.metadata?.creationTimestamp || undefined,
+        terminating: !!p?.metadata?.deletionTimestamp,
         model: detectModel(p, c, isvcs),
       });
     }
   }
-  return out;
+  return out.sort(byNewest);
 }
 
 export function gpuNodes(nodes: any[], workloads: GpuWorkload[]) {
@@ -274,15 +305,41 @@ export function smiSteps(i: number, w: Pick<GpuWorkload, 'namespace' | 'pod' | '
 }
 
 /** How many GPU containers are probed live per request — keeps one call bounded. */
-const MAX_PROBES = Number(process.env.TRINETRA_GPU_MAX_PROBES || 24);
+const MAX_PROBES = Number(process.env.TRINETRA_GPU_MAX_PROBES || 64);
+/** Concurrent `kubectl exec`s on a remote host, and the cap on any one of them. */
+const REMOTE_PARALLEL = Math.max(1, Number(process.env.TRINETRA_GPU_PARALLEL || 8));
+const EXEC_TIMEOUT_SEC = 20;
+/** Set TRINETRA_GPU_DCGM=off to never use the DCGM exporter. */
+const USE_DCGM = (process.env.TRINETRA_GPU_DCGM || '').toLowerCase() !== 'off';
 
-export const gpuRouter = Router();
+const wkey = (w: Pick<GpuWorkload, 'namespace' | 'pod' | 'container'>) => `${w.namespace}/${w.pod}/${w.container}`;
 
-gpuRouter.get('/api/gpu/overview', async (req, res) => {
-  const vm = req.query.vm ? String(req.query.vm) : undefined;
-  if (vm && !SAFE_NAME.test(vm)) return res.status(400).json({ error: 'Invalid VM name.' });
-  const probe = req.query.probe !== '0';
+/**
+ * Hand DCGM's GPUs to the workloads holding them. A series without a
+ * container label goes to the pod's first GPU-requesting container.
+ */
+export function assignDcgm(workloads: GpuWorkload[], gpus: DcgmGpu[]): { byKey: Record<string, DcgmGpu[]>; unassigned: Record<string, number> } {
+  const byKey: Record<string, DcgmGpu[]> = {};
+  const unassigned: Record<string, number> = {};
+  const exact = new Map(workloads.map((w) => [wkey(w), w]));
+  const firstOfPod = new Map<string, GpuWorkload>();
+  for (const w of workloads) if (!firstOfPod.has(`${w.namespace}/${w.pod}`)) firstOfPod.set(`${w.namespace}/${w.pod}`, w);
+  for (const g of gpus) {
+    const w = g.pod ? (exact.get(`${g.namespace}/${g.pod}/${g.container}`) || firstOfPod.get(`${g.namespace}/${g.pod}`)) : undefined;
+    if (w) (byKey[wkey(w)] ||= []).push(g);
+    else if (!g.pod) unassigned[g.node] = (unassigned[g.node] || 0) + 1;
+  }
+  return { byKey, unassigned };
+}
 
+const meanOf = (xs: Array<number | null | undefined>) => {
+  const v = xs.filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
+  return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+};
+
+let historyWrites = 0;
+
+async function collectGpuOverview(vm: string | undefined, probe: boolean) {
   const inv = await runSteps(
     [
       { tag: 'PODS', args: ['get', 'pods', '--all-namespaces', '-o', 'json'] },
@@ -295,30 +352,61 @@ gpuRouter.get('/api/gpu/overview', async (req, res) => {
   );
   const pods = parseJson(inv.out.PODS)?.items;
   if (!Array.isArray(pods)) {
-    return res.json({ error: inv.error || 'Could not list pods on this cluster.', workloads: [], nodes: [] });
+    return { error: inv.error || 'Could not list pods on this cluster.', workloads: [], nodes: [] };
   }
   const isvcs = new Map<string, any>();
   for (const i of parseJson(inv.out.ISVC)?.items || []) isvcs.set(`${i?.metadata?.namespace}/${i?.metadata?.name}`, i);
 
   const workloads = gpuWorkloads(pods, isvcs);
   const nodes = gpuNodes(parseJson(inv.out.NODES)?.items || [], workloads);
+  const readings: Record<string, { gpus: GpuReading[]; error?: string; source?: 'dcgm' | 'nvidia-smi' }> = {};
 
-  // Live readings: running GPU containers only, bounded.
-  const targets = probe ? workloads.filter((w) => w.phase === 'Running').slice(0, MAX_PROBES) : [];
-  const readings: Record<string, { gpus: GpuReading[]; error?: string }> = {};
+  // 1. DCGM exporter: one GET per GPU node through the pod proxy, no exec.
+  let dcgm: { exporters: number; read: number; gpus: DcgmGpu[]; unassigned: Record<string, number>; error?: string } | undefined;
+  if (probe && USE_DCGM) {
+    const exporters = dcgmExporters(pods);
+    if (exporters.length) {
+      const steps: Step[] = exporters.map((e, i) => ({
+        tag: `D${i}`, args: ['get', '--raw', `/api/v1/namespaces/${e.namespace}/pods/${e.pod}:${e.port}/proxy/metrics`], optional: true,
+      }));
+      const r = await runSteps(steps, vm, 60_000, 1024 * 1024 * 32, { parallel: REMOTE_PARALLEL, stepTimeoutSec: EXEC_TIMEOUT_SEC });
+      const gpus = exporters.flatMap((e, i) => parseDcgm(r.out[`D${i}`] || '', e.node));
+      const read = exporters.filter((_, i) => (r.out[`D${i}`] || '').includes('DCGM_FI_')).length;
+      const { byKey, unassigned } = assignDcgm(workloads, gpus);
+      for (const [k, g] of Object.entries(byKey)) readings[k] = { gpus: g, source: 'dcgm' };
+      dcgm = {
+        exporters: exporters.length, read, gpus, unassigned,
+        error: read === 0 ? 'DCGM exporter pods were found but their /metrics could not be read (needs get on pods/proxy).' : undefined,
+      };
+    }
+  }
+
+  // 2. nvidia-smi in the pod, for running containers DCGM did not cover:
+  // newest first, bounded. Terminating pods are skipped — an exec into one can
+  // hang until it is gone.
+  const uncovered = workloads.filter((w) => !readings[wkey(w)]);
+  const targets = probe ? probeTargets(uncovered, MAX_PROBES) : [];
   if (targets.length) {
-    // Local: a few pods at a time (each step is its own process). Remote: one
-    // SSH round trip for everything, because the SSH handshake is the cost.
-    const key = (w: GpuWorkload) => `${w.namespace}/${w.pod}/${w.container}`;
-    const collect = (out: Record<string, string>, i: number, w: GpuWorkload) => {
-      const gpus = parseGpuReadings(out[`Q${i}`], out[`X${i}`], out[`A${i}`]);
-      readings[key(w)] = gpus.length
-        ? { gpus }
-        : { gpus: [], error: 'nvidia-smi gave no reading in this container (not installed, or no NVIDIA runtime utilities mounted).' };
+    const collect = (out: Record<string, string>, i: number, w: GpuWorkload, missing?: Set<string>) => {
+      const gpus = parseGpuReadings(out[`Q${i}`], out[`X${i}`], out[`A${i}`]).map((g) => ({ ...g, source: 'nvidia-smi' as const }));
+      readings[wkey(w)] = gpus.length
+        ? { gpus, source: 'nvidia-smi' }
+        : missing?.has(`Q${i}`)
+          ? { gpus: [], error: 'The probe ran out of time before reaching this pod — refresh, or raise TRINETRA_GPU_PARALLEL.' }
+          : { gpus: [], error: 'nvidia-smi gave no reading in this container (not installed, or no NVIDIA runtime utilities mounted).' };
     };
     if (vm) {
-      const r = await runSteps(targets.flatMap((w, i) => smiSteps(i, w)), vm, Math.min(180_000, 20_000 + targets.length * 8_000));
-      targets.forEach((w, i) => collect(r.out, i, w));
+      // One SSH call, execs run in parallel batches on the remote host, each
+      // bounded — one slow pod no longer starves every pod after it.
+      const steps = targets.flatMap((w, i) => smiSteps(i, w));
+      const batches = Math.ceil(steps.length / REMOTE_PARALLEL);
+      const r = await runSteps(steps, vm, Math.min(240_000, 20_000 + batches * (EXEC_TIMEOUT_SEC + 2) * 1000), 1024 * 1024 * 16,
+        { parallel: REMOTE_PARALLEL, stepTimeoutSec: EXEC_TIMEOUT_SEC });
+      if (!Object.keys(r.out).length && r.error) {
+        for (const w of targets) readings[wkey(w)] = { gpus: [], error: r.error };
+      } else {
+        targets.forEach((w, i) => collect(r.out, i, w, r.missing));
+      }
     } else {
       for (let start = 0; start < targets.length; start += 4) {
         const batch = targets.slice(start, start + 4);
@@ -331,17 +419,94 @@ gpuRouter.get('/api/gpu/overview', async (req, res) => {
     }
   }
 
-  res.json({
+  // 3. History + findings.
+  const now = Date.now();
+  const source = vm || 'local';
+  const latest: Record<string, { util: number | null; mem: number | null; xid?: number | null; throttle?: string[] }> = {};
+  const line: GpuHistLine = { at: now, w: {} };
+  for (const w of workloads) {
+    const g = readings[wkey(w)]?.gpus || [];
+    if (!g.length) continue;
+    const used = g.reduce((a, x) => a + (x.memUsedMiB || 0), 0);
+    const total = g.reduce((a, x) => a + (x.memTotalMiB || 0), 0);
+    const util = meanOf(g.map((x) => x.utilPct));
+    const mem = total ? (used / total) * 100 : null;
+    latest[wkey(w)] = {
+      util, mem,
+      xid: Math.max(0, ...g.map((x) => Number((x as DcgmGpu).xid) || 0)) || null,
+      throttle: g.flatMap((x) => x.throttle || []),
+    };
+    line.w[wkey(w)] = { model: w.model.model, gpus: w.gpus, util: util === null ? null : Math.round(util * 10) / 10, mem: mem === null ? null : Math.round(mem * 10) / 10 };
+  }
+  let history: Record<string, GpuHistPoint[]> = {};
+  try {
+    if (probe) await appendGpuHistory(source, line);
+    if (++historyWrites % 200 === 0) await pruneGpuHistory(source);
+    history = seriesByWorkload(await readGpuHistory(source, now - 6 * 3600_000), 60);
+  } catch { /* history is a bonus; a read-only disk must not fail the page */ }
+
+  const findings = gpuFindings({
+    now,
+    workloads: workloads.map((w) => ({ key: wkey(w), model: w.model.model, phase: w.phase, terminating: w.terminating, gpus: w.gpus, node: w.node })),
+    latest, history, nodes, unassigned: dcgm?.unassigned,
+  });
+
+  return {
     ok: true,
     readOnly: true,
     workloads,
     nodes,
     readings,
+    dcgm: dcgm && { exporters: dcgm.exporters, read: dcgm.read, error: dcgm.error, unassigned: dcgm.unassigned, gpus: dcgm.gpus.length },
+    history,
+    findings,
     probed: targets.length,
-    skipped: Math.max(0, workloads.filter((w) => w.phase === 'Running').length - targets.length),
+    skipped: Math.max(0, uncovered.filter((w) => w.phase === 'Running' && !w.terminating).length - targets.length),
     at: new Date().toISOString(),
-  });
+  };
+}
+
+// Several viewers (or one with auto-refresh) asking for the same source at
+// once share one read instead of each exec-ing into every GPU pod.
+const inFlight = new Map<string, ReturnType<typeof collectGpuOverview>>();
+export function gpuOverview(vm: string | undefined, probe: boolean) {
+  const k = `${vm || 'local'}|${probe}`;
+  let p = inFlight.get(k);
+  if (!p) {
+    p = collectGpuOverview(vm, probe).finally(() => inFlight.delete(k));
+    inFlight.set(k, p);
+  }
+  return p;
+}
+
+export const gpuRouter = Router();
+
+gpuRouter.get('/api/gpu/overview', async (req, res) => {
+  const vm = req.query.vm ? String(req.query.vm) : undefined;
+  if (vm && !SAFE_NAME.test(vm)) return res.status(400).json({ error: 'Invalid VM name.' });
+  try {
+    res.json(await gpuOverview(vm, req.query.probe !== '0'));
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || String(e), workloads: [], nodes: [] });
+  }
 });
+
+// Optional background sampling so idle-GPU findings have history even when
+// nobody has the page open. Off by default: each poll execs into GPU pods
+// that DCGM does not cover. TRINETRA_GPU_POLL_SEC=300, TRINETRA_GPU_POLL_SOURCES=local,vm1
+let gpuTimer: NodeJS.Timeout | undefined;
+export function startGpuPoller(): boolean {
+  const sec = Number(process.env.TRINETRA_GPU_POLL_SEC || 0);
+  if (!sec || gpuTimer) return false;
+  const sources = (process.env.TRINETRA_GPU_POLL_SOURCES || 'local').split(',').map((s) => s.trim()).filter((s) => s === 'local' || SAFE_NAME.test(s));
+  const tick = async () => {
+    for (const s of sources) await gpuOverview(s === 'local' ? undefined : s, true).catch(() => undefined);
+  };
+  gpuTimer = setInterval(() => void tick(), Math.max(60, sec) * 1000);
+  gpuTimer.unref?.();
+  void tick();
+  return true;
+}
 
 /** Fixed nvidia-smi invocations for the "raw output" panel — never free-form. */
 export const RAW_MODES: Record<string, string[]> = {
