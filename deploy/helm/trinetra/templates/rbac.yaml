@@ -72,6 +72,12 @@ rules:
     resources: [pods/exec]
     verbs: [create, get]
   {{- end }}
+  {{- if .Values.rbac.allowGpuMetrics }}
+  # GPU Utilization: GET /metrics from the DCGM exporter pods via the pod proxy.
+  - apiGroups: [""]
+    resources: [pods/proxy]
+    verbs: [get]
+  {{- end }}
   {{- if .Values.rbac.clusterWide }}
   # Health endpoints are not resources, so they need their own grant. Without
   # it a reachability probe reports "cannot reach the cluster" on a cluster

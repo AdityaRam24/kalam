@@ -18,7 +18,8 @@ import { graphRouter } from './graph/router.js';
 import { inspectRouter } from './k8s/inspect.js';
 import { resourcesRouter } from './k8s/resources.js';
 import { topRouter } from './k8s/top.js';
-import { gpuRouter } from './k8s/gpu.js';
+import { gpuRouter, startGpuPoller } from './k8s/gpu.js';
+import { nodeConfigRouter } from './k8s/nodeconfig.js';
 import { whyRouter } from './k8s/why.js';
 import { normalizeClusterItems, parseReplicaSetOwners } from './k8s/workloads.js';
 import { historyRouter } from './history/router.js';
@@ -116,6 +117,8 @@ app.use(inspectRouter);
 app.use(resourcesRouter);
 app.use(topRouter);
 app.use(gpuRouter);
+// What /etc/kubernetes (and RKE2/k3s) says about each node: certs, flags, drift.
+app.use(nodeConfigRouter);
 // Why things are failing: causes, evidence, fixes, and each object's
 // non-negotiable references and label/annotation contracts.
 app.use(whyRouter);
@@ -1180,6 +1183,10 @@ const server = app.listen(Number(PORT), HOST, () => {
   if (startMetricsPoller()) {
     const m = metricsPollerState();
     console.log(`📈 Metrics: sampling every ${m.intervalSec}s (retention ${process.env.TRINETRA_METRICS_RETENTION_HOURS || 48}h)`);
+  }
+  // Opt-in: TRINETRA_GPU_POLL_SEC records per-model GPU history in the background.
+  if (startGpuPoller()) {
+    console.log(`🎛️  GPU history: sampling ${process.env.TRINETRA_GPU_POLL_SOURCES || 'local'} every ${process.env.TRINETRA_GPU_POLL_SEC}s`);
   }
 });
 

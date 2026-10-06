@@ -32,8 +32,8 @@ export type Concern =
 export type Severity = 'critical' | 'warning' | 'info';
 
 export interface Evidence {
-  /** Which of Trinetra's four eyes saw this. */
-  kind: 'log' | 'health' | 'metric' | 'graph';
+  /** Which of Trinetra's eyes saw this. `config` = the node's Kubernetes files. */
+  kind: 'log' | 'health' | 'metric' | 'graph' | 'config';
   severity: Severity;
   summary: string;
   detail?: string;
@@ -138,8 +138,20 @@ export interface CorrelateInput {
   metrics?: Partial<Record<MetricId, { v: number | null; level: Level; label?: string }>>;
   /** Root causes the dependency graph found, already ranked. */
   graph?: Array<{ title: string; detail?: string; casualties?: number; severity?: Severity }>;
+  /** Checks from the node's /etc/kubernetes (server/k8s/nodeconfig.ts). */
+  config?: Array<{ status: string; area: string; title: string; detail?: string; evidence?: string; hint?: string }>;
   /** A host that did not answer at all. */
   unreachable?: string;
+}
+
+/** Which concern a node-config check belongs to. */
+export function configConcern(area: string): Concern {
+  switch (area) {
+    case 'certificates': case 'apiserver': return 'security';
+    case 'time': return 'time';
+    case 'etcd': return 'storage';
+    default: return 'kubernetes'; // kubelet, changes, drift, access
+  }
 }
 
 /**
@@ -230,6 +242,19 @@ export function correlate(input: CorrelateInput): Issue[] {
       detail: g.casualties ? `${g.casualties} dependent object(s) affected` : g.detail,
       count: g.casualties,
     });
+  }
+
+  // ── Node configuration (/etc/kubernetes) ────────────────────────────────
+  for (const c of input.config || []) {
+    if (c.status !== 'critical' && c.status !== 'warning') continue;
+    const b = bucket(configConcern(c.area));
+    b.evidence.push({
+      kind: 'config',
+      severity: c.status,
+      summary: c.title,
+      detail: [c.detail, c.evidence].filter(Boolean).join(' — '),
+    });
+    if (c.hint) b.checks.add(c.hint);
   }
 
   // ── Compose ───────────────────────────────────────────────────────────────

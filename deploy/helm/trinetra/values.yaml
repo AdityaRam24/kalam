@@ -98,6 +98,10 @@ rbac:
   # command in any pod — set false to keep Trinetra strictly read-only (the page
   # then shows GPU requests and allocation, without live nvidia-smi readings).
   allowGpuExec: true
+  # GPU Utilization page, preferred source: GET the NVIDIA DCGM exporter's
+  # /metrics through the API server's pod proxy (one call per GPU node, no exec).
+  # Needs get on pods/proxy. Set false to fall back to nvidia-smi exec only.
+  allowGpuMetrics: true
   # Cluster-wide read (all namespaces) vs a Role limited to this namespace.
   clusterWide: true
 
