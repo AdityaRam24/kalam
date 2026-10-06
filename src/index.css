@@ -387,6 +387,14 @@ html[data-theme='dark'] .nav-item.active {
   border-bottom: 1px solid var(--border-color);
   border-bottom-left-radius: 4px;
 }
+/* A text-only sub-item (no icon) gets the icon's indent. */
+.nav-subitem:not(:has(.nav-item-icon)) {
+  padding-left: 38px;
+}
+.app-sidebar.collapsed .nav-subitem:not(:has(.nav-item-icon)) {
+  display: none;
+}
+
 .app-sidebar.collapsed .nav-subitem {
   padding-left: 12px;
 }

@@ -32,7 +32,8 @@ import {
   Gauge,
   ScrollText,
   Zap,
-  ShieldCheck
+  ShieldCheck,
+  Layers3
 } from 'lucide-react';
 // The topology map (React Flow + dagre) and the resource pages are the bulk of
 // the bundle; loading them on demand keeps the first paint small.
@@ -54,6 +55,8 @@ const ClusterResources = lazy(() => import('./components/ClusterResources'));
 const ClusterMetrics = lazy(() => import('./components/ClusterMetrics'));
 const GpuUtilization = lazy(() => import('./components/GpuUtilization'));
 const NodeConfig = lazy(() => import('./components/NodeConfig'));
+const VmePage = lazy(() => import('./components/vme/VmePage'));
+import { VME_SUBPAGES, type VmeSub } from './components/vme/types';
 import CaptureButton from './components/CaptureButton';
 import SectionBoundary from './components/SectionBoundary';
 import { HEALTH_BADGE, podHealthOf, podStatusText, workloadHealthOf, ageOf } from './lib/health';
@@ -173,7 +176,7 @@ interface SystemStatus {
 
 export function App() {
   // Tabs & Config
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'logs' | 'metrics' | 'history' | 'gpu' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'logs' | 'metrics' | 'history' | 'gpu' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet' | 'vme'>('dashboard');
 //   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('trinetra_gemini_api_key') || '');
   const [apiKey] = useState<string>(() => localStorage.getItem('trinetra_gemini_api_key') || '');
   // ── Disabled: settings modal state ──
@@ -271,6 +274,7 @@ export function App() {
     try { localStorage.setItem('trinetra_dashboard_containers', dashContainers); } catch { /* storage unavailable */ }
   }, [dashContainers]);
   const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services' | 'resources' | 'nodeconfig'>('all');
+  const [vmeSub, setVmeSub] = useState<VmeSub>('overview');
   // Status filters on the Kubernetes page ('all' or an exact status word).
   const [podStatusFilter, setPodStatusFilter] = useState<string>('all');
   const [workloadStatusFilter, setWorkloadStatusFilter] = useState<string>('all');
@@ -1505,6 +1509,31 @@ export function App() {
             </button>
           </div>
 
+          {/* HPE VM Essentials: the virtualization layer under the cluster. Every
+              subpage is listed so it is visible without opening the page first. */}
+          <div className="nav-group">
+            <span className="nav-group-label">HPE VM Essentials</span>
+            <button
+              className={`nav-item ${activeTab === 'vme' && vmeSub === 'overview' ? 'active' : ''}`}
+              onClick={() => { setVmeSub('overview'); setActiveTab('vme'); }}
+              title="Hosts, VMs, datastores, networks, alarms and activity from the VME Manager, joined to Kubernetes"
+            >
+              <span className="nav-item-icon"><Layers3 size={18} /></span>
+              <span className="nav-item-text">VME</span>
+              <span className="nav-item-badge">Manager</span>
+            </button>
+            {VME_SUBPAGES.filter((p) => p.id !== 'overview').map((p) => (
+              <button
+                key={p.id}
+                className={`nav-item nav-subitem ${activeTab === 'vme' && vmeSub === p.id ? 'active' : ''}`}
+                onClick={() => { setVmeSub(p.id); setActiveTab('vme'); }}
+                title={p.hint}
+              >
+                <span className="nav-item-text">{p.label}</span>
+              </button>
+            ))}
+          </div>
+
           <div className="nav-group">
             <span className="nav-group-label">HPE Private Cloud AI</span>
             <button
@@ -1608,6 +1637,7 @@ export function App() {
                 {activeTab === 'metrics' && 'Observability — Host Telemetry Over Time'}
                 {activeTab === 'history' && 'Cluster Change History — What Changed, When, and Who'}
                 {activeTab === 'gpu' && 'GPU Utilization — Which Model Runs Where, and How Hard'}
+                {activeTab === 'vme' && `HPE VM Essentials — ${VME_SUBPAGES.find((p) => p.id === vmeSub)?.label || ''}`}
                 {activeTab === 'chat' && 'Trinetra Agentic DevOps Assistant'}
                 {activeTab === 'security' && 'Container Security & CVE Patching'}
                 {activeTab === 'agents' && 'Multi-Agent Swarm Visualizer'}
@@ -1993,6 +2023,13 @@ export function App() {
             <div className="tab-panel">
               {/* aiEnabled={false}: the model settings are commented out, so the AI health read is hidden too. */}
               <PcaiStackView k8sResources={k8sResources} status={status} llm={llmParams} aiEnabled={false} />
+            </div>
+          )}
+
+          {/* HPE VM ESSENTIALS */}
+          {activeTab === 'vme' && (
+            <div className="tab-panel">
+              <VmePage sub={vmeSub} onSub={setVmeSub} vmNames={vmList.map(v => v.name)} />
             </div>
           )}
 

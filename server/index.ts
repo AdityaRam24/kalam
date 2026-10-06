@@ -20,6 +20,7 @@ import { resourcesRouter } from './k8s/resources.js';
 import { topRouter } from './k8s/top.js';
 import { gpuRouter, startGpuPoller } from './k8s/gpu.js';
 import { nodeConfigRouter } from './k8s/nodeconfig.js';
+import { vmeRouter } from './vme/router.js';
 import { whyRouter } from './k8s/why.js';
 import { normalizeClusterItems, parseReplicaSetOwners } from './k8s/workloads.js';
 import { historyRouter } from './history/router.js';
@@ -119,6 +120,8 @@ app.use(topRouter);
 app.use(gpuRouter);
 // What /etc/kubernetes (and RKE2/k3s) says about each node: certs, flags, drift.
 app.use(nodeConfigRouter);
+// HPE VM Essentials: hosts, VMs, datastores, alarms from the VME Manager API (GET only).
+app.use(vmeRouter);
 // Why things are failing: causes, evidence, fixes, and each object's
 // non-negotiable references and label/annotation contracts.
 app.use(whyRouter);

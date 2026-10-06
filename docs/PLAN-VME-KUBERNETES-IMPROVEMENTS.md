@@ -1,6 +1,9 @@
 # Plan — VME Manager integration, /etc/kubernetes insights, next improvements
 
-Status (2026-10-07): §0, §2 and §3 are built. §1 (VME) is on hold, waiting for your input.
+Status (2026-10-07): §0, §2 and §3 are built. §1 (VME) is built on branch `vme-integration` as its own
+page (HPE VM Essentials, nine subpages incl. topology) — not yet wired into the existing pages (insight
+engine, Change History, main topology). SSH-side host checks (§1.3, virsh / ovs / multipath) and reaching a
+Manager only through a jump VM are not built yet.
 Where things live: §2 → Kubernetes → **Node Config**, `server/k8s/nodeconfig.ts`; §3.1–3.3 → GPU page,
 `server/k8s/dcgm.ts` + `gpuhistory.ts`; §3.6 fixed in `server/ssh.ts`; §3.7 lazy-loaded topology/resources;
 §3.8 notebook sections 9.6 / 9.7 and two new console tabs. The dashboard also gained a Containers selector

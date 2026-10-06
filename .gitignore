@@ -19,6 +19,9 @@ server/pcai/kb.json
 # VM SSH inventory (may contain host/user details)
 server/vms.json
 
+# VME Manager connections (API tokens / passwords)
+server/vme/vme.json
+
 # Captured cluster change history (snapshots + changelog, per source)
 server/history/data/
 server/metrics/data/

@@ -131,6 +131,18 @@ Which **model** runs on which GPU, and how hard it works.
 
 Code: `src/components/GpuUtilization.tsx`, `server/k8s/gpu.ts`, `server/k8s/dcgm.ts`, `server/k8s/gpuhistory.ts`. Set `TRINETRA_GPU_DCGM=off` to skip DCGM.
 
+### HPE VM Essentials (new — branch `vme-integration`)
+The virtualization layer under the cluster, read from the **VME Manager's REST API** (the Morpheus API, HPE OpenAPI spec). Sidebar group *HPE VM Essentials*: **VME** (overview) with every subpage listed under it.
+- **Overview** — clusters, hosts up, VMs running (how many are Kubernetes nodes, GPUs passed through), host CPU / memory, datastore use, and **What needs attention**, joined across Manager, hosts, VMs, datastores and Kubernetes. "What was read" shows which API endpoints answered and why the others did not.
+- **Topology** — Manager → clusters → hosts → VMs → **the Kubernetes nodes those VMs are**, with datastores on their cluster. Colours from the same findings as the lists; filters (cluster, Kubernetes VMs only, problems only, datastores); click a card for its details and findings, with its whole chain highlighted. Every list has a **map** button that opens the map focused on that object.
+- **Hosts**, **Virtual Machines** (filter: Kubernetes nodes / with GPUs / powered off), **Storage** (datastores), **Networks** (with the VMs in each CIDR), **Alarms & Activity** (open alarms; last 24 h of changes, marking the ones that touched a Kubernetes node VM), **Capacity** (per cluster: memory in use vs allotted, vCPU:core ratio, biggest VM that still fits, and whether it survives losing its busiest host). Search and CSV on every table.
+- **Connections** — add a Manager by URL with an **API token** (recommended, read-only role) or username + password (OAuth password grant), optional *skip TLS verification* for a self-signed Manager, and which Kubernetes source to join with (this machine, or an inventory VM over SSH). Secrets live in `server/vme/vme.json` (git-ignored, mode 600; `TRINETRA_VME_PATH` to move it) and are never sent to the browser.
+- **Findings** — host down / powered off, host agent silent > 15 min, host memory / CPU / local disk ≥ 90 %, memory overcommit > 1.5×, vCPU:core > 4:1, **Kubernetes node whose VM is powered off**, **Kubernetes node on a saturated host**, node NotReady while its VM is on, **two control-plane VMs on one host** (etcd quorum risk), datastore ≥ 85 % / offline, open alarms, **changes in the last hour to a Kubernetes node VM**, Kubernetes nodes with no VM, and clusters that **cannot absorb losing one host** (N+1).
+- **Demo estate** in the connection picker: sample data shaped like real API responses, run through the same code, always labelled — so the page can be seen before a Manager is connected.
+- **Read-only**: only GET on a fixed allow-list (`/api/whoami`, `servers`, `instances`, `clusters`, `datastores`, `networks`, `health`, `health/alarms`, `activity`); the only POST is the login itself. Each endpoint degrades on its own (a Manager without `/api/datastores` still shows hosts and VMs). 30 s cache per connection; concurrent reads share one fetch.
+
+Code: `server/vme/` (`client.ts`, `model.ts`, `store.ts`, `router.ts`, `demo.ts`), `src/components/vme/`. Tests: `server/__tests__/vme.test.ts` (including a fake Manager over HTTP).
+
 ## App-wide behaviour
 - **Refresh loop** — the cluster is re-read every 10 s only while a page that shows it is open (Dashboard, Containers, Kubernetes, PCAI Stack, Observability), never while the browser tab is hidden, and never twice at once. A response that arrives after a newer read (or after you switched source) is discarded.
 - **Last good read** — if one refresh fails (SSH hiccup, slow `kubectl`), the screen keeps the previous data with a banner "Showing the last good read from HH:MM" instead of going blank. In "All hosts", each host falls back to its own last good read.
@@ -148,6 +160,8 @@ Agent Chat, Agent Teamwork, PCAI Assistant, Image Hardener, the agent/model **se
 | `GET /api/k8s/extra[?vm=]` | Every other resource kind, with status and health; `kinds` says which APIs exist. | `server/k8s/resources.ts` |
 | `GET /api/k8s/top[?vm=]` | Live node and pod CPU/memory (`kubectl top`); reports *why* when unavailable. | `server/k8s/top.ts` |
 | `GET /api/gpu/overview[?vm=&probe=0]` | GPU nodes, GPU workloads with model detection, live DCGM / nvidia-smi readings, 6 h history, findings. | `server/k8s/gpu.ts` |
+| `GET /api/vme/connections`, `POST /api/vme/connections`, `DELETE /api/vme/connections/:name`, `POST /api/vme/test` | VME Manager connections (secrets write-only) and a connectivity check (`/api/whoami`). | `server/vme/router.ts` |
+| `GET /api/vme/snapshot?name=&k8s=&fresh=1` / `?demo=1` | Hosts, VMs, datastores, networks, alarms, activity, joined to Kubernetes; findings, capacity, topology. | `server/vme/router.ts` |
 | `GET /api/nodeconfig[?vm=a,b&fresh=1]` | /etc/kubernetes per node (certs, flags, kubelet, etcd) with checks, plus drift across control-plane nodes. 5-minute cache. | `server/k8s/nodeconfig.ts` |
 | `POST /api/gpu/raw` | One fixed nvidia-smi view inside one pod. | `server/k8s/gpu.ts` |
 | `GET /api/history/facets` | Namespaces, kinds, writers, top objects and activity histogram for a window. | `server/history/router.ts` |
