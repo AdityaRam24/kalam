@@ -34,6 +34,8 @@ export const EXT_FIELDS = [
 ] as const;
 export const APP_FIELDS = ['gpu_uuid', 'pid', 'process_name', 'used_memory'] as const;
 
+export type GpuSource = 'dcgm' | 'nvidia-smi' | 'node-smi';
+
 export interface GpuReading {
   index: number;
   uuid: string;
@@ -62,8 +64,11 @@ export interface GpuReading {
   memTempC?: number | null;
   encoderSessions?: number | null;
   processes: Array<{ pid: string; name: string; usedMiB: number | null }>;
-  /** Where the reading came from: the DCGM exporter, or nvidia-smi exec'd in the pod. */
-  source?: 'dcgm' | 'nvidia-smi';
+  /**
+   * Where the reading came from: the DCGM exporter, nvidia-smi exec'd in the
+   * pod, or nvidia-smi run on the node and matched to the pod's devices.
+   */
+  source?: GpuSource;
 }
 
 const num = (v: string | undefined): number | null => {
@@ -131,7 +136,7 @@ export function parseGpuReadings(core: string, ext: string, apps: string): GpuRe
 // Which model is this pod serving?
 // ---------------------------------------------------------------------------
 
-const MODEL_FLAGS = ['--model', '--model-name', '--served-model-name', '--model_name', '--model-id', '--model_id', '--model-path', '--model_path', '--model-repository', '--model-store'];
+const MODEL_FLAGS = ['--model', '--model-name', '--served-model-name', '--served_model_name', '--model_name', '--model-id', '--model_id', '--model-path', '--model_path', '--model-dir', '--model_dir', '--model-repository', '--model-store'];
 const MODEL_ENVS = ['SERVED_MODEL_NAME', 'NIM_SERVED_MODEL_NAME', 'NIM_MODEL_NAME', 'MODEL_NAME', 'MODEL_ID', 'HF_MODEL_ID', 'MODEL', 'MODEL_PATH', 'STORAGE_URI'];
 
 export interface ModelInfo {
@@ -153,6 +158,22 @@ export function servingStack(image: string): string {
   if (/torchserve/.test(i)) return 'TorchServe';
   if (/jupyter|notebook/.test(i)) return 'Notebook';
   return 'Container';
+}
+
+/**
+ * Last resort for naming a model: the workload that owns the pod. A fresh
+ * deployment whose model comes from a ConfigMap or a baked-in default carries
+ * no flag or env to read, but "llama-70b" from its Deployment beats
+ * "Unidentified model".
+ */
+export function workloadName(pod: any): string | undefined {
+  const labels = pod?.metadata?.labels || {};
+  const named = labels['app.kubernetes.io/instance'] || labels['app.kubernetes.io/name'] || labels.app;
+  if (named) return named;
+  const ref = (pod?.metadata?.ownerReferences || [])[0];
+  if (!ref?.name) return undefined;
+  // ReplicaSet "llama-predictor-5d8f9c7b4" → Deployment "llama-predictor".
+  return ref.kind === 'ReplicaSet' ? ref.name.replace(/-[a-z0-9]{6,10}$/, '') : ref.name;
 }
 
 export function detectModel(pod: any, container: any, isvcs: Map<string, any>): ModelInfo {
@@ -189,8 +210,9 @@ export function detectModel(pod: any, container: any, isvcs: Map<string, any>): 
   const pick = (re: RegExp) => evidence.find((e) => re.test(e.source))?.value;
   const model = pick(/served|NIM_MODEL_NAME|MODEL_NAME|--model-name|--model_name/)
     || pick(/^--model$|serve|MODEL_ID|HF_MODEL_ID|--model-id|--model_id|^env MODEL$/)
-    || pick(/path|storageUri|STORAGE_URI|repository|store/)
-    || isvcName;
+    || pick(/path|dir|storageUri|STORAGE_URI|repository|store/)
+    || isvcName
+    || workloadName(pod);
 
   return { model, server: isvcName && servingStack(container?.image) === 'Container' ? 'KServe' : servingStack(container?.image), evidence };
 }
@@ -199,7 +221,11 @@ export function detectModel(pod: any, container: any, isvcs: Map<string, any>): 
 // Inventory
 // ---------------------------------------------------------------------------
 
-const GPU_KEY = /^(nvidia\.com\/(gpu|mig-.+)|amd\.com\/gpu|gpu\.intel\.com\/.+|habana\.ai\/gaudi)$/;
+// nvidia.com/gpu.shared is what time-slicing advertises with renameByDefault,
+// nvidia.com/gpu-<x> what custom renames produce; a pod asking for either holds
+// a GPU just the same. (HAMi's nvidia.com/gpumem / gpucores are amounts, not
+// devices, so they stay out.)
+const GPU_KEY = /^(nvidia\.com\/(gpu(\.shared|-[a-z0-9.-]+)?|mig-.+)|amd\.com\/gpu|gpu\.intel\.com\/.+|habana\.ai\/gaudi)$/;
 
 export function gpuCount(block: any): number {
   let n = 0;
@@ -225,6 +251,12 @@ export interface GpuWorkload {
   startedAt?: string;
   /** Being deleted: still holds its GPUs, but is on its way out. */
   terminating?: boolean;
+  /**
+   * How it was found to hold a GPU: a resource request (the usual), an
+   * NVIDIA_VISIBLE_DEVICES env in its spec, or only the DCGM exporter's
+   * device-to-pod mapping. Only requests count against node allocation.
+   */
+  via?: 'request' | 'env' | 'dcgm';
   model: ModelInfo;
 }
 
@@ -246,29 +278,79 @@ export function probeTargets(workloads: GpuWorkload[], max: number): GpuWorkload
   return workloads.filter((w) => w.phase === 'Running' && !w.terminating).sort(byNewest).slice(0, Math.max(0, max));
 }
 
+// The GPU Operator's own pods see every GPU through NVIDIA_VISIBLE_DEVICES=all;
+// they are plumbing, not workloads.
+const GPU_PLUMBING = /gpu-operator|k8s-device-plugin|dcgm|container-toolkit|nvidia\/driver|k8s-driver-manager|gpu-feature-discovery|mig-manager|validator|vgpu-device-manager|kubevirt-gpu-device-plugin|node-feature-discovery/i;
+
+/** The spec's NVIDIA_VISIBLE_DEVICES, unless it hides the GPUs (void/none). */
+export function specVisibleDevices(c: any): string | undefined {
+  const v = (c?.env || []).find((e: any) => e?.name === 'NVIDIA_VISIBLE_DEVICES')?.value;
+  const t = typeof v === 'string' ? v.trim() : '';
+  return t && !/^(void|none)$/i.test(t) ? t : undefined;
+}
+
+function toWorkload(p: any, c: any, gpus: number, via: GpuWorkload['via'], isvcs: Map<string, any>): GpuWorkload {
+  const ref = (p?.metadata?.ownerReferences || [])[0];
+  return {
+    namespace: p?.metadata?.namespace || 'default',
+    pod: p?.metadata?.name,
+    container: c?.name,
+    node: p?.spec?.nodeName || '—',
+    phase: p?.status?.phase || 'Unknown',
+    gpus,
+    image: c?.image || '',
+    owner: ref ? `${ref.kind}/${ref.name}` : undefined,
+    startedAt: p?.status?.startTime || p?.metadata?.creationTimestamp || undefined,
+    terminating: !!p?.metadata?.deletionTimestamp,
+    via,
+    model: detectModel(p, c, isvcs),
+  };
+}
+
 export function gpuWorkloads(pods: any[], isvcs: Map<string, any>): GpuWorkload[] {
   const out: GpuWorkload[] = [];
   for (const p of pods || []) {
-    for (const c of p?.spec?.containers || []) {
+    const containers: any[] = p?.spec?.containers || [];
+    let found = false;
+    for (const c of containers) {
       const gpus = Math.max(gpuCount(c?.resources?.limits), gpuCount(c?.resources?.requests));
-      if (gpus <= 0) continue;
-      const ref = (p?.metadata?.ownerReferences || [])[0];
-      out.push({
-        namespace: p?.metadata?.namespace || 'default',
-        pod: p?.metadata?.name,
-        container: c.name,
-        node: p?.spec?.nodeName || '—',
-        phase: p?.status?.phase || 'Unknown',
-        gpus,
-        image: c.image || '',
-        owner: ref ? `${ref.kind}/${ref.name}` : undefined,
-        startedAt: p?.status?.startTime || p?.metadata?.creationTimestamp || undefined,
-        terminating: !!p?.metadata?.deletionTimestamp,
-        model: detectModel(p, c, isvcs),
-      });
+      if (gpus > 0) { out.push(toWorkload(p, c, gpus, 'request', isvcs)); found = true; }
+    }
+    // Pod-level resources (k8s 1.32+) name no container: the first one serves.
+    const podLevel = Math.max(gpuCount(p?.spec?.resources?.limits), gpuCount(p?.spec?.resources?.requests));
+    if (!found && podLevel > 0 && containers[0]) { out.push(toWorkload(p, containers[0], podLevel, 'request', isvcs)); found = true; }
+    if (found) continue;
+    for (const c of containers) {
+      const devs = specVisibleDevices(c);
+      if (!devs || GPU_PLUMBING.test(`${c?.image || ''} ${p?.metadata?.name || ''}`)) continue;
+      out.push(toWorkload(p, c, devs.toLowerCase() === 'all' ? 1 : devs.split(',').filter(Boolean).length, 'env', isvcs));
     }
   }
   return out.sort(byNewest);
+}
+
+/**
+ * Pods the DCGM exporter says hold a GPU but that no request or env gave away
+ * (DRA claims, a device plugin with an unfamiliar resource name, …). The
+ * kubelet's device mapping is the ground truth, so trust it.
+ */
+export function workloadsFromDcgm(pods: any[], gpus: DcgmGpu[], known: GpuWorkload[], isvcs: Map<string, any>): GpuWorkload[] {
+  const have = new Set(known.map((w) => `${w.namespace}/${w.pod}`));
+  const byName = new Map<string, any>((pods || []).map((p) => [`${p?.metadata?.namespace}/${p?.metadata?.name}`, p]));
+  const held = new Map<string, { p: any; c: any; n: number }>();
+  for (const g of gpus) {
+    if (!g.pod) continue;
+    const k = `${g.namespace}/${g.pod}`;
+    const p = byName.get(k);
+    if (have.has(k) || !p) continue;
+    const containers: any[] = p?.spec?.containers || [];
+    const c = containers.find((x) => x?.name === g.container) || containers[0];
+    if (!c) continue;
+    const h = held.get(`${k}/${c.name}`) || { p, c, n: 0 };
+    h.n++;
+    held.set(`${k}/${c.name}`, h);
+  }
+  return [...held.values()].map(({ p, c, n }) => toWorkload(p, c, n, 'dcgm', isvcs));
 }
 
 export function gpuNodes(nodes: any[], workloads: GpuWorkload[]) {
@@ -278,7 +360,7 @@ export function gpuNodes(nodes: any[], workloads: GpuWorkload[]) {
       const name = n?.metadata?.name;
       const capacity = gpuCount(n?.status?.capacity);
       const allocatable = gpuCount(n?.status?.allocatable);
-      const allocated = workloads.filter((w) => w.node === name && w.phase === 'Running').reduce((a, w) => a + w.gpus, 0);
+      const allocated = workloads.filter((w) => w.node === name && w.phase === 'Running' && (w.via ?? 'request') === 'request').reduce((a, w) => a + w.gpus, 0);
       return {
         name,
         capacity,
@@ -295,13 +377,70 @@ export function gpuNodes(nodes: any[], workloads: GpuWorkload[]) {
 }
 
 /** nvidia-smi steps for one container, tagged by its index in the probe list. */
-export function smiSteps(i: number, w: Pick<GpuWorkload, 'namespace' | 'pod' | 'container'>): Step[] {
+export function smiSteps(i: number, w: Pick<GpuWorkload, 'namespace' | 'pod' | 'container'>, prefix = ''): Step[] {
   const base = ['exec', '-n', w.namespace, w.pod, '-c', w.container, '--', 'nvidia-smi'];
   return [
-    { tag: `Q${i}`, args: [...base, `--query-gpu=${CORE_FIELDS.join(',')}`, '--format=csv,noheader,nounits'], optional: true },
-    { tag: `X${i}`, args: [...base, `--query-gpu=${EXT_FIELDS.join(',')}`, '--format=csv,noheader,nounits'], optional: true },
-    { tag: `A${i}`, args: [...base, `--query-compute-apps=${APP_FIELDS.join(',')}`, '--format=csv,noheader,nounits'], optional: true },
+    { tag: `${prefix}Q${i}`, args: [...base, `--query-gpu=${CORE_FIELDS.join(',')}`, '--format=csv,noheader,nounits'], optional: true },
+    { tag: `${prefix}X${i}`, args: [...base, `--query-gpu=${EXT_FIELDS.join(',')}`, '--format=csv,noheader,nounits'], optional: true },
+    { tag: `${prefix}A${i}`, args: [...base, `--query-compute-apps=${APP_FIELDS.join(',')}`, '--format=csv,noheader,nounits'], optional: true },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Node fallback. Model images (NIM, many vLLM builds) often ship without
+// nvidia-smi, or set NVIDIA_DRIVER_CAPABILITIES=compute so it is not mounted,
+// and exec in the pod reads nothing. The GPU Operator's own pods on the same
+// node do have it: read the node there, keep only the devices the model's
+// container can see.
+// ---------------------------------------------------------------------------
+
+const NODE_SMI_RANK: Array<[RegExp, RegExp]> = [
+  [/nvidia-driver/, /driver/],
+  [/nvidia-device-plugin/, /device-plugin/],
+  [/nvidia-container-toolkit/, /toolkit/],
+  [/dcgm-exporter/, /exporter/],
+  [/nvidia-operator-validator|cuda-validator/, /validator/],
+];
+
+export interface PodRef { namespace: string; pod: string; container: string }
+
+/** Per node, up to `max` GPU Operator pods to try nvidia-smi in, best first. */
+export function nodeSmiHosts(pods: any[], max = 2): Map<string, PodRef[]> {
+  const ranked: Array<PodRef & { rank: number; node: string }> = [];
+  for (const p of pods || []) {
+    if (p?.status?.phase !== 'Running' || p?.metadata?.deletionTimestamp || !p?.spec?.nodeName) continue;
+    const id = `${p?.metadata?.labels?.app || ''} ${p?.metadata?.name || ''}`;
+    const rank = NODE_SMI_RANK.findIndex(([re]) => re.test(id));
+    if (rank < 0) continue;
+    const cs: any[] = p?.spec?.containers || [];
+    const c = cs.find((x) => NODE_SMI_RANK[rank][1].test(x?.name || '')) || cs[0];
+    if (c) ranked.push({ rank, node: p.spec.nodeName, namespace: p.metadata.namespace, pod: p.metadata.name, container: c.name });
+  }
+  const out = new Map<string, PodRef[]>();
+  for (const { rank: _r, node, ...ref } of ranked.sort((a, b) => a.rank - b.rank)) {
+    const list = out.get(node) || [];
+    if (list.length < max) list.push(ref);
+    out.set(node, list);
+  }
+  return out;
+}
+
+/**
+ * Which of the node's GPUs a container can see: from its runtime environment
+ * (`env` output; the device plugin puts the UUIDs in NVIDIA_VISIBLE_DEVICES)
+ * or, failing that, its /dev listing (nvidia0, nvidia1, …).
+ */
+export function matchVisibleGpus(nodeGpus: GpuReading[], envOut: string, devOut: string): GpuReading[] {
+  const m = (envOut || '').match(/^NVIDIA_VISIBLE_DEVICES=(.*)$/m);
+  const v = m ? m[1].trim() : '';
+  if (v && !/^(void|none)$/i.test(v)) {
+    if (v.toLowerCase() === 'all') return nodeGpus;
+    const ids = v.split(',').map((x) => x.trim()).filter(Boolean);
+    const hit = nodeGpus.filter((g) => ids.includes(g.uuid) || ids.includes(String(g.index)));
+    if (hit.length) return hit;
+  }
+  const minors = new Set([...(devOut || '').matchAll(/(?:^|[\s/])nvidia(\d+)\b/g)].map((x) => Number(x[1])));
+  return minors.size ? nodeGpus.filter((g) => minors.has(g.index)) : [];
 }
 
 /** How many GPU containers are probed live per request — keeps one call bounded. */
@@ -339,6 +478,8 @@ const meanOf = (xs: Array<number | null | undefined>) => {
 
 let historyWrites = 0;
 
+const NO_SMI = 'nvidia-smi gave no reading in this container (not installed, or no NVIDIA runtime utilities mounted).';
+
 async function collectGpuOverview(vm: string | undefined, probe: boolean) {
   const inv = await runSteps(
     [
@@ -358,8 +499,7 @@ async function collectGpuOverview(vm: string | undefined, probe: boolean) {
   for (const i of parseJson(inv.out.ISVC)?.items || []) isvcs.set(`${i?.metadata?.namespace}/${i?.metadata?.name}`, i);
 
   const workloads = gpuWorkloads(pods, isvcs);
-  const nodes = gpuNodes(parseJson(inv.out.NODES)?.items || [], workloads);
-  const readings: Record<string, { gpus: GpuReading[]; error?: string; source?: 'dcgm' | 'nvidia-smi' }> = {};
+  const readings: Record<string, { gpus: GpuReading[]; error?: string; source?: GpuSource }> = {};
 
   // 1. DCGM exporter: one GET per GPU node through the pod proxy, no exec.
   let dcgm: { exporters: number; read: number; gpus: DcgmGpu[]; unassigned: Record<string, number>; error?: string } | undefined;
@@ -372,6 +512,8 @@ async function collectGpuOverview(vm: string | undefined, probe: boolean) {
       const r = await runSteps(steps, vm, 60_000, 1024 * 1024 * 32, { parallel: REMOTE_PARALLEL, stepTimeoutSec: EXEC_TIMEOUT_SEC });
       const gpus = exporters.flatMap((e, i) => parseDcgm(r.out[`D${i}`] || '', e.node));
       const read = exporters.filter((_, i) => (r.out[`D${i}`] || '').includes('DCGM_FI_')).length;
+      workloads.push(...workloadsFromDcgm(pods, gpus, workloads, isvcs));
+      workloads.sort(byNewest);
       const { byKey, unassigned } = assignDcgm(workloads, gpus);
       for (const [k, g] of Object.entries(byKey)) readings[k] = { gpus: g, source: 'dcgm' };
       dcgm = {
@@ -393,7 +535,7 @@ async function collectGpuOverview(vm: string | undefined, probe: boolean) {
         ? { gpus, source: 'nvidia-smi' }
         : missing?.has(`Q${i}`)
           ? { gpus: [], error: 'The probe ran out of time before reaching this pod — refresh, or raise TRINETRA_GPU_PARALLEL.' }
-          : { gpus: [], error: 'nvidia-smi gave no reading in this container (not installed, or no NVIDIA runtime utilities mounted).' };
+          : { gpus: [], error: NO_SMI };
     };
     if (vm) {
       // One SSH call, execs run in parallel batches on the remote host, each
@@ -418,6 +560,45 @@ async function collectGpuOverview(vm: string | undefined, probe: boolean) {
       }
     }
   }
+
+  // 2b. The pod's image has no nvidia-smi: read its node from a GPU Operator
+  // pod there and keep the devices this container can see.
+  const blind = targets.filter((w) => readings[wkey(w)]?.error === NO_SMI);
+  const hosts = blind.length ? nodeSmiHosts(pods) : new Map<string, PodRef[]>();
+  const helpers = [...new Set(blind.map((w) => w.node))].flatMap((n) => (hosts.get(n) || []).map((h) => ({ node: n, ...h })));
+  if (helpers.length) {
+    const steps: Step[] = [
+      ...blind.flatMap((w, i) => [
+        { tag: `E${i}`, args: ['exec', '-n', w.namespace, w.pod, '-c', w.container, '--', 'env'], optional: true },
+        { tag: `V${i}`, args: ['exec', '-n', w.namespace, w.pod, '-c', w.container, '--', 'ls', '/dev'], optional: true },
+      ]),
+      ...helpers.flatMap((h, j) => smiSteps(j, h, 'N')),
+    ];
+    const batches = Math.ceil(steps.length / REMOTE_PARALLEL);
+    const r = await runSteps(steps, vm, Math.min(240_000, 20_000 + batches * (EXEC_TIMEOUT_SEC + 2) * 1000), 1024 * 1024 * 16,
+      { parallel: REMOTE_PARALLEL, stepTimeoutSec: EXEC_TIMEOUT_SEC });
+    const byNode = new Map<string, GpuReading[]>();
+    helpers.forEach((h, j) => {
+      if (byNode.get(h.node)?.length) return;
+      const g = parseGpuReadings(r.out[`NQ${j}`], r.out[`NX${j}`], r.out[`NA${j}`]);
+      if (g.length) byNode.set(h.node, g);
+    });
+    blind.forEach((w, i) => {
+      const node = byNode.get(w.node);
+      if (!node) return;
+      const mine = matchVisibleGpus(node, r.out[`E${i}`], r.out[`V${i}`]);
+      readings[wkey(w)] = mine.length
+        ? { gpus: mine.map((g) => ({ ...g, source: 'node-smi' as const })), source: 'node-smi' }
+        : { gpus: [], error: `${NO_SMI} Node ${w.node} was readable, but which of its GPUs this container holds could not be told (no NVIDIA_VISIBLE_DEVICES or /dev/nvidiaN inside it).` };
+    });
+  }
+
+  // A pod found by env or DCGM alone has as many GPUs as were actually read.
+  for (const w of workloads) {
+    const n = readings[wkey(w)]?.gpus.length;
+    if (w.via !== 'request' && n) w.gpus = n;
+  }
+  const nodes = gpuNodes(parseJson(inv.out.NODES)?.items || [], workloads);
 
   // 3. History + findings.
   const now = Date.now();
