@@ -127,3 +127,10 @@ describe('seriesByWorkload', () => {
     expect(s.a[0].mem).toBeNull();
   });
 });
+
+describe('parseDcgm relabelled pod labels', () => {
+  it('reads exported_pod / exported_namespace / exported_container', () => {
+    const [g] = parseDcgm('DCGM_FI_DEV_GPU_UTIL{gpu="0",UUID="GPU-z",exported_pod="new-0",exported_namespace="m",exported_container="c"} 5\n', 'n1');
+    expect([g.pod, g.namespace, g.container, g.utilPct]).toEqual(['new-0', 'm', 'c', 5]);
+  });
+});

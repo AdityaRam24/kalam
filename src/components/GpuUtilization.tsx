@@ -20,7 +20,7 @@ interface GpuReading {
   maxSmClockMHz: number | null; fanPct: number | null; persistence: string; computeMode: string; pcie: string;
   mig?: string; eccUncorrected?: number | null; throttle?: string[]; memTempC?: number | null; encoderSessions?: number | null;
   processes: Array<{ pid: string; name: string; usedMiB: number | null }>;
-  source?: 'dcgm' | 'nvidia-smi'; xid?: number | null; engineActivePct?: number | null;
+  source?: 'dcgm' | 'nvidia-smi' | 'node-smi'; xid?: number | null; engineActivePct?: number | null;
 }
 interface Finding { id: string; severity: 'critical' | 'warning' | 'info'; title: string; detail: string; subject?: string; host?: string }
 interface HistPoint { t: number; util: number | null; mem: number | null }
@@ -416,7 +416,7 @@ export const GpuUtilization: React.FC<Props> = ({ source, vmNames }) => {
                         <span className={`badge ${w.terminating ? 'warning' : w.phase === 'Running' ? 'running' : w.phase === 'Pending' ? 'warning' : isFinished(w) ? 'neutral' : 'error'}`} style={{ textTransform: 'none' }}>{w.terminating ? 'Terminating' : w.phase}</span>
                         {fresh.has(keyOf(w)) && <span className="badge running" style={{ textTransform: 'none' }}>new</span>}
                         {w.startedAt && <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title={w.startedAt}>started {ago(w.startedAt)}</span>}
-                        {r?.source && <span className="badge neutral" style={{ textTransform: 'none' }} title={r.source === 'dcgm' ? 'Read from the NVIDIA DCGM exporter on the node' : 'Read by running nvidia-smi inside this pod'}>{r.source === 'dcgm' ? 'DCGM' : 'nvidia-smi'}</span>}
+                        {r?.source && <span className="badge neutral" style={{ textTransform: 'none' }} title={r.source === 'dcgm' ? 'Read from the NVIDIA DCGM exporter on the node' : r.source === 'node-smi' ? "This image has no nvidia-smi: read on the node from a GPU Operator pod, keeping only the GPUs this container can see" : 'Read by running nvidia-smi inside this pod'}>{r.source === 'dcgm' ? 'DCGM' : r.source === 'node-smi' ? 'nvidia-smi (node)' : 'nvidia-smi'}</span>}
                         <span className="badge neutral" style={{ textTransform: 'none' }}>{w.gpus} GPU{w.gpus === 1 ? '' : 's'} requested</span>
                       </div>
                       <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6, fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>

@@ -97,7 +97,13 @@ export function parseDcgm(text: string, node: string): DcgmGpu[] {
       byKey.set(key, g);
     }
     // The pod mapping can be on any series; take it from the first that has it.
-    if (l.pod && !g.pod) { g.pod = l.pod; g.namespace = l.namespace; g.container = l.container; }
+    // Exporters behind a relabelling scrape config carry it as exported_*.
+    const pod = l.pod || l.exported_pod;
+    if (pod && !g.pod) {
+      g.pod = pod;
+      g.namespace = l.namespace || l.exported_namespace;
+      g.container = l.container || l.exported_container;
+    }
     // Profiling is the honest "how busy": GPU_UTIL only means "a kernel was
     // running", and reads 100% for one tiny kernel in a loop.
     if (field === 'engineActivePct') g.engineActivePct = s.value * 100;
