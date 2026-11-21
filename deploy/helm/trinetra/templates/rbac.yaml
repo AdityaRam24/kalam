@@ -8,7 +8,7 @@ metadata:
   name: {{ include "trinetra.rbacName" . }}
   labels: {{- include "trinetra.labels" . | nindent 4 }}
   {{- if not .Values.rbac.clusterWide }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   {{- end }}
 rules:
   # Read-only: everything the dashboard, topology map, inspect drawer and
@@ -105,7 +105,7 @@ metadata:
   name: {{ include "trinetra.rbacName" . }}
   labels: {{- include "trinetra.labels" . | nindent 4 }}
   {{- if not .Values.rbac.clusterWide }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -114,5 +114,5 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "trinetra.serviceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ .Release.Namespace | quote }}
 {{- end }}
