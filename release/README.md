@@ -1,11 +1,11 @@
 # Ready-built Trinetra files
 
-## `trinetra-0.1.0-pcai-import.tgz`: upload this to PCAI
+## `trinetra-0.1.1-pcai-import.tgz`: upload this to PCAI
 
 This is the Helm chart for **PCAI → Tools & Frameworks → Import Framework**. It is about 14 KB. The image it runs, `ghcr.io/adityaram24/trinetra:0.1.0` (pinned by digest to the image in the bundle below), is on GitHub Container Registry, so PCAI needs no registry of its own. It only needs internet access to `ghcr.io`.
 
 1. `git pull`
-2. In PCAI → Import Framework, upload `release/trinetra-0.1.0-pcai-import.tgz`. Set Release Name `trinetra` (lower case), use any namespace, and tick **Debug**.
+2. In PCAI → Import Framework, upload `release/trinetra-0.1.1-pcai-import.tgz`. Set Release Name `trinetra` (lower case), use any namespace, and tick **Debug**.
 3. Keep the default values. PCAI fills in `${DOMAIN_NAME}`, and Trinetra opens at `https://trinetra.<your PCAI domain>` behind PCAI's login.
 
 To keep Trinetra's data (inventory, knowledge base, history) across restarts, set `persistence.enabled: true` in the wizard's values box. This needs a default StorageClass, which PCAI has.
