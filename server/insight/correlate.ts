@@ -32,8 +32,9 @@ export type Concern =
 export type Severity = 'critical' | 'warning' | 'info';
 
 export interface Evidence {
-  /** Which of Trinetra's eyes saw this. `config` = the node's Kubernetes files. */
-  kind: 'log' | 'health' | 'metric' | 'graph' | 'config';
+  /** Which of Trinetra's eyes saw this. `config` = the node's Kubernetes files,
+   *  `hardware` = the host's hardware inventory (server/hardware/inventory.ts). */
+  kind: 'log' | 'health' | 'metric' | 'graph' | 'config' | 'hardware';
   severity: Severity;
   summary: string;
   detail?: string;
@@ -140,8 +141,19 @@ export interface CorrelateInput {
   graph?: Array<{ title: string; detail?: string; casualties?: number; severity?: Severity }>;
   /** Checks from the node's /etc/kubernetes (server/k8s/nodeconfig.ts). */
   config?: Array<{ status: string; area: string; title: string; detail?: string; evidence?: string; hint?: string }>;
+  /** Checks from the host's hardware inventory (server/hardware/inventory.ts). */
+  hardware?: Array<{ status: string; area: string; title: string; detail?: string; evidence?: string; hint?: string }>;
   /** A host that did not answer at all. */
   unreachable?: string;
+}
+
+/** Which concern a hardware check belongs to. */
+export function hardwareConcern(area: string): Concern {
+  switch (area) {
+    case 'storage': return 'storage';
+    case 'network': return 'network';
+    default: return 'hardware'; // memory (ECC), cpu, virtualization, firmware
+  }
 }
 
 /** Which concern a node-config check belongs to. */
@@ -250,6 +262,19 @@ export function correlate(input: CorrelateInput): Issue[] {
     const b = bucket(configConcern(c.area));
     b.evidence.push({
       kind: 'config',
+      severity: c.status,
+      summary: c.title,
+      detail: [c.detail, c.evidence].filter(Boolean).join(' — '),
+    });
+    if (c.hint) b.checks.add(c.hint);
+  }
+
+  // ── Hardware inventory ───────────────────────────────────────────────────
+  for (const c of input.hardware || []) {
+    if (c.status !== 'critical' && c.status !== 'warning') continue;
+    const b = bucket(hardwareConcern(c.area));
+    b.evidence.push({
+      kind: 'hardware',
       severity: c.status,
       summary: c.title,
       detail: [c.detail, c.evidence].filter(Boolean).join(' — '),

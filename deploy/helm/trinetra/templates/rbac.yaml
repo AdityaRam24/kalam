@@ -5,7 +5,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: {{ $kind }}
 metadata:
-  name: {{ include "trinetra.fullname" . }}
+  name: {{ include "trinetra.rbacName" . }}
   labels: {{- include "trinetra.labels" . | nindent 4 }}
   {{- if not .Values.rbac.clusterWide }}
   namespace: {{ .Release.Namespace }}
@@ -102,7 +102,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: {{ $bindKind }}
 metadata:
-  name: {{ include "trinetra.fullname" . }}
+  name: {{ include "trinetra.rbacName" . }}
   labels: {{- include "trinetra.labels" . | nindent 4 }}
   {{- if not .Values.rbac.clusterWide }}
   namespace: {{ .Release.Namespace }}
@@ -110,7 +110,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: {{ $kind }}
-  name: {{ include "trinetra.fullname" . }}
+  name: {{ include "trinetra.rbacName" . }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "trinetra.serviceAccountName" . }}

@@ -1,6 +1,13 @@
 # Plan — VME Manager integration, /etc/kubernetes insights, next improvements
 
 Status (2026-10-07): §0, §2 and §3 are built. §1 (VME) is on hold, waiting for your input.
+2026-11-20: VME migration step 1 built — **Hardware** page (sidebar under K8s Nodes), `server/hardware/inventory.ts`:
+CPU/sockets/flags, DIMMs + ECC, NICs/bonds, disks/SMART, multipath/FC/iSCSI, PCI/GPUs, BIOS/iLO, KVM/IOMMU readiness, drift between hosts.
+2026-11-20: step 2 built — **VME Readiness** (sidebar under K8s Nodes): per-VM virtio/initramfs, fstab and root= device names, NIC-name and MAC pins,
+BIOS/UEFI + Secure Boot, VMware Tools, qemu-guest-agent, time sync, passthrough, data to copy; verdict + fix commands (`assessReadiness`).
+2026-11-20: step 5 built — **VME Capacity** (sidebar under K8s Nodes): fit with N+1, overcommit, right-sizing from observed p95,
+planned servers and typed-in VM groups, servers + socket licences needed, placement sketch (`planCapacity`).
+Next: §1 VME Manager API and iLO Redfish (both need the answers below). Windows VMs / snapshots / RDMs need vCenter or the Manager.
 Where things live: §2 → Kubernetes → **Node Config**, `server/k8s/nodeconfig.ts`; §3.1–3.3 → GPU page,
 `server/k8s/dcgm.ts` + `gpuhistory.ts`; §3.6 fixed in `server/ssh.ts`; §3.7 lazy-loaded topology/resources;
 §3.8 notebook sections 9.6 / 9.7 and two new console tabs. The dashboard also gained a Containers selector

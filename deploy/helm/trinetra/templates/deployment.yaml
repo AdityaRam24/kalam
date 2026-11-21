@@ -17,6 +17,12 @@ spec:
     metadata:
       labels:
         {{- include "trinetra.selectorLabels" . | nindent 8 }}
+        {{- if .Values.ezua.enabled }}
+        # PCAI Import Framework contract: the platform finds a framework's pods
+        # by these labels (HPE's sample charts add them with a Kyverno policy).
+        hpe-ezua/type: vendor-service
+        hpe-ezua/app: {{ .Chart.Name }}
+        {{- end }}
         {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
       annotations:
         checksum/kubeconfig: {{ include (print $.Template.BasePath "/kubeconfig.yaml") . | sha256sum }}
@@ -100,6 +106,12 @@ spec:
               value: {{ .Values.config.metrics.retentionHours | quote }}
             - name: TRINETRA_METRICS_SOURCES
               value: {{ .Values.config.metrics.sources | quote }}
+            {{- end }}
+            {{- if .Values.config.modelUsage.enabled }}
+            - name: TRINETRA_MODEL_POLL_SEC
+              value: {{ .Values.config.modelUsage.intervalSec | quote }}
+            - name: TRINETRA_MODEL_POLL_SOURCES
+              value: {{ .Values.config.modelUsage.sources | quote }}
             {{- end }}
             {{- with .Values.config.extraEnv }}
             {{- toYaml . | nindent 12 }}

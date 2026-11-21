@@ -67,7 +67,25 @@ Each run of `install.sh` also writes `out/trinetra-__VERSION__-pcai-import.tgz`.
 ./install.sh --registry <registry-your-PCAI-pulls-from> --package-only
 ```
 
-Then go to **PCAI → Tools & Frameworks → Import Framework**, upload `out/trinetra-__VERSION__-pcai-import.tgz`, and keep the default values. The chart carries the PCAI `ezua:` block: the platform substitutes `${DOMAIN_NAME}`, and the chart creates the Istio VirtualService and the SSO AuthorizationPolicy.
+Then go to **PCAI → Tools & Frameworks → Import Framework**, upload `out/trinetra-__VERSION__-pcai-import.tgz`, and keep the default values. The chart carries the PCAI `ezua:` block: the platform substitutes `${DOMAIN_NAME}`, and the chart creates the Istio VirtualService and the SSO AuthorizationPolicy. It also labels the pod `hpe-ezua/type: vendor-service` / `hpe-ezua/app: trinetra`, so PCAI can find the framework's pods.
+
+What to enter in the wizard:
+
+| Field | Value |
+|---|---|
+| Framework Name / Version | `Trinetra` / `__VERSION__` |
+| Helm chart | upload `out/trinetra-__VERSION__-pcai-import.tgz`. Do not upload `chart/trinetra-__VERSION__.tgz`: that chart has no image location (`image.repository: trinetra`) and its pod can never pull. |
+| Release Name | lower case, e.g. `trinetra` |
+| Namespace | any, e.g. `trinetra` |
+| Wait | optional; with it, the import only succeeds once the pod is Ready |
+| Debug | tick it: on failure the status then shows helm's own error |
+
+If the import fails:
+
+- **`cannot re-use a name that is still in use`**: Trinetra was already installed in that namespace with `install.sh`. Remove that install first (`./uninstall.sh`, *without* `--purge`), or pick another namespace.
+- **Install times out / pod `ImagePullBackOff`**: the image is not where the chart says. A chart built without `--registry` pulls from the per-node cache (`127.0.0.1:5959`) that `install.sh` set up. It must still be running (`./uninstall.sh --purge` deletes it), and nodes added later do not have the image. Rebuild with `--registry` so every node can pull.
+- **`ClusterRole "trinetra" ... invalid ownership metadata`**: charts built before 2026-11-21 named their ClusterRole after the release only, so a second install clashed with the first. Rebuild the import chart from this bundle. RBAC objects are now named `<release>-<namespace>`.
+- **Imported, but `https://trinetra.<domain>` does not open while an `install.sh` install still exists**: both publish the same hostname and Istio routes to only one of them. Keep one.
 
 ## Verify
 

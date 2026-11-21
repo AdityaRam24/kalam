@@ -32,7 +32,11 @@ import {
   Gauge,
   ScrollText,
   Zap,
-  ShieldCheck
+  ShieldCheck,
+  CircuitBoard,
+  ListChecks,
+  Calculator,
+  Coins
 } from 'lucide-react';
 // The topology map (React Flow + dagre) and the resource pages are the bulk of
 // the bundle; loading them on demand keeps the first paint small.
@@ -53,7 +57,10 @@ const KubectlCheatSheet = lazy(() => import('./components/KubectlCheatSheet'));
 const ClusterResources = lazy(() => import('./components/ClusterResources'));
 const ClusterMetrics = lazy(() => import('./components/ClusterMetrics'));
 const GpuUtilization = lazy(() => import('./components/GpuUtilization'));
+const ModelUsage = lazy(() => import('./components/ModelUsage'));
 const NodeConfig = lazy(() => import('./components/NodeConfig'));
+const HardwareInventory = lazy(() => import('./components/HardwareInventory'));
+type HardwareView = 'inventory' | 'readiness' | 'capacity';
 import CaptureButton from './components/CaptureButton';
 import SectionBoundary from './components/SectionBoundary';
 import { HEALTH_BADGE, podHealthOf, podStatusText, workloadHealthOf, ageOf } from './lib/health';
@@ -173,7 +180,7 @@ interface SystemStatus {
 
 export function App() {
   // Tabs & Config
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'logs' | 'metrics' | 'history' | 'gpu' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'pcaistack' | 'docker' | 'k8s' | 'vms' | 'hardware' | 'logs' | 'metrics' | 'history' | 'gpu' | 'models' | 'chat' | 'security' | 'agents' | 'pcai' | 'cheatsheet'>('dashboard');
 //   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('trinetra_gemini_api_key') || '');
   const [apiKey] = useState<string>(() => localStorage.getItem('trinetra_gemini_api_key') || '');
   // ── Disabled: settings modal state ──
@@ -270,6 +277,7 @@ export function App() {
   useEffect(() => {
     try { localStorage.setItem('trinetra_dashboard_containers', dashContainers); } catch { /* storage unavailable */ }
   }, [dashContainers]);
+  const [hardwareView, setHardwareView] = useState<HardwareView>('inventory');
   const [k8sSubTab, setK8sSubTab] = useState<'all' | 'nodes' | 'pods' | 'deployments' | 'services' | 'resources' | 'nodeconfig'>('all');
   // Status filters on the Kubernetes page ('all' or an exact status word).
   const [podStatusFilter, setPodStatusFilter] = useState<string>('all');
@@ -1471,6 +1479,36 @@ export function App() {
               <span className="nav-item-text">K8s Nodes</span>
               <span className="nav-item-badge">SSH</span>
             </button>
+            {/* Sub-page of K8s Nodes: the same inventory hosts, read for what
+                they physically are (CPU, memory, NICs, disks, BIOS/iLO) and how
+                ready they are for HPE VM Essentials. */}
+            <button
+              className={`nav-item nav-subitem ${activeTab === 'hardware' && hardwareView === 'inventory' ? 'active' : ''}`}
+              onClick={() => { setHardwareView('inventory'); setActiveTab('hardware'); }}
+              title="CPU sockets and features, memory slots, NICs, disks and SMART, PCI/GPUs, BIOS and iLO firmware, KVM/IOMMU readiness, and drift between hosts"
+            >
+              <span className="nav-item-icon"><CircuitBoard size={15} /></span>
+              <span className="nav-item-text">Hardware</span>
+              <span className="nav-item-badge">CPU/iLO</span>
+            </button>
+            <button
+              className={`nav-item nav-subitem ${activeTab === 'hardware' && hardwareView === 'readiness' ? 'active' : ''}`}
+              onClick={() => { setHardwareView('readiness'); setActiveTab('hardware'); }}
+              title="Per VM: will it boot and reach the network after moving from VMware to HPE VM Essentials? virtio drivers, disks by UUID, NIC renames, firmware, guest agent, time sync"
+            >
+              <span className="nav-item-icon"><ListChecks size={15} /></span>
+              <span className="nav-item-text">VME Readiness</span>
+              <span className="nav-item-badge">VMs</span>
+            </button>
+            <button
+              className={`nav-item nav-subitem ${activeTab === 'hardware' && hardwareView === 'capacity' ? 'active' : ''}`}
+              onClick={() => { setHardwareView('capacity'); setActiveTab('hardware'); }}
+              title="Will the VMs fit on the VME servers with a host down? Overcommit, N+1, right-sizing from observed use, servers and socket licences needed"
+            >
+              <span className="nav-item-icon"><Calculator size={15} /></span>
+              <span className="nav-item-text">VME Capacity</span>
+              <span className="nav-item-badge">N+1</span>
+            </button>
             <button
               className={`nav-item ${activeTab === 'logs' ? 'active' : ''}`}
               onClick={() => setActiveTab('logs')}
@@ -1522,6 +1560,16 @@ export function App() {
               <span className="nav-item-icon"><Zap size={18} /></span>
               <span className="nav-item-text">GPU Utilization</span>
               <span className="nav-item-badge">nvidia-smi</span>
+            </button>
+            {/* Sub-page of GPU Utilization: what each model does with those GPUs. */}
+            <button
+              className={`nav-item nav-subitem ${activeTab === 'models' ? 'active' : ''}`}
+              onClick={() => setActiveTab('models')}
+              title="Tokens in and out, requests, failures, time to first token, latency, queueing and KV cache per served model (vLLM, NIM, TGI, Triton)"
+            >
+              <span className="nav-item-icon"><Coins size={15} /></span>
+              <span className="nav-item-text">Model Usage</span>
+              <span className="nav-item-badge">tokens</span>
             </button>
             {/* Disabled: Agent Chat / Agent Teamwork / PCAI Assistant navigation
             {aiEnabled && <>
@@ -1604,10 +1652,12 @@ export function App() {
                 {activeTab === 'docker' && 'Docker Container Operations'}
                 {activeTab === 'k8s' && 'Kubernetes Cluster Management'}
                 {activeTab === 'vms' && 'K8s Nodes — Monitoring & SSH'}
+                {activeTab === 'hardware' && (hardwareView === 'readiness' ? 'VME Readiness — Will Each VM Boot and Connect After Moving from VMware?' : hardwareView === 'capacity' ? 'VME Capacity — Will It Fit, With a Host Down, and How Many Servers?' : 'Hardware Inventory — Servers, VMs, Firmware & Drift')}
                 {activeTab === 'logs' && 'Host Logs — /var/log Collection & Issue Detection'}
                 {activeTab === 'metrics' && 'Observability — Host Telemetry Over Time'}
                 {activeTab === 'history' && 'Cluster Change History — What Changed, When, and Who'}
                 {activeTab === 'gpu' && 'GPU Utilization — Which Model Runs Where, and How Hard'}
+                {activeTab === 'models' && 'Model Usage — Tokens, Requests and Latency per Served Model'}
                 {activeTab === 'chat' && 'Trinetra Agentic DevOps Assistant'}
                 {activeTab === 'security' && 'Container Security & CVE Patching'}
                 {activeTab === 'agents' && 'Multi-Agent Swarm Visualizer'}
@@ -2003,10 +2053,24 @@ export function App() {
             </div>
           )}
 
+          {/* MODEL USAGE (sub-page of GPU Utilization) */}
+          {activeTab === 'models' && (
+            <div className="tab-panel">
+              <ModelUsage source={source} vmNames={vmList.map(v => v.name)} />
+            </div>
+          )}
+
           {/* VIRTUAL MACHINES TAB */}
           {activeTab === 'vms' && (
             <div className="tab-panel">
               <VmMonitor />
+            </div>
+          )}
+
+          {/* HARDWARE INVENTORY (sub-page of K8s Nodes) */}
+          {activeTab === 'hardware' && (
+            <div className="tab-panel">
+              <HardwareInventory source={source} vmNames={vmList.map(v => v.name)} view={hardwareView} onViewChange={setHardwareView} />
             </div>
           )}
 

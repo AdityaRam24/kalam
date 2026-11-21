@@ -19,7 +19,10 @@ import { inspectRouter } from './k8s/inspect.js';
 import { resourcesRouter } from './k8s/resources.js';
 import { topRouter } from './k8s/top.js';
 import { gpuRouter, startGpuPoller } from './k8s/gpu.js';
+import { modelUsageRouter, startModelUsagePoller } from './k8s/modelusage.js';
 import { nodeConfigRouter } from './k8s/nodeconfig.js';
+import { hardwareRouter } from './hardware/inventory.js';
+import { capacityRouter } from './hardware/capacity.js';
 import { whyRouter } from './k8s/why.js';
 import { normalizeClusterItems, parseReplicaSetOwners } from './k8s/workloads.js';
 import { historyRouter } from './history/router.js';
@@ -117,8 +120,15 @@ app.use(inspectRouter);
 app.use(resourcesRouter);
 app.use(topRouter);
 app.use(gpuRouter);
+// Tokens, requests, latency and queueing per served model, from each model server's /metrics.
+app.use(modelUsageRouter);
 // What /etc/kubernetes (and RKE2/k3s) says about each node: certs, flags, drift.
 app.use(nodeConfigRouter);
+// What each host physically is: CPU, memory slots, NICs, disks, PCI, BIOS/BMC,
+// virtualization readiness, and where hosts that should match do not.
+app.use(hardwareRouter);
+// VME capacity plan from the hardware scan cache and stored metrics (no SSH).
+app.use(capacityRouter);
 // Why things are failing: causes, evidence, fixes, and each object's
 // non-negotiable references and label/annotation contracts.
 app.use(whyRouter);
@@ -1187,6 +1197,10 @@ const server = app.listen(Number(PORT), HOST, () => {
   // Opt-in: TRINETRA_GPU_POLL_SEC records per-model GPU history in the background.
   if (startGpuPoller()) {
     console.log(`🎛️  GPU history: sampling ${process.env.TRINETRA_GPU_POLL_SOURCES || 'local'} every ${process.env.TRINETRA_GPU_POLL_SEC}s`);
+  }
+  // Opt-in: TRINETRA_MODEL_POLL_SEC keeps token counts flowing while nobody has the page open.
+  if (startModelUsagePoller()) {
+    console.log(`🔤 Model usage: sampling ${process.env.TRINETRA_MODEL_POLL_SOURCES || 'local'} every ${process.env.TRINETRA_MODEL_POLL_SEC}s`);
   }
 });
 
