@@ -131,6 +131,8 @@ say "Chart"
 say "Bundle"
 sed "s/__VERSION__/$VERSION/" "$HERE/install.sh" >"$B/install.sh"
 cp "$HERE/uninstall.sh" "$B/uninstall.sh"
+# Windows entry points (CRLF via .gitattributes); they run the .sh via Git Bash.
+cp "$HERE/install.bat" "$HERE/uninstall.bat" "$HERE/pcai-import.bat" "$B/"
 cp "$HERE/image-cache.yaml" "$B/manifests/image-cache.yaml"
 sed "s/__VERSION__/$VERSION/g" "$HERE/BUNDLE-README.md" >"$B/README.md"
 cp -r "$TOOLS"/. "$B/bin/"

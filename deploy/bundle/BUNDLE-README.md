@@ -5,6 +5,8 @@ Everything needed to run Trinetra on a Kubernetes cluster, in one archive:
 ```
 trinetra-__VERSION__/
   install.sh / uninstall.sh      one-command install / removal
+  install.bat / uninstall.bat    the same on Windows (double-click or run from cmd)
+  pcai-import.bat                Windows: build the PCAI Import Framework chart
   images/trinetra-__VERSION__.tar       the container image (linux/amd64, docker-load compatible)
   chart/trinetra-__VERSION__.tgz        the Helm chart
   manifests/image-cache.yaml     per-node image cache (used only when no registry is given)
@@ -23,6 +25,18 @@ cd trinetra-__VERSION__
 ```
 
 That is the whole install. It prints the URL at the end. Re-running it upgrades in place with the same settings.
+
+**On Windows**, use the `.bat` files. Run them from cmd or PowerShell, or double-click them:
+
+```bat
+tar -xzf trinetra-__VERSION__-bundle.tgz
+cd trinetra-__VERSION__
+install.bat                                  & rem same options as install.sh
+pcai-import.bat                              & rem PCAI Import Framework chart (asks for the registry)
+uninstall.bat                                & rem asks before removing when double-clicked
+```
+
+They run the same `install.sh` / `uninstall.sh` through Git Bash, so Git for Windows must be installed. Windows' own `bash.exe` (WSL) is never used. Every option below works with the `.bat` too, e.g. `install.bat --registry harbor.example.com/tools`.
 
 What `./install.sh` works out for you:
 
@@ -66,6 +80,8 @@ Each run of `install.sh` also writes `out/trinetra-__VERSION__-pcai-import.tgz`.
 ```bash
 ./install.sh --registry <registry-your-PCAI-pulls-from> --package-only
 ```
+
+On Windows: `pcai-import.bat --registry <registry-your-PCAI-pulls-from>`. Or double-click `pcai-import.bat` and it asks for the registry, user and password (the password is not echoed).
 
 Then go to **PCAI → Tools & Frameworks → Import Framework**, upload `out/trinetra-__VERSION__-pcai-import.tgz`, and keep the default values. The chart carries the PCAI `ezua:` block: the platform substitutes `${DOMAIN_NAME}`, and the chart creates the Istio VirtualService and the SSO AuthorizationPolicy. It also labels the pod `hpe-ezua/type: vendor-service` / `hpe-ezua/app: trinetra`, so PCAI can find the framework's pods.
 
