@@ -22,7 +22,7 @@ interface VmEntry { name: string; host: string; user: string; runsAsRoot?: boole
 type Severity = 'critical' | 'warning' | 'info';
 
 interface Evidence {
-  kind: 'log' | 'health' | 'metric' | 'graph' | 'config';
+  kind: 'log' | 'health' | 'metric' | 'graph' | 'config' | 'hardware';
   severity: Severity; summary: string; detail?: string; count?: number;
 }
 interface Issue {
@@ -595,7 +595,7 @@ export const HostLogs: React.FC = () => {
                             textTransform: 'uppercase', letterSpacing: '0.03em',
                           }}>
                             {e.kind === 'log' ? '/var/log' : e.kind === 'health' ? 'health check'
-                              : e.kind === 'metric' ? 'metric' : e.kind === 'config' ? '/etc/kubernetes' : 'dependency graph'}
+                              : e.kind === 'metric' ? 'metric' : e.kind === 'config' ? '/etc/kubernetes' : e.kind === 'hardware' ? 'hardware inventory' : 'dependency graph'}
                           </span>
                           <span style={{ color: 'var(--text-primary)' }}>
                             {e.summary}

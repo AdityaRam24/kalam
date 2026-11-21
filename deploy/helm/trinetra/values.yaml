@@ -145,6 +145,13 @@ config:
     intervalSec: 30
     retentionHours: 48
     sources: all                        # all | vm-a,vm-b
+  # Model Usage page: samples each model server's /metrics (tokens, requests,
+  # latency) so the 1 h / 24 h / 7 d windows fill even with the page closed.
+  # Cheap: one pod list + one GET per model through the API server, no exec.
+  modelUsage:
+    enabled: true
+    intervalSec: 300
+    sources: local                      # local | local,vm-a,...
   extraEnv: []
 
 # ── SSH to machines outside the cluster ─────────────────────────────────────

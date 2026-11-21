@@ -2,11 +2,14 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   History, RefreshCw, Camera, AlertTriangle, Filter, Search, X, Clock, User,
   Layers, ChevronRight, Server, Database, Shield, Network, Box, Activity,
-  Download, ChevronsDownUp, ChevronsUpDown, FolderTree, BarChart3, Flame, Tag, Crosshair, ShieldCheck, Lightbulb,
+  Download, ChevronsDownUp, ChevronsUpDown, FolderTree, BarChart3, Flame, Tag, Crosshair, ShieldCheck, Lightbulb, Info, Circle,
 } from 'lucide-react';
 import { downloadText, stamp, toCsv } from '../lib/health';
 import { sanitizeFinding, type WhyFinding } from '../lib/sanitize';
 import { FindingCard } from './WhyPanel';
+import { buildStories, digestOf, fieldLabel, type Story } from '../lib/historyStory';
+import { useCharts, SERIES } from '../lib/charts';
+import { BarList, ChartCard, ChartGrid, ChartsToggle } from './Charts';
 
 // The cluster changelog.
 //
@@ -109,6 +112,21 @@ const KIND_STYLE: Record<string, { color: string; label: string; icon: React.Com
   label:     { color: '#A78BFA', label: 'label',      icon: Tag },
   annotation:{ color: '#C084FC', label: 'annotation', icon: Tag },
 };
+
+// Severity says how much to care; it always comes with a word, never colour alone.
+const SEVERITY_META: Record<'info' | 'notice' | 'warning', { label: string; color: string; icon: React.ComponentType<any> }> = {
+  warning: { label: 'Needs attention', color: 'var(--status-error)', icon: AlertTriangle },
+  notice: { label: 'Notable', color: 'var(--hpe-blue, #00A3E0)', icon: Info },
+  info: { label: 'Routine', color: 'var(--text-muted)', icon: Circle },
+};
+
+/** 14:32 for today, "19 Nov 14:32" otherwise — the day is in the group header when grouping by day. */
+function clock(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${t}`;
+}
 
 const SINCE_OPTIONS = [
   { value: '1h', label: 'Last hour' },
@@ -219,6 +237,61 @@ const Stat: React.FC<{ label: string; value: string | number; sub?: string; colo
   </div>
 );
 
+/** Plain words for each kind of change, for the breakdown chart. */
+const KIND_WORDS: Record<string, string> = {
+  created: 'Created', deleted: 'Deleted', image: 'New version', scaled: 'Scaled',
+  spec: 'Settings changed', config: 'Config / secret', network: 'Network', rbac: 'Permissions',
+  storage: 'Storage', schedule: 'Pods moved', restarted: 'Restarts', lifecycle: 'Pod state',
+  cordon: 'Node cordon', taint: 'Node taints', version: 'K8s version', label: 'Labels', annotation: 'Annotations',
+};
+const SEV_ORDER: Array<'warning' | 'notice' | 'info'> = ['warning', 'notice', 'info'];
+
+/** Breakdowns of the stories on screen: what kind, who, where. Clicking a bar filters the timeline. */
+const HistoryCharts: React.FC<{
+  stories: Story[]; onKind: (k: string) => void; onActor: (a: string) => void; onNamespace: (ns: string) => void;
+}> = ({ stories, onKind, onActor, onNamespace }) => {
+  const sevSegs = (list: Story[]) => SEV_ORDER.map((sv) => ({ label: SEVERITY_META[sv].label, value: list.filter((x) => x.severity === sv).length, color: SEVERITY_META[sv].color }));
+  const groupBy = (key: (x: Story) => string) => {
+    const m = new Map<string, Story[]>();
+    for (const x of stories) { const k = key(x); m.set(k, [...(m.get(k) || []), x]); }
+    return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
+  };
+  const kinds = groupBy((x) => x.kind).slice(0, 10).map(([k, list]) => ({
+    key: k, label: KIND_WORDS[k] || k, valueText: String(list.length), segs: sevSegs(list),
+    title: `${KIND_WORDS[k] || k} — click to show only these`, onClick: () => onKind(k),
+  }));
+  const NOBODY = '\u0000';
+  const actors = groupBy((x) => x.actor || NOBODY).slice(0, 8).map(([a, list]) => ({
+    key: a, label: a === NOBODY ? 'not recorded' : a, valueText: String(list.length),
+    sub: a === NOBODY ? 'Kubernetes did not record a writer' : undefined,
+    segs: [{ label: 'Things changed', value: list.length, color: a === NOBODY ? 'var(--series-other)' : SERIES[0] }],
+    title: a === NOBODY ? 'No writer recorded on these objects' : `${a} — click to show only these`,
+    onClick: a === NOBODY ? undefined : () => onActor(a),
+  }));
+  const spaces = groupBy((x) => x.namespace || CLUSTER_SCOPED).slice(0, 8).map(([ns, list]) => ({
+    key: ns, label: ns === CLUSTER_SCOPED ? 'cluster-wide (nodes, PVs…)' : ns, valueText: String(list.length), segs: sevSegs(list),
+    title: `${ns === CLUSTER_SCOPED ? 'Cluster-wide objects' : ns} — click to show only these`, onClick: () => onNamespace(ns),
+  }));
+  const sevLegend = SEV_ORDER.map((sv) => {
+    const M = SEVERITY_META[sv];
+    const Icon = M.icon;
+    return { label: M.label, color: M.color, icon: <Icon size={12} color={M.color} /> };
+  });
+  return (
+    <ChartGrid min={340}>
+      <ChartCard icon={<BarChart3 size={14} />} title="What kind of things happened" note="click a bar to filter" legend={sevLegend}>
+        <BarList rows={kinds} labelWidth="minmax(120px, 46%)" empty="Nothing in this window." />
+      </ChartCard>
+      <ChartCard icon={<User size={14} />} title="Who made the changes" note="helm, kubectl, controllers…">
+        <BarList rows={actors} labelWidth="minmax(110px, 46%)" empty="Nothing in this window." />
+      </ChartCard>
+      <ChartCard icon={<FolderTree size={14} />} title="Busiest namespaces" note="click a bar to filter" legend={sevLegend}>
+        <BarList rows={spaces} labelWidth="minmax(110px, 46%)" empty="Nothing in this window." />
+      </ChartCard>
+    </ChartGrid>
+  );
+};
+
 interface Props {
   /** The app's selected source; used as the starting source here. */
   defaultSource?: string;
@@ -245,7 +318,9 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
   const [search, setSearch] = useState('');
   const [bucket, setBucket] = useState<string | null>(null);
   const [groupBy, setGroupBy] = useState<'day' | 'namespace' | 'object'>('day');
-  const [hideConsequences, setHideConsequences] = useState(false);
+  // One entry per thing someone did (a rollout and the pods it replaced), or every raw event.
+  const [groupRelated, setGroupRelated] = useState(true);
+  const [charts, setCharts] = useCharts();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [autoRefresh, setAutoRefresh] = useState(false);
 
@@ -387,7 +462,6 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
     const end = bucket && facets ? start + facets.bucketMs : 0;
     return changes.filter((c) => {
       if (namespace === CLUSTER_SCOPED && c.namespace) return false;
-      if (hideConsequences && c.causedBy) return false;
       if (linkedOnly && !suspectOf.has(c.id)) return false;
       if (bucket) {
         const t = Date.parse(c.at);
@@ -395,16 +469,21 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
       }
       return true;
     });
-  }, [changes, namespace, bucket, facets, hideConsequences, linkedOnly, suspectOf]);
+  }, [changes, namespace, bucket, facets, linkedOnly, suspectOf]);
+
+  const stories = useMemo(() => buildStories(visible, { group: groupRelated }), [visible, groupRelated]);
+  // The digest reads the whole window, not the current slice, so it stays a summary of the period.
+  const windowStories = useMemo(() => buildStories(changes), [changes]);
+  const digest = useMemo(() => digestOf(windowStories), [windowStories]);
 
   const grouped = useMemo(() => {
-    const keyOf = (c: ChangeEvent) =>
-      groupBy === 'day' ? dayOf(c.actualAt || c.at)
+    const keyOf = (c: Story<ChangeEvent>) =>
+      groupBy === 'day' ? dayOf(c.at)
         : groupBy === 'namespace' ? (c.namespace || CLUSTER_SCOPED)
-          : `${c.objectKind} ${c.namespace ? `${c.namespace}/` : ''}${c.name}`;
-    const out: Array<{ key: string; items: ChangeEvent[] }> = [];
+          : `${c.subject.kind} ${c.subject.namespace ? `${c.subject.namespace}/` : ''}${c.subject.name}`;
+    const out: Array<{ key: string; items: Story<ChangeEvent>[] }> = [];
     const index = new Map<string, number>();
-    for (const c of visible) {
+    for (const c of stories) {
       const k = keyOf(c);
       const i = index.get(k);
       if (i === undefined) { index.set(k, out.length); out.push({ key: k, items: [c] }); }
@@ -413,7 +492,7 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
     // Day groups stay chronological; the others put the busiest first.
     if (groupBy !== 'day') out.sort((a, b) => b.items.length - a.items.length || a.key.localeCompare(b.key));
     return out;
-  }, [visible, groupBy]);
+  }, [stories, groupBy]);
 
   const categories = useMemo(() => {
     const seen = new Map<string, number>();
@@ -450,7 +529,7 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
 
   const clearAll = () => {
     setNamespace('all'); setObjectKind('all'); setActor('all'); setCategory('all');
-    setSeverity('all'); setBucket(null); setSearch(''); setHideConsequences(false); setLinkedOnly(false);
+    setSeverity('all'); setBucket(null); setSearch(''); setLinkedOnly(false);
   };
 
   const exportCsv = () => {
@@ -485,6 +564,7 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
             <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }} title="Reload the timeline every 30 seconds">
               <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> Auto-refresh
             </label>
+            <ChartsToggle on={charts} onChange={setCharts} />
             <button className="btn secondary" onClick={captureNow} disabled={capturing} style={{ padding: '5px 12px', fontSize: 12 }}>
               {capturing ? <RefreshCw size={13} className="animate-spin" /> : <Camera size={13} />} Capture now
             </button>
@@ -606,15 +686,46 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
         );
       })()}
 
+      {/* ─── What happened, in words ─── */}
+      {digest.length > 0 && (
+        <div className="panel-card">
+          <div className="panel-card-title">
+            <h2><Lightbulb size={17} /> What happened — {(SINCE_OPTIONS.find((o) => o.value === since)?.label || 'everything kept').toLowerCase()}</h2>
+            <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+              {changes.length} raw change{changes.length === 1 ? '' : 's'} → {windowStories.length} thing{windowStories.length === 1 ? '' : 's'} that happened · click a line to filter
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {digest.map((d) => {
+              const sm = SEVERITY_META[d.severity];
+              const SIcon = sm.icon;
+              const clickable = !!(d.filter.category || d.filter.search);
+              return (
+                <button key={d.text} type="button" disabled={!clickable}
+                  onClick={() => { if (d.filter.category) setCategory(d.filter.category); if (d.filter.search) setSearch(d.filter.search); }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'transparent', border: 'none', padding: '4px 2px', textAlign: 'left',
+                    cursor: clickable ? 'pointer' : 'default', fontSize: 13, color: 'var(--text-primary)' }}
+                  title={clickable ? 'Show only these in the timeline' : undefined}>
+                  <SIcon size={13} color={sm.color} style={{ flexShrink: 0 }} />
+                  <span>{d.text}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* ─── Overview: numbers, activity, hot spots ─── */}
       {facets && facets.total > 0 && (
         <div className="panel-card">
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 14 }}>
-            <Stat icon={<History size={12} />} label="Changes shown" value={stats.total} sub={`${facets.total} in the window`} />
-            <Stat icon={<AlertTriangle size={12} />} label="Need attention" value={stats.warnings} color={stats.warnings ? 'var(--status-error)' : undefined} />
+            <Stat icon={<History size={12} />} label={groupRelated ? 'Things that happened' : 'Changes shown'} value={groupRelated ? stories.length : stats.total}
+              sub={groupRelated ? `${stats.total} raw change${stats.total === 1 ? '' : 's'} · ${facets.total} in the window` : `${facets.total} in the window`} />
+            <Stat icon={<AlertTriangle size={12} />} label="Need attention" value={groupRelated ? stories.filter((x) => x.severity === 'warning').length : stats.warnings}
+              color={(groupRelated ? stories.some((x) => x.severity === 'warning') : stats.warnings) ? 'var(--status-error)' : undefined} />
             <Stat icon={<Box size={12} />} label="Objects changed" value={stats.objects} />
             <Stat icon={<FolderTree size={12} />} label="Namespaces" value={stats.namespaces} />
-            <Stat icon={<User size={12} />} label="Most active writer" value={stats.topActor ? stats.topActor[0] : '—'} sub={stats.topActor ? `${stats.topActor[1]} changes` : 'no writer recorded'} />
+            <Stat icon={<User size={12} />} label="Most active writer" value={stats.topActor ? stats.topActor[0] : '—'} sub={stats.topActor ? `${stats.topActor[1]} change${stats.topActor[1] === 1 ? '' : 's'}` : 'no writer recorded'} />
             <Stat icon={<Clock size={12} />} label="Latest change" value={stats.latest ? ago(stats.latest) : '—'} sub={stats.latest ? new Date(stats.latest).toLocaleString() : undefined} />
           </div>
 
@@ -646,6 +757,10 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
             </div>
           </div>
         </div>
+      )}
+
+      {charts && stories.length > 0 && (
+        <HistoryCharts stories={stories} onKind={setCategory} onActor={setActor} onNamespace={setNamespace} />
       )}
 
       {/* ─── Filters ─── */}
@@ -717,11 +832,12 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
             <button className={`subnav-pill-btn ${groupBy === 'namespace' ? 'active' : ''}`} onClick={() => setGroupBy('namespace')}>Namespace</button>
             <button className={`subnav-pill-btn ${groupBy === 'object' ? 'active' : ''}`} onClick={() => setGroupBy('object')}>Object</button>
           </div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: 'var(--text-secondary)', cursor: 'pointer' }} title="Hide changes that only happened because of another change in the same capture (e.g. pods replaced by a rollout)">
-            <input type="checkbox" checked={hideConsequences} onChange={(e) => setHideConsequences(e.target.checked)} /> Root changes only
+          <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: 'var(--text-secondary)', cursor: 'pointer' }}
+            title="One entry per thing that was done: a rollout and the pods it replaced, a run of restarts in one workload. Off = every raw event on its own line.">
+            <input type="checkbox" checked={groupRelated} onChange={(e) => setGroupRelated(e.target.checked)} /> Group related changes
           </label>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            <button className="btn secondary" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setExpanded(new Set(visible.map((c) => c.id)))} disabled={!visible.length}>
+            <button className="btn secondary" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setExpanded(new Set(stories.map((c) => c.id)))} disabled={!stories.length}>
               <ChevronsUpDown size={12} /> Expand all
             </button>
             <button className="btn secondary" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setExpanded(new Set())} disabled={!expanded.size}>
@@ -781,101 +897,115 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
             </h3>
             <span style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
               {group.items.some((c) => c.severity === 'warning') && (
-                <span className="badge error" style={{ fontSize: 9.5 }}>{group.items.filter((c) => c.severity === 'warning').length} attention</span>
+                <span className="badge error" style={{ fontSize: 9.5 }}>{group.items.filter((c) => c.severity === 'warning').length} need attention</span>
               )}
-              <span className="badge neutral">{group.items.length}</span>
+              <span className="badge neutral" title={groupRelated ? `${group.items.reduce((a, s) => a + s.events.length, 0)} raw changes` : undefined}>
+                {group.items.length} {groupRelated ? (group.items.length === 1 ? 'entry' : 'entries') : (group.items.length === 1 ? 'change' : 'changes')}
+              </span>
             </span>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {group.items.map((c) => {
-              const style = KIND_STYLE[c.kind] || { color: 'var(--text-muted)', label: c.kind, icon: Box };
+            {group.items.map((st) => {
+              const style = KIND_STYLE[st.kind] || { color: 'var(--text-muted)', label: st.kind, icon: Box };
               const Icon = style.icon;
-              const open = expanded.has(c.id);
-              const when = c.actualAt || c.at;
+              const sev = SEVERITY_META[st.severity];
+              const SevIcon = sev.icon;
+              const open = expanded.has(st.id);
+              const r = st.root;
+              const linked = st.events.filter((e) => suspectOf.has(e.id));
+              const impact = st.events.flatMap((e) => e.impact || []);
+              const cause = st.events.find((e) => e.cause)?.cause;
+              const revision = r?.revision;
+              const others = r ? st.related : st.events;
               return (
                 <div
-                  key={c.id}
+                  key={st.id}
                   style={{
                     background: 'var(--bg-tertiary)',
-                    border: `1px solid ${c.severity === 'warning' ? 'var(--status-error)' : 'var(--border-color)'}`,
+                    border: `1px solid ${st.severity === 'warning' ? 'var(--status-error)' : 'var(--border-color)'}`,
                     borderLeft: `3px solid ${style.color}`,
                     borderRadius: 6,
-                    opacity: c.causedBy ? 0.72 : 1, // consequences sit behind their cause
                   }}
                 >
-                  <div
-                    onClick={() => toggle(c.id)}
-                    style={{ display: 'flex', alignItems: 'baseline', gap: 10, padding: '7px 11px', cursor: 'pointer', fontSize: 12.5 }}
-                  >
+                  <div onClick={() => toggle(st.id)} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 11px', cursor: 'pointer' }}>
                     <ChevronRight
                       size={12}
-                      style={{ color: 'var(--text-muted)', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .15s', flexShrink: 0, alignSelf: 'center' }}
+                      style={{ color: 'var(--text-muted)', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .15s', flexShrink: 0, marginTop: 4 }}
                     />
-                    <span className="badge neutral" style={{ fontSize: 9, color: style.color, borderColor: `${style.color}55`, flexShrink: 0 }}>
-                      <Icon size={9} style={{ verticalAlign: -1, marginRight: 3 }} />{style.label}
-                    </span>
-                    <span style={{ fontSize: 10.5, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
-                      {c.objectKind}
-                    </span>
-                    <span style={{ flex: 1, minWidth: 0 }}>
-                      <span style={{ fontWeight: 600 }}>
-                        {c.namespace && (
-                          <span
-                            onClick={(e) => { e.stopPropagation(); setNamespace(c.namespace!); }}
-                            title={`Show only namespace ${c.namespace}`}
-                            style={{ cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: 2 }}
-                          >{c.namespace}</span>
-                        )}
-                        {c.namespace ? '/' : ''}{c.name}
-                      </span>
-                      <span style={{ color: 'var(--text-secondary)' }}> — {c.summary.replace(new RegExp(`^${c.objectKind} \\S+: `), '')}</span>
-                    </span>
-                    {c.actor && (
-                      <span
-                        onClick={(e) => { e.stopPropagation(); setActor(c.actor!); }}
-                        style={{ fontSize: 10.5, color: 'var(--text-muted)', whiteSpace: 'nowrap', flexShrink: 0, cursor: 'pointer' }}
-                        title={`${c.actor} (${c.actorOp || 'wrote'}) — click to show only this writer's changes`}
-                      >
-                        <User size={9} style={{ verticalAlign: -1 }} /> {c.actor}
-                      </span>
-                    )}
-                    {suspectOf.has(c.id) && (
-                      <span className="badge error" style={{ fontSize: 9, flexShrink: 0, textTransform: 'none' }}
-                        title={suspectOf.get(c.id)!.map((s) => `${s.object}: ${s.title} — ${s.reason}`).join('\n')}>
-                        <Crosshair size={9} style={{ verticalAlign: -1, marginRight: 3 }} />likely cause
-                      </span>
-                    )}
-                    <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap', flexShrink: 0 }} title={new Date(when).toLocaleString()}>
-                      {ago(when)}
-                    </span>
-                  </div>
-                  {!open && c.impact && c.impact.length > 0 && (
-                    <div onClick={() => toggle(c.id)} style={{ padding: '0 11px 7px 34px', fontSize: 11.5, color: 'var(--text-secondary)', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                      title={c.impact.join('\n')}>
-                      → {c.impact[0]}{c.impact.length > 1 ? ` (+${c.impact.length - 1})` : ''}
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-secondary)', flexShrink: 0 }}>
+                          <SevIcon size={12} color={sev.color} /> {sev.label}
+                        </span>
+                        <span className="badge neutral" style={{ fontSize: 9, color: style.color, borderColor: `${style.color}55`, flexShrink: 0 }}>
+                          <Icon size={9} style={{ verticalAlign: -1, marginRight: 3 }} />{style.label}
+                        </span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-heading)' }}>{st.title}</span>
+                      </div>
+                      {(st.detail || impact.length > 0) && (
+                        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 3, lineHeight: 1.45 }}>
+                          {st.detail}
+                          {impact.length > 0 && <span title={impact.join('\n')}>{st.detail ? ' · ' : ''}→ {impact[0]}{impact.length > 1 ? ` (+${impact.length - 1})` : ''}</span>}
+                        </div>
+                      )}
                     </div>
-                  )}
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3, flexShrink: 0, fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                      <span title={`${new Date(st.at).toLocaleString()}${st.start !== st.at ? ` (from ${new Date(st.start).toLocaleString()})` : ''}`}>
+                        <Clock size={10} style={{ verticalAlign: -1 }} /> {clock(st.at)} · {ago(st.at)}
+                      </span>
+                      {st.actor ? (
+                        <span onClick={(e) => { e.stopPropagation(); setActor(st.actor!); }} style={{ cursor: 'pointer' }}
+                          title={`Written by ${st.actor}${st.actorOp ? ` (${st.actorOp})` : ''} — click to show only this writer's changes`}>
+                          <User size={10} style={{ verticalAlign: -1 }} /> by {st.actor}
+                        </span>
+                      ) : (
+                        <span title="Kubernetes did not record who made this change"><User size={10} style={{ verticalAlign: -1 }} /> writer not recorded</span>
+                      )}
+                      {linked.length > 0 && (
+                        <span className="badge error" style={{ fontSize: 9, textTransform: 'none' }}
+                          title={linked.flatMap((e) => suspectOf.get(e.id)!).map((s) => `${s.object}: ${s.title} — ${s.reason}`).join('\n')}>
+                          <Crosshair size={9} style={{ verticalAlign: -1, marginRight: 3 }} />likely cause of a failure
+                        </span>
+                      )}
+                    </div>
+                  </div>
 
                   {open && (
-                    <div style={{ padding: '2px 12px 11px 34px', borderTop: '1px solid var(--border-color)' }}>
-                      {/* How we know — the attribution line */}
-                      <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', margin: '9px 0' }}>
-                        {c.actor ? (
-                          <>Written by <strong>{c.actor}</strong>{c.actorOp ? ` (${c.actorOp})` : ''}
-                            {c.actualAt ? ` at ${new Date(c.actualAt).toLocaleString()}` : ''} — from the object's managedFields.</>
-                        ) : (
-                          <>No writer recorded for this change. Kubernetes only attributes writes when the API server tracks managed fields; controllers and kubelet-driven changes often have none.</>
-                        )}
-                        {c.revision && <> · deployment revision <code className="code-tag">{c.revision}</code></>}
+                    <div style={{ padding: '4px 12px 12px 34px', borderTop: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: 9 }}>
+                      {/* Who and when — and how Trinetra knows */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 12, rowGap: 4, fontSize: 12, marginTop: 8 }}>
+                        <span style={{ color: 'var(--text-muted)' }}>Who</span>
+                        <span style={{ color: 'var(--text-primary)' }}>
+                          {st.actor
+                            ? <><strong>{st.actor}</strong>{st.actorOp === 'Apply' ? ' — a declarative apply (Helm, Argo CD, kubectl apply)' : st.actorOp === 'Update' ? ' — a direct update (kubectl edit/set/scale, or a controller)' : ''}</>
+                            : <span style={{ color: 'var(--text-secondary)' }}>Not recorded. Kubernetes names the writer only in an object's managedFields; restarts, rescheduling and other changes made by controllers or the kubelet usually have none.</span>}
+                        </span>
+                        <span style={{ color: 'var(--text-muted)' }}>When</span>
+                        <span style={{ color: 'var(--text-primary)' }}>
+                          {r?.actualAt
+                            ? <>{new Date(r.actualAt).toLocaleString()} <span style={{ color: 'var(--text-muted)' }}>(recorded on the object) · seen by Trinetra {new Date(r.at).toLocaleString()}</span></>
+                            : st.start !== st.at
+                              ? <>between {new Date(st.start).toLocaleString()} and {new Date(st.at).toLocaleString()}</>
+                              : <>{new Date(st.at).toLocaleString()} <span style={{ color: 'var(--text-muted)' }}>— when Trinetra's capture noticed it{poller?.intervalSec ? ` (captures run every ${poller.intervalSec}s, so it happened up to that long before)` : ''}</span></>}
+                        </span>
+                        <span style={{ color: 'var(--text-muted)' }}>What</span>
+                        <span style={{ color: 'var(--text-primary)' }}>
+                          {st.subject.kind} <strong>{st.subject.namespace ? `${st.subject.namespace}/` : ''}{st.subject.name}</strong>
+                          {revision && <> · deployment revision <code className="code-tag">{revision}</code></>}
+                        </span>
+                        {cause && <>
+                          <span style={{ color: 'var(--text-muted)' }}>Note left</span>
+                          <span style={{ color: 'var(--text-primary)' }}>{cause} <span style={{ color: 'var(--text-muted)' }}>(kubernetes.io/change-cause)</span></span>
+                        </>}
                       </div>
 
-                      {suspectOf.has(c.id) && (
-                        <div style={{ fontSize: 11.5, marginBottom: 9, padding: '7px 10px', borderRadius: 5, border: '1px solid var(--status-error)', background: 'var(--bg-secondary)' }}>
+                      {linked.length > 0 && (
+                        <div style={{ fontSize: 11.5, padding: '7px 10px', borderRadius: 5, border: '1px solid var(--status-error)', background: 'var(--bg-secondary)' }}>
                           <div style={{ fontWeight: 650, marginBottom: 3, display: 'flex', alignItems: 'center', gap: 5 }}>
                             <Crosshair size={12} style={{ color: 'var(--status-error)' }} /> Linked to what is failing now
                           </div>
-                          {suspectOf.get(c.id)!.map((s, i) => (
+                          {linked.flatMap((e) => suspectOf.get(e.id)!).map((s, i) => (
                             <div key={i} style={{ color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                               <strong>{s.object}</strong>: {s.title}
                               <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>Why linked: {s.reason}</div>
@@ -884,58 +1014,77 @@ export const ClusterHistory: React.FC<Props> = ({ defaultSource }) => {
                         </div>
                       )}
 
-                      {c.impact && c.impact.length > 0 && (
-                        <div style={{ fontSize: 11.5, marginBottom: 9, padding: '7px 10px', borderRadius: 5, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)' }}>
-                          <div style={{ fontWeight: 650, marginBottom: 3 }}>What this change means</div>
+                      {impact.length > 0 && (
+                        <div style={{ fontSize: 11.5, padding: '7px 10px', borderRadius: 5, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)' }}>
+                          <div style={{ fontWeight: 650, marginBottom: 3 }}>What this means for the rest of the cluster</div>
                           <ul style={{ margin: 0, paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                            {c.impact.map((line, i) => <li key={i} style={{ color: 'var(--text-secondary)', lineHeight: 1.5 }}>{line}</li>)}
+                            {impact.map((line, i) => <li key={i} style={{ color: 'var(--text-secondary)', lineHeight: 1.5 }}>{line}</li>)}
                           </ul>
                         </div>
                       )}
 
-                      {c.cause && (
-                        <div style={{ fontSize: 11.5, marginBottom: 9, padding: '6px 9px', background: 'var(--bg-secondary)', borderRadius: 5, border: '1px solid var(--border-color)' }}>
-                          <strong>Change cause:</strong> {c.cause}
+                      {r && r.fields.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 650, marginBottom: 4 }}>What changed</div>
+                          <div className="table-wrapper" style={{ maxHeight: 280, overflow: 'auto' }}>
+                            <table className="resource-table" style={{ fontSize: 11.5 }}>
+                              <thead><tr><th>Setting</th><th>Before</th><th>After</th></tr></thead>
+                              <tbody>
+                                {r.fields.map((f) => (
+                                  <tr key={f.path}>
+                                    <td style={{ whiteSpace: 'nowrap' }}>
+                                      {fieldLabel(f.path)}
+                                      {fieldLabel(f.path) !== f.path && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-muted)' }}>{f.path}</div>}
+                                    </td>
+                                    <td style={{ fontFamily: 'var(--font-mono)', color: f.from === undefined ? 'var(--text-muted)' : 'var(--status-error)', wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                                      {f.from === undefined ? '(not set)' : f.from}
+                                    </td>
+                                    <td style={{ fontFamily: 'var(--font-mono)', color: f.to === undefined ? 'var(--text-muted)' : 'var(--hpe-green)', wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                                      {f.to === undefined ? '(removed)' : f.to}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
                         </div>
                       )}
 
-                      {c.causedBy && (
-                        <div style={{ fontSize: 11.5, marginBottom: 9, color: 'var(--text-muted)' }}>
-                          This is a consequence of another change in the same capture, not an independent event.
+                      {others.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 650, marginBottom: 4 }}>
+                            {r ? `Related changes (${others.length}) — happened because of this` : `The ${others.length} change${others.length === 1 ? '' : 's'} in this entry`}
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 260, overflowY: 'auto' }}>
+                            {others.slice(0, 40).map((e) => {
+                              const ks = KIND_STYLE[e.kind] || { color: 'var(--text-muted)', label: e.kind, icon: Box };
+                              return (
+                                <div key={e.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 11.5, padding: '2px 0' }}>
+                                  <span style={{ color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>{clock(e.actualAt || e.at)}</span>
+                                  <span className="badge neutral" style={{ fontSize: 8.5, color: ks.color, borderColor: `${ks.color}55`, flexShrink: 0 }}>{ks.label}</span>
+                                  <span style={{ color: 'var(--text-secondary)', minWidth: 0 }}>
+                                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-muted)' }}>{e.objectKind}</span>{' '}
+                                    <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{e.name}</strong>
+                                    {' — '}{e.summary.replace(new RegExp(`^${e.objectKind} \\S+:?\\s*`), '').replace(/ — from .*$/, '')}
+                                    {e.fields.length > 0 && e.kind !== 'created' && e.kind !== 'deleted' && (
+                                      <span style={{ color: 'var(--text-muted)' }}>
+                                        {' '}({e.fields.slice(0, 2).map((f) => `${fieldLabel(f.path)}: ${f.from ?? '—'} → ${f.to ?? '—'}`).join('; ')}{e.fields.length > 2 ? '; …' : ''})
+                                      </span>
+                                    )}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                            {others.length > 40 && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>…and {others.length - 40} more (the CSV export has all of them)</span>}
+                          </div>
                         </div>
                       )}
 
-                      {c.fields.length > 0 && (
-                        <div className="table-wrapper" style={{ maxHeight: 260, overflow: 'auto' }}>
-                          <table className="resource-table" style={{ fontSize: 11 }}>
-                            <thead>
-                              <tr><th>Field</th><th>Before</th><th>After</th></tr>
-                            </thead>
-                            <tbody>
-                              {c.fields.map((f) => (
-                                <tr key={f.path}>
-                                  <td style={{ fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>{f.path}</td>
-                                  <td style={{ fontFamily: 'var(--font-mono)', color: f.from === undefined ? 'var(--text-muted)' : 'var(--status-error)', wordBreak: 'break-all' }}>
-                                    {f.from === undefined ? '—' : f.from}
-                                  </td>
-                                  <td style={{ fontFamily: 'var(--font-mono)', color: f.to === undefined ? 'var(--text-muted)' : 'var(--hpe-green)', wordBreak: 'break-all' }}>
-                                    {f.to === undefined ? '—' : f.to}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-
-                      <div style={{ marginTop: 9, fontSize: 10.5, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <span>
-                          observed {new Date(c.at).toLocaleString()} · source {c.source}
-                          {c.owner && <> · owned by {c.owner}</>}
-                        </span>
+                      <div style={{ fontSize: 10.5, color: 'var(--text-muted)', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <span>source {r?.source || st.events[0]?.source}{r?.owner && <> · owned by {r.owner}</>} · {st.events.length} raw change{st.events.length === 1 ? '' : 's'}</span>
                         <button className="btn secondary" style={{ padding: '1px 7px', fontSize: 10.5 }}
-                          onClick={() => { setSearch(c.name); if (c.namespace) setNamespace(c.namespace); setObjectKind(c.objectKind); }}>
-                          All changes to this object
+                          onClick={() => { setSearch(st.subject.name); if (st.subject.namespace) setNamespace(st.subject.namespace); setObjectKind(st.subject.kind); }}>
+                          All changes to {st.subject.kind} {st.subject.name}
                         </button>
                       </div>
                     </div>

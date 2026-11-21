@@ -19,6 +19,7 @@ import { levelOf, valueAt, METRICS, type MetricId } from '../metrics/model.js';
 import { readSamples, listSources } from '../metrics/store.js';
 import { correlate, verdict, type CorrelateInput, type Issue } from './correlate.js';
 import { cachedNodeConfig, collectNodeConfig } from '../k8s/nodeconfig.js';
+import { cachedHardware } from '../hardware/inventory.js';
 
 export const insightRouter = Router();
 
@@ -110,6 +111,9 @@ insightRouter.post('/api/insight/host', async (req, res) => {
       metrics,
       graph,
       config,
+      // Hardware is only ever read from the Hardware page's scan: it is a
+      // two-minute probe, too slow to run on every "why".
+      hardware: cachedHardware(vm.name, 24 * 3600_000)?.checks,
     });
 
     res.json({
@@ -144,6 +148,7 @@ insightRouter.get('/api/insight/fleet', async (_req, res) => {
       metrics,
       graph: graphFor(source),
       config: cachedNodeConfig(source, 30 * 60_000)?.checks,
+      hardware: cachedHardware(source, 24 * 3600_000)?.checks,
       unreachable: cur && !cur.reachable ? (cur.error || 'Host unreachable') : undefined,
     });
     hosts[source] = { verdict: verdict(issues), issues };
