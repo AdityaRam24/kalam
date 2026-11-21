@@ -41,7 +41,8 @@ service:
 #
 # Rendered only when the Istio APIs exist in the cluster AND the endpoint is a
 # real hostname (not an unsubstituted ${...} placeholder), so the same chart
-# installs cleanly on a non-PCAI cluster.
+# installs cleanly on a non-PCAI cluster. enabled also puts PCAI's
+# hpe-ezua/type: vendor-service and hpe-ezua/app labels on the pod.
 ezua:
   enabled: true
   domainName: "${DOMAIN_NAME}"

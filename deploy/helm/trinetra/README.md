@@ -59,6 +59,11 @@ ezua:
 - **helm CLI:** set the endpoint yourself: `--set ezua.virtualService.endpoint=trinetra.<domain>`.
   `install.sh` detects the domain from the gateway.
 
+With `ezua.enabled` the pod also carries PCAI's `hpe-ezua/type: vendor-service`
+and `hpe-ezua/app` labels. The ClusterRole/ClusterRoleBinding are named
+`<fullname>-<namespace>`, so an Import Framework install can sit beside a CLI
+install without the two claiming the same cluster-wide objects.
+
 The VirtualService and AuthorizationPolicy render only when the Istio APIs exist
 and the endpoint is a real hostname. On a non-PCAI cluster, or with the
 placeholder still in place, they are skipped rather than failing the install.

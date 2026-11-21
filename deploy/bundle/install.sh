@@ -463,9 +463,14 @@ cp "$VALUES" "$OUT/values-$RELEASE.yaml"
 step "PCAI import chart"
 mkdir -p "$WORK/pkg"
 tar -xzf - -C "$WORK/pkg" <"$CHART"   # stdin: GNU tar reads "C:/x" as host:path
-awk -v repo="$IMG_REPO" -v dig="$IMG_DIGEST" -v ps="$PULL_SECRET" -v nollm="$NO_LLM" -v lurl="$LLM_URL" -v lmodel="$LLM_MODEL" '
+awk -v repo="$IMG_REPO" -v dig="$IMG_DIGEST" -v ps="$PULL_SECRET" -v nollm="$NO_LLM" -v lurl="$LLM_URL" -v lmodel="$LLM_MODEL" \
+    -v pers="$PERSISTENCE" -v sc="$STORAGE_CLASS" '
   /^image:/ { inimg=1 }
   /^[a-zA-Z]/ && !/^image:/ { inimg=0 }
+  /^persistence:/ { inpers=1 }
+  /^[a-zA-Z]/ && !/^persistence:/ { inpers=0 }
+  inpers && pers == "on" && /^  enabled:/ { print "  enabled: true   # set by install.sh (this cluster has a StorageClass)"; next }
+  inpers && sc != "" && /^  storageClass:/ { print "  storageClass: \"" sc "\""; next }
   /^llm:/ { inllm=1 }
   /^[a-zA-Z]/ && !/^llm:/ { inllm=0 }
   inllm && nollm == "true" && /^  enabled:/ { print "  enabled: false   # set by install.sh --no-llm"; next }

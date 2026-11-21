@@ -27,6 +27,19 @@ app.kubernetes.io/name: {{ include "trinetra.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* Name of the RBAC objects. A ClusterRole/ClusterRoleBinding is not
+     namespaced, so two installs that share a release name (install.sh's in
+     "trinetra" and a PCAI Import Framework one in another namespace) would
+     claim the same object, and helm refuses the second with "invalid
+     ownership metadata". The namespace in the name keeps them apart. */}}
+{{- define "trinetra.rbacName" -}}
+{{- if .Values.rbac.clusterWide -}}
+{{- printf "%s-%s" (include "trinetra.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- include "trinetra.fullname" . -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "trinetra.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "trinetra.fullname" .) .Values.serviceAccount.name -}}
