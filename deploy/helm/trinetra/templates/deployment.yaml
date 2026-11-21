@@ -21,7 +21,7 @@ spec:
         # PCAI Import Framework contract: the platform finds a framework's pods
         # by these labels (HPE's sample charts add them with a Kyverno policy).
         hpe-ezua/type: vendor-service
-        hpe-ezua/app: {{ .Chart.Name }}
+        hpe-ezua/app: {{ .Chart.Name | quote }}
         {{- end }}
         {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
       annotations:
