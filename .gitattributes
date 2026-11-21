@@ -9,4 +9,5 @@
 *.ps1   text eol=crlf
 
 # Ready-built bundles are over GitHub's 100 MB file limit: Git LFS.
-release/*.tgz filter=lfs diff=lfs merge=lfs -text
+# (The small PCAI import chart next to them stays a normal git file.)
+release/*-bundle.tgz filter=lfs diff=lfs merge=lfs -text
